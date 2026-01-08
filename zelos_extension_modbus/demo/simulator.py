@@ -16,9 +16,9 @@ import time
 from typing import TYPE_CHECKING
 
 from pymodbus.datastore import (
+    ModbusDeviceContext,
     ModbusSequentialDataBlock,
     ModbusServerContext,
-    ModbusSlaveContext,
 )
 from pymodbus.server import StartAsyncTcpServer
 
@@ -199,10 +199,10 @@ class SimulatorUpdater:
 
     def _update_datastore(self, values: dict) -> None:
         """Write simulator values to Modbus datastore."""
-        slave = self.context[0]
+        device = self.context[0]
 
         # Holding registers (float32 values as register pairs)
-        hr = slave.store["h"]
+        hr = device.store["h"]
 
         # Voltages
         r1, r2 = float32_to_registers(values["voltage_l1"])
@@ -243,7 +243,7 @@ class SimulatorUpdater:
         hr.setValues(ADDR_TEMPERATURE + 1, [values["temperature"] & 0xFFFF])
 
         # Coils
-        coils = slave.store["c"]
+        coils = device.store["c"]
         coils.setValues(ADDR_COIL_RELAY1 + 1, [values["relay1"]])
         coils.setValues(ADDR_COIL_RELAY2 + 1, [values["relay2"]])
         coils.setValues(ADDR_COIL_ALARM + 1, [values["alarm"]])
@@ -264,14 +264,14 @@ def create_demo_context() -> ModbusServerContext:
     # Input registers: 100 registers
     ir_block = ModbusSequentialDataBlock(0, [0] * 100)
 
-    slave = ModbusSlaveContext(
+    device = ModbusDeviceContext(
         di=di_block,
         co=coil_block,
         hr=hr_block,
         ir=ir_block,
     )
 
-    return ModbusServerContext(slaves=slave, single=True)
+    return ModbusServerContext(slaves=device, single=True)
 
 
 async def run_demo_server(
