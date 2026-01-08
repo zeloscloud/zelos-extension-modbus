@@ -173,7 +173,7 @@ class ModbusClient:
         source_name = self.register_map.name if self.register_map else "modbus"
         self._source = zelos_sdk.TraceSourceCacheLast(source_name)
 
-        if not self.register_map or not self.register_map.registers:
+        if not self.register_map or not self.register_map.events:
             # No register map - create a generic raw event
             self._source.add_event(
                 "raw",
@@ -184,9 +184,8 @@ class ModbusClient:
             )
             return
 
-        # Group registers by type for separate events
-        for reg_type in ["holding", "input", "coil", "discrete_input"]:
-            regs = self.register_map.get_by_type(reg_type)
+        # Create events from user-defined event names
+        for event_name, regs in self.register_map.events.items():
             if not regs:
                 continue
 
@@ -197,7 +196,7 @@ class ModbusClient:
                     zelos_sdk.TraceEventFieldMetadata(reg.name, dtype, reg.unit)
                 )
 
-            self._source.add_event(reg_type, fields)
+            self._source.add_event(event_name, fields)
 
     def _get_sdk_datatype(self, datatype: str) -> zelos_sdk.DataType:
         """Map register datatype to Zelos SDK DataType."""
@@ -482,26 +481,22 @@ class ModbusClient:
         """Poll all registers in the register map.
 
         Returns:
-            Dictionary of {register_type: {name: value}}
+            Dictionary of {event_name: {field_name: value}}
         """
         if not self.register_map:
             return {}
 
         results: dict[str, dict[str, Any]] = {}
 
-        for reg_type in ["holding", "input", "coil", "discrete_input"]:
-            regs = self.register_map.get_by_type(reg_type)
-            if not regs:
-                continue
-
-            type_results: dict[str, Any] = {}
+        for event_name, regs in self.register_map.events.items():
+            event_results: dict[str, Any] = {}
             for reg in regs:
                 value = await self.read_register_value(reg)
                 if value is not None:
-                    type_results[reg.name] = value
+                    event_results[reg.name] = value
 
-            if type_results:
-                results[reg_type] = type_results
+            if event_results:
+                results[event_name] = event_results
 
         return results
 
@@ -509,18 +504,18 @@ class ModbusClient:
         """Log polled values to Zelos trace source.
 
         Args:
-            values: Dictionary of {register_type: {name: value}}
+            values: Dictionary of {event_name: {field_name: value}}
         """
         if not self._source:
             return
 
-        for reg_type, type_values in values.items():
-            if not type_values:
+        for event_name, event_values in values.items():
+            if not event_values:
                 continue
 
-            event = getattr(self._source, reg_type, None)
+            event = getattr(self._source, event_name, None)
             if event:
-                event.log(**type_values)
+                event.log(**event_values)
 
     def start(self) -> None:
         """Start the client (initialize trace source)."""

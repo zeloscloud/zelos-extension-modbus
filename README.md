@@ -8,7 +8,7 @@ A Zelos extension for reading, writing, and monitoring Modbus registers. Built w
 
 - **Modbus TCP and RTU** transport support
 - **All register types**: Holding registers, input registers, coils, discrete inputs
-- **JSON register maps** for human-readable field names in the Zelos App
+- **User-defined events** for semantic grouping of registers in the Zelos App
 - **Real-time polling** with configurable intervals
 - **Interactive actions** for reading/writing registers from the Zelos App
 - **Multiple data types**: uint16, int16, uint32, int32, float32, uint64, int64, float64, bool
@@ -37,45 +37,41 @@ Configure the extension through the Zelos App UI with your connection settings a
 
 ## Register Map Format
 
-Create a JSON file to define human-readable names for your Modbus registers:
+The register map uses **user-defined events** to group registers semantically. Event names become Zelos trace events, and register names become fields within those events.
 
 ```json
 {
   "name": "my_device",
-  "registers": [
-    {
-      "address": 0,
-      "name": "voltage",
-      "type": "holding",
-      "datatype": "uint16",
-      "unit": "V",
-      "scale": 0.1
-    },
-    {
-      "address": 1,
-      "name": "current",
-      "type": "holding",
-      "datatype": "uint16",
-      "unit": "A",
-      "scale": 0.01
-    },
-    {
-      "address": 0,
-      "name": "relay",
-      "type": "coil",
-      "datatype": "bool"
-    }
-  ]
+  "events": {
+    "temperature": [
+      {"name": "pcb_temp", "address": 123, "type": "holding", "datatype": "uint16", "unit": "°C", "scale": 0.1},
+      {"name": "overtemp", "address": 456, "type": "coil"}
+    ],
+    "voltage/ac": [
+      {"name": "phsA", "address": 0, "type": "holding", "datatype": "float32", "unit": "V"},
+      {"name": "phsB", "address": 2, "type": "holding", "datatype": "float32", "unit": "V"}
+    ],
+    "voltage/dc": [
+      {"name": "battery_V", "address": 10, "type": "holding", "datatype": "float32", "unit": "V"}
+    ]
+  }
 }
 ```
+
+This creates three Zelos events:
+- `temperature` with fields `pcb_temp` and `overtemp`
+- `voltage/ac` with fields `phsA` and `phsB`
+- `voltage/dc` with field `battery_V`
+
+Registers of different Modbus types (holding, coil, input, discrete_input) can be mixed within the same event.
 
 ### Register Fields
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `address` | Yes | - | Register address (0-65535) |
-| `name` | Yes | - | Human-readable name |
-| `type` | No | `holding` | Register type: `holding`, `input`, `coil`, `discrete_input` |
+| `name` | Yes | - | Field name in Zelos event |
+| `address` | Yes | - | Modbus register address (0-65535) |
+| `type` | No | `holding` | Modbus type: `holding`, `input`, `coil`, `discrete_input` |
 | `datatype` | No | `uint16` | Data type (see below) |
 | `unit` | No | `""` | Unit string for display |
 | `scale` | No | `1.0` | Scale factor applied to value |

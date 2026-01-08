@@ -44,37 +44,42 @@ class TestRegisterMap:
     def test_from_dict_minimal(self):
         """Test loading register map with minimal fields."""
         data = {
-            "registers": [
-                {"address": 0, "name": "voltage"},
-                {"address": 1, "name": "current"},
-            ]
+            "events": {
+                "sensors": [
+                    {"address": 0, "name": "voltage"},
+                    {"address": 1, "name": "current"},
+                ]
+            }
         }
         reg_map = RegisterMap.from_dict(data)
         assert len(reg_map.registers) == 2
-        assert reg_map.registers[0].name == "voltage"
-        assert reg_map.registers[1].name == "current"
+        assert reg_map.event_names == ["sensors"]
+        assert reg_map.get_event("sensors")[0].name == "voltage"
+        assert reg_map.get_event("sensors")[1].name == "current"
 
     def test_from_dict_full(self):
         """Test loading register map with all fields."""
         data = {
             "name": "test_device",
             "description": "Test device description",
-            "registers": [
-                {
-                    "address": 0,
-                    "name": "voltage",
-                    "type": "holding",
-                    "datatype": "float32",
-                    "unit": "V",
-                    "scale": 0.1,
-                    "description": "Input voltage",
-                }
-            ],
+            "events": {
+                "electrical": [
+                    {
+                        "address": 0,
+                        "name": "voltage",
+                        "type": "holding",
+                        "datatype": "float32",
+                        "unit": "V",
+                        "scale": 0.1,
+                        "description": "Input voltage",
+                    }
+                ]
+            },
         }
         reg_map = RegisterMap.from_dict(data)
         assert reg_map.name == "test_device"
         assert reg_map.description == "Test device description"
-        reg = reg_map.registers[0]
+        reg = reg_map.get_event("electrical")[0]
         assert reg.address == 0
         assert reg.name == "voltage"
         assert reg.type == "holding"
@@ -83,11 +88,35 @@ class TestRegisterMap:
         assert reg.scale == 0.1
         assert reg.count == 2  # float32 uses 2 registers
 
+    def test_from_dict_multiple_events(self):
+        """Test loading register map with multiple user-defined events."""
+        data = {
+            "events": {
+                "temperature": [
+                    {"address": 0, "name": "pcb_temp", "type": "holding"},
+                    {"address": 1, "name": "overtemp", "type": "coil"},
+                ],
+                "voltage/ac": [
+                    {"address": 10, "name": "phsA", "type": "holding", "datatype": "float32"},
+                ],
+            }
+        }
+        reg_map = RegisterMap.from_dict(data)
+        assert set(reg_map.event_names) == {"temperature", "voltage/ac"}
+        assert len(reg_map.get_event("temperature")) == 2
+        assert len(reg_map.get_event("voltage/ac")) == 1
+        # Registers can have different types within same event
+        temp_regs = reg_map.get_event("temperature")
+        assert temp_regs[0].type == "holding"
+        assert temp_regs[1].type == "coil"
+
     def test_from_file(self):
         """Test loading register map from JSON file."""
         data = {
             "name": "file_test",
-            "registers": [{"address": 0, "name": "test_reg"}],
+            "events": {
+                "test_event": [{"address": 0, "name": "test_reg"}]
+            },
         }
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(data, f)
@@ -103,35 +132,29 @@ class TestRegisterMap:
         with pytest.raises(FileNotFoundError):
             RegisterMap.from_file("/nonexistent/path.json")
 
-    def test_get_by_type(self):
-        """Test filtering registers by type."""
+    def test_registers_property(self):
+        """Test flat registers property across events."""
         data = {
-            "registers": [
-                {"address": 0, "name": "hold1", "type": "holding"},
-                {"address": 1, "name": "hold2", "type": "holding"},
-                {"address": 0, "name": "input1", "type": "input"},
-                {"address": 0, "name": "coil1", "type": "coil"},
-            ]
+            "events": {
+                "event1": [
+                    {"address": 0, "name": "reg1"},
+                    {"address": 1, "name": "reg2"},
+                ],
+                "event2": [
+                    {"address": 2, "name": "reg3"},
+                ],
+            }
         }
         reg_map = RegisterMap.from_dict(data)
-
-        holding = reg_map.get_by_type("holding")
-        assert len(holding) == 2
-        assert all(r.type == "holding" for r in holding)
-
-        inputs = reg_map.get_by_type("input")
-        assert len(inputs) == 1
-
-        coils = reg_map.get_by_type("coil")
-        assert len(coils) == 1
+        assert len(reg_map.registers) == 3
 
     def test_get_by_name(self):
-        """Test finding register by name."""
+        """Test finding register by name across events."""
         data = {
-            "registers": [
-                {"address": 0, "name": "voltage"},
-                {"address": 1, "name": "current"},
-            ]
+            "events": {
+                "sensors": [{"address": 0, "name": "voltage"}],
+                "relays": [{"address": 1, "name": "current"}],
+            }
         }
         reg_map = RegisterMap.from_dict(data)
 
@@ -139,16 +162,22 @@ class TestRegisterMap:
         assert reg is not None
         assert reg.address == 0
 
+        reg = reg_map.get_by_name("current")
+        assert reg is not None
+        assert reg.address == 1
+
         reg = reg_map.get_by_name("nonexistent")
         assert reg is None
 
     def test_get_by_address(self):
         """Test finding register by address and type."""
         data = {
-            "registers": [
-                {"address": 0, "name": "hold0", "type": "holding"},
-                {"address": 0, "name": "input0", "type": "input"},
-            ]
+            "events": {
+                "mixed": [
+                    {"address": 0, "name": "hold0", "type": "holding"},
+                    {"address": 0, "name": "input0", "type": "input"},
+                ]
+            }
         }
         reg_map = RegisterMap.from_dict(data)
 

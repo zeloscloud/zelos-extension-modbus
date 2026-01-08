@@ -1,21 +1,24 @@
 """Minimal JSON register map for human-readable Modbus register names.
 
-The register map format is intentionally simple:
+The register map format uses user-defined events to group registers semantically:
 
 {
-  "registers": [
-    {
-      "address": 0,
-      "name": "voltage",
-      "type": "holding",
-      "datatype": "uint16",
-      "unit": "V",
-      "scale": 0.1
-    }
-  ]
+  "name": "my_device",
+  "events": {
+    "temperature": [
+      {"name": "pcb_temp", "type": "holding", "address": 123, "datatype": "uint16", "unit": "°C"},
+      {"name": "overtemp", "type": "coil", "address": 456}
+    ],
+    "voltage/ac": [
+      {"name": "phsA", "type": "holding", "address": 0, "datatype": "float32", "unit": "V"}
+    ]
+  }
 }
 
-Required fields: address, name
+Event names become Zelos trace events. Register names become fields within those events.
+Register type (holding/input/coil/discrete_input) is just the Modbus protocol detail.
+
+Required fields per register: address, name
 Optional fields: type (default: holding), datatype (default: uint16), unit, scale (default: 1.0)
 """
 
@@ -29,7 +32,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Supported register types
+# Supported register types (Modbus protocol)
 REGISTER_TYPES = {"coil", "discrete_input", "input", "holding"}
 
 # Supported data types and their register counts
@@ -75,9 +78,9 @@ class Register:
 
 @dataclass
 class RegisterMap:
-    """Collection of register definitions loaded from JSON."""
+    """Collection of register definitions organized by user-defined events."""
 
-    registers: list[Register] = field(default_factory=list)
+    events: dict[str, list[Register]] = field(default_factory=dict)
     name: str = "modbus"
     description: str = ""
 
@@ -105,43 +108,60 @@ class RegisterMap:
         """Load register map from dictionary.
 
         Args:
-            data: Dictionary with register definitions
+            data: Dictionary with event/register definitions
 
         Returns:
             RegisterMap instance
         """
-        registers = []
-        for reg_data in data.get("registers", []):
-            reg = Register(
-                address=reg_data["address"],
-                name=reg_data["name"],
-                type=reg_data.get("type", "holding"),
-                datatype=reg_data.get("datatype", "uint16"),
-                unit=reg_data.get("unit", ""),
-                scale=reg_data.get("scale", 1.0),
-                description=reg_data.get("description", ""),
-            )
-            registers.append(reg)
+        events: dict[str, list[Register]] = {}
+
+        for event_name, registers_data in data.get("events", {}).items():
+            registers = []
+            for reg_data in registers_data:
+                reg = Register(
+                    address=reg_data["address"],
+                    name=reg_data["name"],
+                    type=reg_data.get("type", "holding"),
+                    datatype=reg_data.get("datatype", "uint16"),
+                    unit=reg_data.get("unit", ""),
+                    scale=reg_data.get("scale", 1.0),
+                    description=reg_data.get("description", ""),
+                )
+                registers.append(reg)
+            events[event_name] = registers
 
         return cls(
-            registers=registers,
+            events=events,
             name=data.get("name", "modbus"),
             description=data.get("description", ""),
         )
 
-    def get_by_type(self, register_type: str) -> list[Register]:
-        """Get all registers of a specific type.
+    @property
+    def registers(self) -> list[Register]:
+        """Flat list of all registers across all events."""
+        all_regs = []
+        for regs in self.events.values():
+            all_regs.extend(regs)
+        return all_regs
+
+    @property
+    def event_names(self) -> list[str]:
+        """List of all event names."""
+        return list(self.events.keys())
+
+    def get_event(self, event_name: str) -> list[Register]:
+        """Get all registers for an event.
 
         Args:
-            register_type: One of 'coil', 'discrete_input', 'input', 'holding'
+            event_name: Name of the event
 
         Returns:
-            List of registers matching the type
+            List of registers for this event
         """
-        return [r for r in self.registers if r.type == register_type]
+        return self.events.get(event_name, [])
 
     def get_by_name(self, name: str) -> Register | None:
-        """Find register by name.
+        """Find register by name across all events.
 
         Args:
             name: Register name
@@ -149,9 +169,10 @@ class RegisterMap:
         Returns:
             Register if found, None otherwise
         """
-        for reg in self.registers:
-            if reg.name == name:
-                return reg
+        for regs in self.events.values():
+            for reg in regs:
+                if reg.name == name:
+                    return reg
         return None
 
     def get_by_address(self, address: int, register_type: str = "holding") -> Register | None:
@@ -164,7 +185,8 @@ class RegisterMap:
         Returns:
             Register if found, None otherwise
         """
-        for reg in self.registers:
-            if reg.address == address and reg.type == register_type:
-                return reg
+        for regs in self.events.values():
+            for reg in regs:
+                if reg.address == address and reg.type == register_type:
+                    return reg
         return None
