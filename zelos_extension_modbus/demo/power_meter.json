@@ -1,0 +1,28 @@
+{
+  "name": "power_meter",
+  "description": "Demo 3-phase power meter",
+  "events": {
+    "voltage": [
+      {"name": "L1", "address": 0, "datatype": "float32", "unit": "V"},
+      {"name": "L2", "address": 2, "datatype": "float32", "unit": "V"},
+      {"name": "L3", "address": 4, "datatype": "float32", "unit": "V"}
+    ],
+    "current": [
+      {"name": "L1", "address": 6, "datatype": "float32", "unit": "A"},
+      {"name": "L2", "address": 8, "datatype": "float32", "unit": "A"},
+      {"name": "L3", "address": 10, "datatype": "float32", "unit": "A"}
+    ],
+    "power": [
+      {"name": "total", "address": 12, "datatype": "float32", "unit": "kW"},
+      {"name": "factor", "address": 14, "datatype": "float32"},
+      {"name": "frequency", "address": 16, "datatype": "float32", "unit": "Hz"},
+      {"name": "energy", "address": 18, "datatype": "uint32", "unit": "Wh"}
+    ],
+    "status": [
+      {"name": "temperature", "address": 20, "datatype": "int16", "unit": "°C", "scale": 0.1},
+      {"name": "relay1", "address": 0, "type": "coil"},
+      {"name": "relay2", "address": 1, "type": "coil"},
+      {"name": "alarm", "address": 2, "type": "coil"}
+    ]
+  }
+}

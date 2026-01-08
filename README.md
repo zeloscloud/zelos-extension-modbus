@@ -12,8 +12,22 @@ A Zelos extension for reading, writing, and monitoring Modbus registers. Built w
 - **Real-time polling** with configurable intervals
 - **Interactive actions** for reading/writing registers from the Zelos App
 - **Multiple data types**: uint16, int16, uint32, int32, float32, uint64, int64, float64, bool
+- **Demo mode**: Built-in power meter simulator for testing without hardware
 
 ## Quick Start
+
+### Demo Mode (No Hardware Required)
+
+```bash
+# Run with simulated 3-phase power meter
+uv run main.py demo
+```
+
+Demo mode starts a local Modbus TCP server with a simulated power meter that generates realistic data:
+- 3-phase voltage and current
+- Total power, power factor, frequency
+- Energy accumulator
+- Temperature and relay outputs
 
 ### CLI Mode
 
@@ -33,7 +47,7 @@ uv run main.py trace 192.168.1.100
 
 ### From Zelos App
 
-Configure the extension through the Zelos App UI with your connection settings and optional register map file.
+Configure the extension through the Zelos App UI. Enable "Demo Mode" to use the built-in simulator, or configure your Modbus connection settings.
 
 ## Register Map Format
 

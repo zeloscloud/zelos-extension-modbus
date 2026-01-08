@@ -2,14 +2,18 @@
 """Zelos Modbus Extension - CLI entry point.
 
 This module provides the command-line interface for the Modbus extension.
-It can run in two modes:
+It can run in several modes:
 
 1. App mode (default): Loads configuration from config.json when run from Zelos App
-2. CLI mode: Direct command-line usage with explicit arguments
+2. Demo mode: Uses built-in power meter simulator (no hardware required)
+3. CLI trace mode: Direct command-line usage with explicit arguments
 
 Examples:
     # Run from Zelos App (uses config.json)
     uv run main.py
+
+    # Demo mode (simulated power meter)
+    uv run main.py demo
 
     # CLI trace mode
     uv run main.py trace 192.168.1.100 registers.json
@@ -57,24 +61,27 @@ def set_shutdown_client(client: ModbusClient) -> None:
 
 
 @click.group(invoke_without_command=True)
+@click.option("--demo", is_flag=True, help="Run in demo mode with simulated power meter")
 @click.pass_context
-def cli(ctx: click.Context) -> None:
+def cli(ctx: click.Context, demo: bool) -> None:
     """Zelos Modbus Extension - Read, write, and monitor Modbus registers.
 
     When run without a subcommand, starts in app mode using configuration
     from the Zelos App (config.json).
 
+    Use --demo flag or 'demo' subcommand for simulated power meter.
     Use 'trace' subcommand for direct CLI access without Zelos App.
     """
     ctx.ensure_object(dict)
     ctx.obj["shutdown_handler"] = set_shutdown_client
+    ctx.obj["demo"] = demo
 
     if ctx.invoked_subcommand is None:
         # App mode - run with Zelos App configuration
-        run_app_mode(ctx)
+        run_app_mode(ctx, demo=demo)
 
 
-def run_app_mode(ctx: click.Context) -> None:
+def run_app_mode(ctx: click.Context, demo: bool = False) -> None:
     """Run in app mode with Zelos SDK initialization."""
     # Initialize SDK
     zelos_sdk.init(name="zelos_extension_modbus", actions=True)
@@ -90,7 +97,25 @@ def run_app_mode(ctx: click.Context) -> None:
     # Import and run app mode
     from zelos_extension_modbus.cli.app import run_app_mode as _run_app_mode
 
-    _run_app_mode()
+    _run_app_mode(demo=demo)
+
+
+@cli.command()
+@click.pass_context
+def demo(ctx: click.Context) -> None:
+    """Run demo mode with simulated 3-phase power meter.
+
+    Starts a local Modbus TCP server with simulated power meter data
+    and connects to it. No hardware required.
+
+    The simulated power meter includes:
+    - 3-phase voltage (L1, L2, L3)
+    - 3-phase current (L1, L2, L3)
+    - Total power, power factor, frequency
+    - Energy accumulator
+    - Temperature and relay outputs
+    """
+    run_app_mode(ctx, demo=True)
 
 
 @cli.command()

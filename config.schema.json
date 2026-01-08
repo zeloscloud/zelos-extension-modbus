@@ -4,6 +4,12 @@
   "title": "Modbus Configuration",
   "description": "Configure your Modbus connection and register polling",
   "properties": {
+    "demo": {
+      "type": "boolean",
+      "title": "Demo Mode",
+      "description": "Use built-in power meter simulator (no hardware required)",
+      "default": false
+    },
     "transport": {
       "type": "string",
       "title": "Transport",
