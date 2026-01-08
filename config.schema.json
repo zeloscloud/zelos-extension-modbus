@@ -1,0 +1,101 @@
+{
+  "$comment": "Modbus extension configuration schema. See https://docs.zeloscloud.io/sdk/how-to/develop-extensions/#configuration",
+  "type": "object",
+  "title": "Modbus Configuration",
+  "description": "Configure your Modbus connection and register polling",
+  "properties": {
+    "transport": {
+      "type": "string",
+      "title": "Transport",
+      "description": "Modbus transport type",
+      "enum": ["tcp", "rtu"],
+      "default": "tcp"
+    },
+    "host": {
+      "type": "string",
+      "title": "Host",
+      "description": "Modbus TCP host address",
+      "default": "127.0.0.1"
+    },
+    "port": {
+      "type": "integer",
+      "title": "Port",
+      "description": "Modbus TCP port",
+      "default": 502,
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "serial_port": {
+      "type": "string",
+      "title": "Serial Port",
+      "description": "Serial port for RTU (e.g., /dev/ttyUSB0 or COM1)",
+      "default": "/dev/ttyUSB0"
+    },
+    "baudrate": {
+      "type": "integer",
+      "title": "Baudrate",
+      "description": "Serial baudrate for RTU",
+      "enum": [9600, 19200, 38400, 57600, 115200],
+      "default": 9600
+    },
+    "unit_id": {
+      "type": "integer",
+      "title": "Unit ID",
+      "description": "Modbus slave/unit ID",
+      "default": 1,
+      "minimum": 0,
+      "maximum": 255
+    },
+    "register_map_file": {
+      "type": "string",
+      "title": "Register Map File",
+      "description": "Path to JSON register map file (optional)",
+      "ui:widget": "file-picker",
+      "ui:options": {
+        "accept": ".json"
+      }
+    },
+    "poll_interval": {
+      "type": "number",
+      "title": "Poll Interval (seconds)",
+      "description": "How often to poll registers",
+      "default": 1.0,
+      "minimum": 0.1,
+      "maximum": 60.0
+    },
+    "timeout": {
+      "type": "number",
+      "title": "Timeout (seconds)",
+      "description": "Modbus request timeout",
+      "default": 3.0,
+      "minimum": 0.5,
+      "maximum": 30.0
+    },
+    "log_level": {
+      "type": "string",
+      "title": "Log Level",
+      "description": "Logging verbosity",
+      "enum": ["DEBUG", "INFO", "WARNING", "ERROR"],
+      "default": "INFO"
+    }
+  },
+  "required": ["transport", "unit_id"],
+  "allOf": [
+    {
+      "if": {
+        "properties": { "transport": { "const": "tcp" } }
+      },
+      "then": {
+        "required": ["host", "port"]
+      }
+    },
+    {
+      "if": {
+        "properties": { "transport": { "const": "rtu" } }
+      },
+      "then": {
+        "required": ["serial_port", "baudrate"]
+      }
+    }
+  ]
+}

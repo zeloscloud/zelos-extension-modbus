@@ -1,0 +1,72 @@
+{
+  "name": "example_device",
+  "description": "Example Modbus register map for a simple device",
+  "registers": [
+    {
+      "address": 0,
+      "name": "voltage",
+      "type": "holding",
+      "datatype": "uint16",
+      "unit": "V",
+      "scale": 0.1,
+      "description": "Input voltage (0.1V resolution)"
+    },
+    {
+      "address": 1,
+      "name": "current",
+      "type": "holding",
+      "datatype": "uint16",
+      "unit": "A",
+      "scale": 0.01,
+      "description": "Input current (0.01A resolution)"
+    },
+    {
+      "address": 2,
+      "name": "power",
+      "type": "holding",
+      "datatype": "uint32",
+      "unit": "W",
+      "scale": 1.0,
+      "description": "Power consumption (32-bit)"
+    },
+    {
+      "address": 4,
+      "name": "temperature",
+      "type": "input",
+      "datatype": "int16",
+      "unit": "°C",
+      "scale": 0.1,
+      "description": "Temperature sensor (signed, 0.1°C resolution)"
+    },
+    {
+      "address": 5,
+      "name": "humidity",
+      "type": "input",
+      "datatype": "uint16",
+      "unit": "%",
+      "scale": 0.1,
+      "description": "Humidity sensor"
+    },
+    {
+      "address": 0,
+      "name": "relay_1",
+      "type": "coil",
+      "datatype": "bool",
+      "description": "Relay 1 output"
+    },
+    {
+      "address": 1,
+      "name": "relay_2",
+      "type": "coil",
+      "datatype": "bool",
+      "description": "Relay 2 output"
+    },
+    {
+      "address": 0,
+      "name": "button_1",
+      "type": "discrete_input",
+      "datatype": "bool",
+      "description": "Button 1 input"
+    }
+  ]
+}
