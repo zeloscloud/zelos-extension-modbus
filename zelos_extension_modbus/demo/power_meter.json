@@ -1,6 +1,6 @@
 {
   "name": "power_meter",
-  "description": "Demo 3-phase power meter",
+  "description": "Demo 3-phase power meter with comprehensive register types",
   "events": {
     "voltage": [
       {"name": "L1", "address": 0, "datatype": "float32", "unit": "V"},
@@ -23,6 +23,26 @@
       {"name": "relay1", "address": 0, "type": "coil"},
       {"name": "relay2", "address": 1, "type": "coil"},
       {"name": "alarm", "address": 2, "type": "coil"}
+    ],
+    "inputs": [
+      {"name": "firmware_version", "address": 0, "type": "input", "datatype": "uint16"},
+      {"name": "serial_number", "address": 1, "type": "input", "datatype": "uint32"},
+      {"name": "uptime_hours", "address": 3, "type": "input", "datatype": "uint32", "unit": "h"}
+    ],
+    "digital_inputs": [
+      {"name": "door_open", "address": 0, "type": "discrete_input"},
+      {"name": "external_fault", "address": 1, "type": "discrete_input"},
+      {"name": "grid_connected", "address": 2, "type": "discrete_input"}
+    ],
+    "setpoints": [
+      {"name": "voltage_high_limit", "address": 100, "datatype": "uint16", "unit": "V"},
+      {"name": "voltage_low_limit", "address": 101, "datatype": "uint16", "unit": "V"},
+      {"name": "power_limit", "address": 102, "datatype": "int32", "unit": "W"},
+      {"name": "energy_reset", "address": 104, "datatype": "uint32"}
+    ],
+    "swapped_floats": [
+      {"name": "calibration_factor", "address": 110, "datatype": "float32", "byte_order": "big_swap"},
+      {"name": "offset_value", "address": 112, "datatype": "float32", "byte_order": "big_swap"}
     ]
   }
 }

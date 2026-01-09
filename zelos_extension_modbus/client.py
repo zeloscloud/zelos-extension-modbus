@@ -314,7 +314,7 @@ class ModbusClient:
 
         try:
             result = await self._client.read_holding_registers(
-                address=address, count=count, slave=self.unit_id
+                address=address, count=count, device_id=self.unit_id
             )
             if result.isError():
                 logger.warning(f"Read error at address {address}: {result}")
@@ -341,7 +341,7 @@ class ModbusClient:
 
         try:
             result = await self._client.read_input_registers(
-                address=address, count=count, slave=self.unit_id
+                address=address, count=count, device_id=self.unit_id
             )
             if result.isError():
                 logger.warning(f"Read error at address {address}: {result}")
@@ -366,7 +366,7 @@ class ModbusClient:
 
         try:
             result = await self._client.read_coils(
-                address=address, count=count, slave=self.unit_id
+                address=address, count=count, device_id=self.unit_id
             )
             if result.isError():
                 logger.warning(f"Read error at address {address}: {result}")
@@ -393,7 +393,7 @@ class ModbusClient:
 
         try:
             result = await self._client.read_discrete_inputs(
-                address=address, count=count, slave=self.unit_id
+                address=address, count=count, device_id=self.unit_id
             )
             if result.isError():
                 logger.warning(f"Read error at address {address}: {result}")
@@ -418,7 +418,7 @@ class ModbusClient:
 
         try:
             result = await self._client.write_register(
-                address=address, value=value, slave=self.unit_id
+                address=address, value=value, device_id=self.unit_id
             )
             if result.isError():
                 logger.warning(f"Write error at address {address}: {result}")
@@ -443,7 +443,7 @@ class ModbusClient:
 
         try:
             result = await self._client.write_registers(
-                address=address, values=values, slave=self.unit_id
+                address=address, values=values, device_id=self.unit_id
             )
             if result.isError():
                 logger.warning(f"Write error at address {address}: {result}")
@@ -468,7 +468,7 @@ class ModbusClient:
 
         try:
             result = await self._client.write_coil(
-                address=address, value=value, slave=self.unit_id
+                address=address, value=value, device_id=self.unit_id
             )
             if result.isError():
                 logger.warning(f"Write error at address {address}: {result}")

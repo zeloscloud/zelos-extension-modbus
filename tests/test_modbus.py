@@ -1,21 +1,31 @@
-"""Minimal tests for Zelos Modbus extension.
+"""Tests for Zelos Modbus extension.
 
-Tests core functionality without network dependencies:
+Tests core functionality:
 - Register map parsing
 - Value encoding/decoding
 - Simulator physics logic
+- Integration tests with demo server
 """
 
+import asyncio
 import json
 import struct
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from zelos_extension_modbus.client import _reorder_registers, decode_value, encode_value
+from zelos_extension_modbus.client import (
+    ModbusClient,
+    _reorder_registers,
+    decode_value,
+    encode_value,
+)
 from zelos_extension_modbus.demo.simulator import (
     PowerMeterSimulator,
+    create_demo_context,
     float32_to_registers,
     uint32_to_registers,
 )
@@ -367,3 +377,339 @@ class TestPowerMeterSimulator:
         sim = PowerMeterSimulator()
         values = sim.update(dt=0.1)
         assert 0.7 < values["power_factor"] < 1.0
+
+
+# =============================================================================
+# Integration Tests with Demo Server
+# =============================================================================
+
+
+class DemoServer:
+    """Helper to run demo server in background thread."""
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 15020):
+        self.host = host
+        self.port = port
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._server_task = None
+
+    def start(self):
+        """Start server in background thread."""
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        # Wait for server to be ready
+        time.sleep(0.5)
+
+    def _run(self):
+        """Run server event loop."""
+        from pymodbus.server import StartAsyncTcpServer
+
+        from zelos_extension_modbus.demo.simulator import SimulatorUpdater
+
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+
+        context = create_demo_context()
+        simulator = PowerMeterSimulator()
+        updater = SimulatorUpdater(simulator, context, interval=0.05)
+        updater.start()
+
+        async def run_server():
+            await StartAsyncTcpServer(context=context, address=(self.host, self.port))
+
+        try:
+            self._loop.run_until_complete(run_server())
+        except Exception:
+            pass
+        finally:
+            updater.stop()
+
+    def stop(self):
+        """Stop the server."""
+        if self._loop:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+
+
+@pytest.fixture(scope="module")
+def demo_server():
+    """Fixture that starts demo server for integration tests."""
+    server = DemoServer(port=15020)
+    server.start()
+    yield server
+    server.stop()
+
+
+@pytest.fixture
+def register_map():
+    """Load the demo power meter register map."""
+    map_path = Path(__file__).parent.parent / "zelos_extension_modbus" / "demo" / "power_meter.json"
+    return RegisterMap.from_file(str(map_path))
+
+
+@pytest.fixture
+def client(demo_server, register_map):
+    """Create a connected ModbusClient."""
+    client = ModbusClient(
+        host=demo_server.host,
+        port=demo_server.port,
+        register_map=register_map,
+    )
+
+    async def connect():
+        await client.connect()
+
+    asyncio.get_event_loop().run_until_complete(connect())
+    yield client
+
+    async def disconnect():
+        await client.disconnect()
+
+    asyncio.get_event_loop().run_until_complete(disconnect())
+
+
+class TestDemoServerIntegration:
+    """Integration tests against the demo server."""
+
+    def test_read_holding_register_float32(self, client):
+        """Read float32 holding register (voltage)."""
+        reg = client.register_map.get_by_name("L1")  # voltage L1
+        assert reg is not None
+        assert reg.type == "holding"
+        assert reg.datatype == "float32"
+
+        async def read():
+            return await client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value is not None
+        assert 200 < value < 260  # Reasonable voltage range
+
+    def test_read_holding_register_uint32(self, client):
+        """Read uint32 holding register (energy)."""
+        reg = client.register_map.get_by_name("energy")
+        assert reg is not None
+        assert reg.datatype == "uint32"
+
+        async def read():
+            return await client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value is not None
+        assert isinstance(value, int)
+        assert value >= 0
+
+    def test_read_holding_register_int16_with_scale(self, client):
+        """Read int16 holding register with scale (temperature)."""
+        reg = client.register_map.get_by_name("temperature")
+        assert reg is not None
+        assert reg.datatype == "int16"
+        assert reg.scale == 0.1
+
+        async def read():
+            return await client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value is not None
+        # Temperature should be reasonable (raw value is scaled by 0.1)
+        assert 0 < value < 100
+
+    def test_read_input_register(self, client):
+        """Read input register (firmware_version)."""
+        reg = client.register_map.get_by_name("firmware_version")
+        assert reg is not None
+        assert reg.type == "input"
+        assert reg.writable is False
+
+        async def read():
+            return await client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value is not None
+        # Firmware version 0x0102 = 258
+        assert value == 0x0102
+
+    def test_read_input_register_uint32(self, client):
+        """Read uint32 input register (serial_number)."""
+        reg = client.register_map.get_by_name("serial_number")
+        assert reg is not None
+        assert reg.type == "input"
+        assert reg.datatype == "uint32"
+
+        async def read():
+            return await client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value == 12345678
+
+    def test_read_coil(self, client):
+        """Read coil register."""
+        reg = client.register_map.get_by_name("relay1")
+        assert reg is not None
+        assert reg.type == "coil"
+        assert reg.writable is True
+
+        async def read():
+            return await client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value in (True, False)
+
+    def test_read_discrete_input(self, client):
+        """Read discrete input register."""
+        reg = client.register_map.get_by_name("grid_connected")
+        assert reg is not None
+        assert reg.type == "discrete_input"
+        assert reg.writable is False
+
+        async def read():
+            return await client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        # Initial value is True (grid connected)
+        assert value is True
+
+    def test_read_swapped_float(self, client):
+        """Read float32 with big_swap byte order."""
+        reg = client.register_map.get_by_name("calibration_factor")
+        assert reg is not None
+        assert reg.datatype == "float32"
+        assert reg.byte_order == "big_swap"
+
+        async def read():
+            return await client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        # Initial value is 1.0
+        assert value is not None
+        assert abs(value - 1.0) < 0.01
+
+    def test_write_holding_register_uint16(self, client):
+        """Write uint16 holding register."""
+        reg = client.register_map.get_by_name("voltage_high_limit")
+        assert reg is not None
+        assert reg.type == "holding"
+        assert reg.datatype == "uint16"
+        assert reg.writable is True
+
+        async def write_and_read():
+            # Write new value
+            success = await client.write_register_value(reg, 245)
+            assert success is True
+
+            # Read back
+            value = await client.read_register_value(reg)
+            return value
+
+        value = asyncio.get_event_loop().run_until_complete(write_and_read())
+        assert value == 245
+
+    def test_write_holding_register_int32(self, client):
+        """Write int32 holding register."""
+        reg = client.register_map.get_by_name("power_limit")
+        assert reg is not None
+        assert reg.datatype == "int32"
+        assert reg.writable is True
+
+        async def write_and_read():
+            # Write new value (negative to test signed)
+            success = await client.write_register_value(reg, -10000)
+            assert success is True
+
+            # Read back
+            value = await client.read_register_value(reg)
+            return value
+
+        value = asyncio.get_event_loop().run_until_complete(write_and_read())
+        assert value == -10000
+
+    def test_write_coil(self, client):
+        """Write coil register."""
+        reg = client.register_map.get_by_name("relay1")
+        assert reg is not None
+        assert reg.type == "coil"
+
+        async def write_and_read():
+            # Write True
+            success = await client.write_register_value(reg, True)
+            assert success is True
+            value = await client.read_register_value(reg)
+            assert value is True
+
+            # Write False
+            success = await client.write_register_value(reg, False)
+            assert success is True
+            value = await client.read_register_value(reg)
+            assert value is False
+
+        asyncio.get_event_loop().run_until_complete(write_and_read())
+
+    def test_write_swapped_float(self, client):
+        """Write float32 with big_swap byte order."""
+        reg = client.register_map.get_by_name("offset_value")
+        assert reg is not None
+        assert reg.byte_order == "big_swap"
+
+        async def write_and_read():
+            # Write a specific value
+            success = await client.write_register_value(reg, 3.14159)
+            assert success is True
+
+            # Read back
+            value = await client.read_register_value(reg)
+            return value
+
+        value = asyncio.get_event_loop().run_until_complete(write_and_read())
+        assert abs(value - 3.14159) < 0.001
+
+    def test_write_input_register_fails(self, client):
+        """Writing to input register should fail."""
+        reg = client.register_map.get_by_name("firmware_version")
+        assert reg is not None
+        assert reg.type == "input"
+        assert reg.writable is False
+
+        async def try_write():
+            return await client.write_register_value(reg, 999)
+
+        success = asyncio.get_event_loop().run_until_complete(try_write())
+        assert success is False
+
+    def test_write_discrete_input_fails(self, client):
+        """Writing to discrete input should fail."""
+        reg = client.register_map.get_by_name("door_open")
+        assert reg is not None
+        assert reg.type == "discrete_input"
+        assert reg.writable is False
+
+        async def try_write():
+            return await client.write_register_value(reg, True)
+
+        success = asyncio.get_event_loop().run_until_complete(try_write())
+        assert success is False
+
+    def test_poll_all_events(self, client):
+        """Poll all registers and verify event structure."""
+
+        async def poll():
+            return await client._poll_registers()
+
+        results = asyncio.get_event_loop().run_until_complete(poll())
+
+        # Should have all events from register map
+        assert "voltage" in results
+        assert "current" in results
+        assert "power" in results
+        assert "status" in results
+        assert "inputs" in results
+        assert "digital_inputs" in results
+        assert "setpoints" in results
+        assert "swapped_floats" in results
+
+        # Voltage event should have L1, L2, L3
+        assert "L1" in results["voltage"]
+        assert "L2" in results["voltage"]
+        assert "L3" in results["voltage"]
+
+        # Check values are reasonable
+        assert 200 < results["voltage"]["L1"] < 260
