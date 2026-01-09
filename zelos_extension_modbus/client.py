@@ -16,60 +16,107 @@ from zelos_extension_modbus.register_map import Register, RegisterMap
 logger = logging.getLogger(__name__)
 
 
-def decode_value(registers: list[int], datatype: str, scale: float = 1.0) -> float | int | bool:
+def _reorder_registers(registers: list[int], byte_order: str, for_decode: bool = True) -> list[int]:
+    """Reorder registers based on byte order.
+
+    Args:
+        registers: List of 16-bit register values
+        byte_order: One of 'big', 'little', 'big_swap', 'little_swap'
+        for_decode: True if preparing for decode, False for encode
+
+    Returns:
+        Reordered register list
+    """
+    if len(registers) <= 1:
+        return registers
+
+    regs = list(registers)
+
+    if byte_order == "big":
+        # Standard Modbus: AB CD (no change)
+        pass
+    elif byte_order == "little":
+        # Full little endian: DC BA (reverse all)
+        regs = regs[::-1]
+    elif byte_order == "big_swap":
+        # Big endian with word swap: CD AB (swap pairs)
+        if len(regs) == 2:
+            regs = [regs[1], regs[0]]
+        elif len(regs) == 4:
+            regs = [regs[1], regs[0], regs[3], regs[2]]
+    elif byte_order == "little_swap":
+        # Little endian with word swap: BA DC
+        if len(regs) == 2:
+            regs = [regs[1], regs[0]]
+        elif len(regs) == 4:
+            regs = [regs[3], regs[2], regs[1], regs[0]]
+
+    return regs
+
+
+def decode_value(
+    registers: list[int], datatype: str, scale: float = 1.0, byte_order: str = "big"
+) -> float | int | bool:
     """Decode raw register values to typed value.
 
     Args:
         registers: List of 16-bit register values
         datatype: Data type string
         scale: Scale factor to apply
+        byte_order: Byte order ('big', 'little', 'big_swap', 'little_swap')
 
     Returns:
         Decoded and scaled value
     """
+    # Reorder registers based on byte order before decoding
+    regs = _reorder_registers(registers, byte_order, for_decode=True)
+
     if datatype == "bool":
-        return bool(registers[0])
+        return bool(regs[0])
     elif datatype == "uint16":
-        return int(registers[0] * scale)
+        return int(regs[0] * scale)
     elif datatype == "int16":
-        raw = struct.pack(">H", registers[0])
+        raw = struct.pack(">H", regs[0])
         value = struct.unpack(">h", raw)[0]
         return int(value * scale)
     elif datatype == "uint32":
-        raw = struct.pack(">HH", registers[0], registers[1])
+        raw = struct.pack(">HH", regs[0], regs[1])
         value = struct.unpack(">I", raw)[0]
         return int(value * scale)
     elif datatype == "int32":
-        raw = struct.pack(">HH", registers[0], registers[1])
+        raw = struct.pack(">HH", regs[0], regs[1])
         value = struct.unpack(">i", raw)[0]
         return int(value * scale)
     elif datatype == "float32":
-        raw = struct.pack(">HH", registers[0], registers[1])
+        raw = struct.pack(">HH", regs[0], regs[1])
         value = struct.unpack(">f", raw)[0]
         return float(value * scale)
     elif datatype == "uint64":
-        raw = struct.pack(">HHHH", *registers[:4])
+        raw = struct.pack(">HHHH", *regs[:4])
         value = struct.unpack(">Q", raw)[0]
         return int(value * scale)
     elif datatype == "int64":
-        raw = struct.pack(">HHHH", *registers[:4])
+        raw = struct.pack(">HHHH", *regs[:4])
         value = struct.unpack(">q", raw)[0]
         return int(value * scale)
     elif datatype == "float64":
-        raw = struct.pack(">HHHH", *registers[:4])
+        raw = struct.pack(">HHHH", *regs[:4])
         value = struct.unpack(">d", raw)[0]
         return float(value * scale)
     else:
-        return registers[0]
+        return regs[0]
 
 
-def encode_value(value: float | int | bool, datatype: str, scale: float = 1.0) -> list[int]:
+def encode_value(
+    value: float | int | bool, datatype: str, scale: float = 1.0, byte_order: str = "big"
+) -> list[int]:
     """Encode typed value to raw register values.
 
     Args:
         value: Value to encode
         datatype: Data type string
         scale: Scale factor (value will be divided by scale)
+        byte_order: Byte order ('big', 'little', 'big_swap', 'little_swap')
 
     Returns:
         List of 16-bit register values
@@ -77,32 +124,35 @@ def encode_value(value: float | int | bool, datatype: str, scale: float = 1.0) -
     scaled = value / scale if scale != 0 else value
 
     if datatype == "bool":
-        return [1 if value else 0]
+        regs = [1 if value else 0]
     elif datatype == "uint16":
-        return [int(scaled) & 0xFFFF]
+        regs = [int(scaled) & 0xFFFF]
     elif datatype == "int16":
         raw = struct.pack(">h", int(scaled))
-        return [struct.unpack(">H", raw)[0]]
+        regs = [struct.unpack(">H", raw)[0]]
     elif datatype == "uint32":
         raw = struct.pack(">I", int(scaled))
-        return list(struct.unpack(">HH", raw))
+        regs = list(struct.unpack(">HH", raw))
     elif datatype == "int32":
         raw = struct.pack(">i", int(scaled))
-        return list(struct.unpack(">HH", raw))
+        regs = list(struct.unpack(">HH", raw))
     elif datatype == "float32":
         raw = struct.pack(">f", float(scaled))
-        return list(struct.unpack(">HH", raw))
+        regs = list(struct.unpack(">HH", raw))
     elif datatype == "uint64":
         raw = struct.pack(">Q", int(scaled))
-        return list(struct.unpack(">HHHH", raw))
+        regs = list(struct.unpack(">HHHH", raw))
     elif datatype == "int64":
         raw = struct.pack(">q", int(scaled))
-        return list(struct.unpack(">HHHH", raw))
+        regs = list(struct.unpack(">HHHH", raw))
     elif datatype == "float64":
         raw = struct.pack(">d", float(scaled))
-        return list(struct.unpack(">HHHH", raw))
+        regs = list(struct.unpack(">HHHH", raw))
     else:
-        return [int(value) & 0xFFFF]
+        regs = [int(value) & 0xFFFF]
+
+    # Reorder registers based on byte order for writing
+    return _reorder_registers(regs, byte_order, for_decode=False)
 
 
 class ModbusClient:
@@ -453,7 +503,7 @@ class ModbusClient:
         if raw is None:
             return None
 
-        return decode_value(raw, register.datatype, register.scale)
+        return decode_value(raw, register.datatype, register.scale, register.byte_order)
 
     async def write_register_value(
         self, register: Register, value: float | int | bool
@@ -467,10 +517,14 @@ class ModbusClient:
         Returns:
             True if successful
         """
+        if not register.writable:
+            logger.warning(f"Register '{register.name}' is not writable (type: {register.type})")
+            return False
+
         if register.type == "coil":
             return await self.write_coil(register.address, bool(value))
 
-        raw = encode_value(value, register.datatype, register.scale)
+        raw = encode_value(value, register.datatype, register.scale, register.byte_order)
 
         if len(raw) == 1:
             return await self.write_register(register.address, raw[0])
@@ -663,7 +717,81 @@ class ModbusClient:
                 "type": r.type,
                 "datatype": r.datatype,
                 "unit": r.unit,
+                "writable": r.writable,
+                "byte_order": r.byte_order,
             }
             for r in self.register_map.registers
+        ]
+        return {"registers": regs, "count": len(regs)}
+
+    @zelos_sdk.action("Write Named Register", "Write a value to a register by name")
+    @zelos_sdk.action.text("name", title="Register Name")
+    @zelos_sdk.action.number("value", title="Value")
+    def write_named_register(self, name: str, value: float) -> dict[str, Any]:
+        """Write a value to a register by name from the register map."""
+        if not self.register_map:
+            return {"error": "No register map loaded", "success": False}
+
+        reg = self.register_map.get_by_name(name)
+        if not reg:
+            return {"error": f"Register '{name}' not found", "success": False}
+
+        if not reg.writable:
+            return {
+                "error": f"Register '{name}' is not writable (type: {reg.type})",
+                "success": False,
+            }
+
+        async def _write() -> bool:
+            if not self._connected:
+                await self.connect()
+            return await self.write_register_value(reg, value)
+
+        success = asyncio.run(_write())
+        return {
+            "name": name,
+            "address": reg.address,
+            "type": reg.type,
+            "datatype": reg.datatype,
+            "value": value,
+            "unit": reg.unit,
+            "success": success,
+        }
+
+    @zelos_sdk.action("Write Coil", "Write a boolean value to a coil")
+    @zelos_sdk.action.number("address", minimum=0, maximum=65535, title="Address")
+    @zelos_sdk.action.select("value", choices=["ON", "OFF"], default="OFF", title="Value")
+    def write_coil_action(self, address: int, value: str) -> dict[str, Any]:
+        """Write a coil by address."""
+        bool_value = value == "ON"
+
+        async def _write() -> bool:
+            if not self._connected:
+                await self.connect()
+            return await self.write_coil(int(address), bool_value)
+
+        success = asyncio.run(_write())
+        return {
+            "address": address,
+            "value": bool_value,
+            "success": success,
+        }
+
+    @zelos_sdk.action("List Writable Registers", "List all writable registers")
+    def list_writable_registers(self) -> dict[str, Any]:
+        """List all writable registers in the register map."""
+        if not self.register_map:
+            return {"registers": [], "count": 0}
+
+        regs = [
+            {
+                "name": r.name,
+                "address": r.address,
+                "type": r.type,
+                "datatype": r.datatype,
+                "unit": r.unit,
+                "byte_order": r.byte_order,
+            }
+            for r in self.register_map.writable_registers
         ]
         return {"registers": regs, "count": len(regs)}

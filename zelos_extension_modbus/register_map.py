@@ -48,6 +48,13 @@ DATATYPES = {
     "float64": 4,
 }
 
+# Supported byte orders for multi-register values
+# big: AB CD (standard Modbus)
+# little: DC BA
+# big_swap: CD AB (common in some PLCs - big endian with word swap)
+# little_swap: BA DC
+BYTE_ORDERS = {"big", "little", "big_swap", "little_swap"}
+
 
 @dataclass
 class Register:
@@ -59,7 +66,9 @@ class Register:
     datatype: str = "uint16"
     unit: str = ""
     scale: float = 1.0
+    byte_order: str = "big"
     description: str = ""
+    writable: bool = True
 
     @property
     def count(self) -> int:
@@ -74,6 +83,12 @@ class Register:
         if self.datatype not in DATATYPES:
             msg = f"Invalid datatype '{self.datatype}'. Must be one of {list(DATATYPES)}"
             raise ValueError(msg)
+        if self.byte_order not in BYTE_ORDERS:
+            msg = f"Invalid byte_order '{self.byte_order}'. Must be one of {BYTE_ORDERS}"
+            raise ValueError(msg)
+        # Input registers and discrete inputs are read-only by Modbus spec
+        if self.type in ("input", "discrete_input"):
+            self.writable = False
 
 
 @dataclass
@@ -125,7 +140,9 @@ class RegisterMap:
                     datatype=reg_data.get("datatype", "uint16"),
                     unit=reg_data.get("unit", ""),
                     scale=reg_data.get("scale", 1.0),
+                    byte_order=reg_data.get("byte_order", "big"),
                     description=reg_data.get("description", ""),
+                    writable=reg_data.get("writable", True),
                 )
                 registers.append(reg)
             events[event_name] = registers
@@ -190,3 +207,13 @@ class RegisterMap:
                 if reg.address == address and reg.type == register_type:
                     return reg
         return None
+
+    @property
+    def writable_registers(self) -> list[Register]:
+        """Flat list of all writable registers."""
+        return [r for r in self.registers if r.writable]
+
+    @property
+    def writable_names(self) -> list[str]:
+        """List of all writable register names."""
+        return [r.name for r in self.writable_registers]

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from zelos_extension_modbus.client import decode_value, encode_value
+from zelos_extension_modbus.client import _reorder_registers, decode_value, encode_value
 from zelos_extension_modbus.demo.simulator import (
     PowerMeterSimulator,
     float32_to_registers,
@@ -51,6 +51,32 @@ class TestRegister:
         """Invalid datatype raises ValueError."""
         with pytest.raises(ValueError, match="Invalid datatype"):
             Register(address=0, name="test", datatype="invalid")
+
+    def test_invalid_byte_order_raises(self):
+        """Invalid byte_order raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid byte_order"):
+            Register(address=0, name="test", byte_order="invalid")
+
+    def test_byte_order_defaults_to_big(self):
+        """Default byte order is big endian."""
+        reg = Register(address=0, name="test")
+        assert reg.byte_order == "big"
+
+    def test_valid_byte_orders(self):
+        """All valid byte orders are accepted."""
+        for order in ["big", "little", "big_swap", "little_swap"]:
+            reg = Register(address=0, name="test", byte_order=order)
+            assert reg.byte_order == order
+
+    def test_writable_defaults_true(self):
+        """Holding registers and coils are writable by default."""
+        assert Register(address=0, name="t", type="holding").writable is True
+        assert Register(address=0, name="t", type="coil").writable is True
+
+    def test_input_registers_not_writable(self):
+        """Input registers and discrete inputs are read-only."""
+        assert Register(address=0, name="t", type="input").writable is False
+        assert Register(address=0, name="t", type="discrete_input").writable is False
 
 
 class TestRegisterMap:
@@ -105,6 +131,39 @@ class TestRegisterMap:
         assert reg_map.get_by_name("voltage").address == 0
         assert reg_map.get_by_name("current").address == 1
         assert reg_map.get_by_name("nonexistent") is None
+
+    def test_writable_registers(self):
+        """writable_registers excludes input and discrete_input types."""
+        data = {
+            "events": {
+                "sensors": [
+                    {"name": "temp", "address": 0, "type": "holding"},
+                    {"name": "sensor", "address": 1, "type": "input"},
+                ],
+                "controls": [
+                    {"name": "relay", "address": 0, "type": "coil"},
+                    {"name": "status", "address": 0, "type": "discrete_input"},
+                ],
+            }
+        }
+        reg_map = RegisterMap.from_dict(data)
+        writable = reg_map.writable_registers
+        assert len(writable) == 2
+        assert {r.name for r in writable} == {"temp", "relay"}
+
+    def test_byte_order_parsed_from_dict(self):
+        """byte_order is correctly parsed from JSON."""
+        data = {
+            "events": {
+                "test": [
+                    {"name": "big_val", "address": 0, "byte_order": "big"},
+                    {"name": "swapped", "address": 2, "byte_order": "big_swap"},
+                ]
+            }
+        }
+        reg_map = RegisterMap.from_dict(data)
+        assert reg_map.get_by_name("big_val").byte_order == "big"
+        assert reg_map.get_by_name("swapped").byte_order == "big_swap"
 
 
 # =============================================================================
@@ -171,6 +230,62 @@ class TestValueCodec:
             encoded = encode_value(value, datatype)
             decoded = decode_value(encoded, datatype)
             assert decoded == value
+
+
+class TestByteOrder:
+    """Test byte order handling for multi-register values."""
+
+    def test_reorder_single_register_unchanged(self):
+        """Single register values are unchanged by byte order."""
+        regs = [0x1234]
+        for order in ["big", "little", "big_swap", "little_swap"]:
+            assert _reorder_registers(regs, order) == [0x1234]
+
+    def test_reorder_big_endian(self):
+        """Big endian keeps registers in original order."""
+        regs = [0xABCD, 0xEF01]
+        assert _reorder_registers(regs, "big") == [0xABCD, 0xEF01]
+
+    def test_reorder_little_endian(self):
+        """Little endian reverses register order."""
+        regs = [0xABCD, 0xEF01]
+        assert _reorder_registers(regs, "little") == [0xEF01, 0xABCD]
+
+    def test_reorder_big_swap(self):
+        """Big swap swaps word pairs."""
+        regs = [0xABCD, 0xEF01]
+        assert _reorder_registers(regs, "big_swap") == [0xEF01, 0xABCD]
+
+    def test_reorder_little_swap_32bit(self):
+        """Little swap on 32-bit: BA DC."""
+        regs = [0xABCD, 0xEF01]
+        assert _reorder_registers(regs, "little_swap") == [0xEF01, 0xABCD]
+
+    def test_reorder_64bit_little(self):
+        """Little endian on 64-bit reverses all four registers."""
+        regs = [0x0001, 0x0002, 0x0003, 0x0004]
+        assert _reorder_registers(regs, "little") == [0x0004, 0x0003, 0x0002, 0x0001]
+
+    def test_decode_float32_big_swap(self):
+        """Decode float32 with word-swapped byte order."""
+        # 3.14 in big endian is [0x4048, 0xF5C3]
+        # Word swapped would be [0xF5C3, 0x4048]
+        result = decode_value([0xF5C3, 0x4048], "float32", byte_order="big_swap")
+        assert abs(result - 3.14) < 0.01
+
+    def test_encode_uint32_big_swap(self):
+        """Encode uint32 with word-swapped byte order."""
+        # 65536 (0x00010000) in big endian is [0x0001, 0x0000]
+        # Word swapped would be [0x0000, 0x0001]
+        result = encode_value(65536, "uint32", byte_order="big_swap")
+        assert result == [0x0000, 0x0001]
+
+    def test_roundtrip_all_byte_orders(self):
+        """Encode then decode with same byte order returns original."""
+        for order in ["big", "little", "big_swap", "little_swap"]:
+            encoded = encode_value(123456, "uint32", byte_order=order)
+            decoded = decode_value(encoded, "uint32", byte_order=order)
+            assert decoded == 123456, f"Failed for byte_order={order}"
 
 
 # =============================================================================
