@@ -45,6 +45,26 @@ ADDR_COIL_RELAY1 = 0
 ADDR_COIL_RELAY2 = 1
 ADDR_COIL_ALARM = 2
 
+# Input register addresses (read-only)
+ADDR_IR_FIRMWARE = 0  # uint16
+ADDR_IR_SERIAL = 1  # uint32 (2 registers)
+ADDR_IR_UPTIME = 3  # uint32 (2 registers)
+
+# Discrete input addresses (read-only booleans)
+ADDR_DI_DOOR = 0
+ADDR_DI_FAULT = 1
+ADDR_DI_GRID = 2
+
+# Setpoint addresses (writable holding registers)
+ADDR_VOLTAGE_HIGH = 100  # uint16
+ADDR_VOLTAGE_LOW = 101  # uint16
+ADDR_POWER_LIMIT = 102  # int32 (2 registers)
+ADDR_ENERGY_RESET = 104  # uint32 (2 registers)
+
+# Swapped float addresses (big_swap byte order)
+ADDR_CAL_FACTOR = 110  # float32 big_swap
+ADDR_OFFSET_VAL = 112  # float32 big_swap
+
 
 def float32_to_registers(value: float) -> tuple[int, int]:
     """Convert float32 to two 16-bit registers (big-endian)."""
@@ -56,6 +76,19 @@ def uint32_to_registers(value: int) -> tuple[int, int]:
     """Convert uint32 to two 16-bit registers (big-endian)."""
     packed = struct.pack(">I", value)
     return struct.unpack(">HH", packed)
+
+
+def int32_to_registers(value: int) -> tuple[int, int]:
+    """Convert int32 to two 16-bit registers (big-endian)."""
+    packed = struct.pack(">i", value)
+    return struct.unpack(">HH", packed)
+
+
+def float32_to_registers_swapped(value: float) -> tuple[int, int]:
+    """Convert float32 to two 16-bit registers (big-endian word-swapped)."""
+    packed = struct.pack(">f", value)
+    r1, r2 = struct.unpack(">HH", packed)
+    return (r2, r1)  # Swap words
 
 
 class PowerMeterSimulator:
@@ -248,21 +281,46 @@ class SimulatorUpdater:
         coils.setValues(ADDR_COIL_RELAY2 + 1, [values["relay2"]])
         coils.setValues(ADDR_COIL_ALARM + 1, [values["alarm"]])
 
+        # Input registers (read-only values that change over time)
+        ir = device.store["i"]
+        # Uptime in hours (simulated from simulator start time)
+        uptime_hours = int((time.time() - self.simulator.start_time) / 3600)
+        r1, r2 = uint32_to_registers(uptime_hours)
+        ir.setValues(ADDR_IR_UPTIME + 1, [r1, r2])
+
+        # Discrete inputs (simulate occasional changes)
+        di = device.store["d"]
+        # Door randomly opens/closes (1% chance per update)
+        if random.random() < 0.01:
+            current = di.getValues(ADDR_DI_DOOR + 1, 1)[0]
+            di.setValues(ADDR_DI_DOOR + 1, [not current])
+
 
 def create_demo_context() -> ModbusServerContext:
     """Create Modbus server context with demo datastore."""
     # Initialize data blocks
-    # Holding registers: 100 registers
-    hr_block = ModbusSequentialDataBlock(0, [0] * 100)
+    # Holding registers: 200 registers (to cover setpoints and swapped floats)
+    hr_block = ModbusSequentialDataBlock(0, [0] * 200)
 
     # Coils: 16 coils
     coil_block = ModbusSequentialDataBlock(0, [False] * 16)
 
-    # Discrete inputs: 16 inputs
-    di_block = ModbusSequentialDataBlock(0, [False] * 16)
+    # Discrete inputs: 16 inputs (with initial states)
+    di_initial = [False] * 16
+    di_initial[ADDR_DI_DOOR] = False  # door closed
+    di_initial[ADDR_DI_FAULT] = False  # no fault
+    di_initial[ADDR_DI_GRID] = True  # grid connected
+    di_block = ModbusSequentialDataBlock(0, di_initial)
 
-    # Input registers: 100 registers
-    ir_block = ModbusSequentialDataBlock(0, [0] * 100)
+    # Input registers: 100 registers (with initial values)
+    ir_initial = [0] * 100
+    # Firmware version: 0x0102 = v1.2
+    ir_initial[ADDR_IR_FIRMWARE] = 0x0102
+    # Serial number: 12345678 as uint32
+    r1, r2 = uint32_to_registers(12345678)
+    ir_initial[ADDR_IR_SERIAL] = r1
+    ir_initial[ADDR_IR_SERIAL + 1] = r2
+    ir_block = ModbusSequentialDataBlock(0, ir_initial)
 
     device = ModbusDeviceContext(
         di=di_block,
@@ -271,7 +329,22 @@ def create_demo_context() -> ModbusServerContext:
         ir=ir_block,
     )
 
-    return ModbusServerContext(slaves=device, single=True)
+    # Set initial values for setpoints in holding registers
+    ctx = ModbusServerContext(slaves=device, single=True)
+    hr = ctx[0].store["h"]
+    hr.setValues(ADDR_VOLTAGE_HIGH + 1, [250])  # 250V high limit
+    hr.setValues(ADDR_VOLTAGE_LOW + 1, [210])  # 210V low limit
+    r1, r2 = int32_to_registers(50000)  # 50kW power limit
+    hr.setValues(ADDR_POWER_LIMIT + 1, [r1, r2])
+    r1, r2 = uint32_to_registers(0)  # energy reset counter
+    hr.setValues(ADDR_ENERGY_RESET + 1, [r1, r2])
+    # Swapped floats
+    r1, r2 = float32_to_registers_swapped(1.0)  # calibration factor
+    hr.setValues(ADDR_CAL_FACTOR + 1, [r1, r2])
+    r1, r2 = float32_to_registers_swapped(0.0)  # offset value
+    hr.setValues(ADDR_OFFSET_VAL + 1, [r1, r2])
+
+    return ctx
 
 
 async def run_demo_server(
