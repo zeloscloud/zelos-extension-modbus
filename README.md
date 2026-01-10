@@ -10,8 +10,9 @@ A Zelos extension for reading, writing, and monitoring Modbus registers. Built w
 - **All register types**: Holding registers, input registers, coils, discrete inputs
 - **User-defined events** for semantic grouping of registers in the Zelos App
 - **Real-time polling** with configurable intervals
-- **Interactive actions** for reading/writing registers from the Zelos App
+- **Read/write actions** for interacting with registers from the Zelos App
 - **Multiple data types**: uint16, int16, uint32, int32, float32, uint64, int64, float64, bool
+- **Byte order options**: Big endian, little endian, and word-swapped variants for PLC compatibility
 - **Demo mode**: Built-in power meter simulator for testing without hardware
 
 ## Quick Start
@@ -65,17 +66,23 @@ The register map uses **user-defined events** to group registers semantically. E
       {"name": "phsA", "address": 0, "type": "holding", "datatype": "float32", "unit": "V"},
       {"name": "phsB", "address": 2, "type": "holding", "datatype": "float32", "unit": "V"}
     ],
-    "voltage/dc": [
-      {"name": "battery_V", "address": 10, "type": "holding", "datatype": "float32", "unit": "V"}
+    "setpoints": [
+      {"name": "voltage_limit", "address": 100, "datatype": "uint16", "unit": "V", "writable": true},
+      {"name": "calibration", "address": 110, "datatype": "float32", "byte_order": "big_swap"}
+    ],
+    "status": [
+      {"name": "firmware", "address": 0, "type": "input", "datatype": "uint16"},
+      {"name": "door_open", "address": 0, "type": "discrete_input"}
     ]
   }
 }
 ```
 
-This creates three Zelos events:
+This creates four Zelos events:
 - `temperature` with fields `pcb_temp` and `overtemp`
 - `voltage/ac` with fields `phsA` and `phsB`
-- `voltage/dc` with field `battery_V`
+- `setpoints` with writable registers and word-swapped byte order
+- `status` with read-only input registers and discrete inputs
 
 Registers of different Modbus types (holding, coil, input, discrete_input) can be mixed within the same event.
 
@@ -89,7 +96,11 @@ Registers of different Modbus types (holding, coil, input, discrete_input) can b
 | `datatype` | No | `uint16` | Data type (see below) |
 | `unit` | No | `""` | Unit string for display |
 | `scale` | No | `1.0` | Scale factor applied to value |
+| `byte_order` | No | `big` | Byte order: `big`, `little`, `big_swap`, `little_swap` |
+| `writable` | No | auto | Whether register can be written (defaults based on type) |
 | `description` | No | `""` | Description for documentation |
+
+**Note:** `writable` defaults to `true` for holding registers and coils, `false` for input registers and discrete inputs.
 
 ### Supported Data Types
 
@@ -104,6 +115,19 @@ Registers of different Modbus types (holding, coil, input, discrete_input) can b
 | `uint64` | 4 | Unsigned 64-bit integer |
 | `int64` | 4 | Signed 64-bit integer |
 | `float64` | 4 | IEEE 754 64-bit float |
+
+### Byte Order
+
+Multi-register values (32-bit and 64-bit types) can use different byte ordering depending on the device:
+
+| Byte Order | Description | Example (0x12345678) |
+|------------|-------------|----------------------|
+| `big` | Big endian (default) | `[0x1234, 0x5678]` |
+| `little` | Little endian | `[0x5678, 0x1234]` |
+| `big_swap` | Big endian, word-swapped | `[0x5678, 0x1234]` |
+| `little_swap` | Little endian, word-swapped | `[0x1234, 0x5678]` |
+
+Word-swapped variants are common in Modicon/Schneider PLCs and some SCADA systems.
 
 ## Configuration
 
@@ -128,9 +152,13 @@ The extension provides these interactive actions in the Zelos App:
 |--------|-------------|
 | **Get Status** | View connection status and polling statistics |
 | **Read Register** | Read register(s) by address |
-| **Write Register** | Write a value to a holding register |
+| **Write Register** | Write a value to a holding register by address |
 | **Read Named Register** | Read a register by name from the map |
+| **Write Named Register** | Write a value to a named register (holding/coil only) |
 | **List Registers** | List all registers in the loaded map |
+| **List Writable Registers** | List registers that can be written |
+
+Write operations are only allowed on writable registers (holding registers and coils by default).
 
 ## Development
 
