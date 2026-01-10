@@ -713,3 +713,147 @@ class TestDemoServerIntegration:
 
         # Check values are reasonable
         assert 200 < results["voltage"]["L1"] < 260
+
+
+# =============================================================================
+# Action Tests
+# =============================================================================
+
+
+class TestActionsUnit:
+    """Unit tests for SDK actions (no network)."""
+
+    @pytest.fixture
+    def client_with_map(self):
+        """Create client with register map but no connection."""
+        data = {
+            "name": "test_device",
+            "events": {
+                "sensors": [
+                    {"name": "temp", "address": 0, "type": "holding", "datatype": "uint16"},
+                    {"name": "humidity", "address": 1, "type": "input", "datatype": "uint16"},
+                ],
+                "controls": [
+                    {"name": "relay", "address": 0, "type": "coil"},
+                    {"name": "setpoint", "address": 10, "type": "holding", "datatype": "float32"},
+                ],
+            },
+        }
+        reg_map = RegisterMap.from_dict(data)
+        return ModbusClient(register_map=reg_map)
+
+    def test_get_status_returns_info(self, client_with_map):
+        """Get Status action returns expected fields."""
+        result = client_with_map.get_status()
+        assert "connected" in result
+        assert "transport" in result
+        assert "unit_id" in result
+        assert "poll_count" in result
+        assert "registers" in result
+        assert result["registers"] == 4
+
+    def test_list_registers_returns_all(self, client_with_map):
+        """List Registers action returns all registers."""
+        result = client_with_map.list_registers()
+        assert result["count"] == 4
+        names = [r["name"] for r in result["registers"]]
+        assert "temp" in names
+        assert "humidity" in names
+        assert "relay" in names
+        assert "setpoint" in names
+
+    def test_list_writable_registers_filters(self, client_with_map):
+        """List Writable Registers only returns writable ones."""
+        result = client_with_map.list_writable_registers()
+        # holding and coil are writable, input is not
+        assert result["count"] == 3
+        names = [r["name"] for r in result["registers"]]
+        assert "temp" in names
+        assert "relay" in names
+        assert "setpoint" in names
+        assert "humidity" not in names  # input register, not writable
+
+    def test_list_registers_no_map(self):
+        """List Registers with no map returns empty."""
+        client = ModbusClient()
+        result = client.list_registers()
+        assert result["count"] == 0
+        assert result["registers"] == []
+
+    def test_list_writable_no_map(self):
+        """List Writable with no map returns empty."""
+        client = ModbusClient()
+        result = client.list_writable_registers()
+        assert result["count"] == 0
+
+    def test_read_named_no_map(self):
+        """Read Named Register with no map returns error."""
+        client = ModbusClient()
+        result = client.read_named_register("anything")
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_read_named_not_found(self, client_with_map):
+        """Read Named Register with unknown name returns error."""
+        result = client_with_map.read_named_register("nonexistent")
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    def test_write_named_no_map(self):
+        """Write Named Register with no map returns error."""
+        client = ModbusClient()
+        result = client.write_named_register("anything", 100)
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_write_named_not_found(self, client_with_map):
+        """Write Named Register with unknown name returns error."""
+        result = client_with_map.write_named_register("nonexistent", 100)
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    def test_write_named_not_writable(self, client_with_map):
+        """Write Named Register to input register returns error."""
+        result = client_with_map.write_named_register("humidity", 100)
+        assert result["success"] is False
+        assert "not writable" in result["error"]
+
+
+class TestActionsIntegration:
+    """Integration tests for SDK actions with demo server.
+
+    Tests actions that don't require network (list actions) and validates
+    action response structure. Network read/write is tested in
+    TestDemoServerIntegration.
+    """
+
+    def test_list_registers_action(self, client):
+        """List Registers action returns all demo registers."""
+        result = client.list_registers()
+        assert result["count"] > 0
+        names = [r["name"] for r in result["registers"]]
+        assert "L1" in names
+        assert "relay1" in names
+        assert "firmware_version" in names
+
+    def test_list_writable_action(self, client):
+        """List Writable action excludes input/discrete registers."""
+        result = client.list_writable_registers()
+        names = [r["name"] for r in result["registers"]]
+        assert "voltage_high_limit" in names
+        assert "relay1" in names
+        assert "firmware_version" not in names
+        assert "door_open" not in names
+
+    def test_get_status_action(self, client):
+        """Get Status action returns info."""
+        result = client.get_status()
+        assert result["connected"] is True
+        assert result["transport"] == "tcp"
+        assert result["registers"] > 0
+
+    def test_write_named_readonly_fails(self, client):
+        """Write Named to input register fails gracefully."""
+        result = client.write_named_register("firmware_version", 999)
+        assert result["success"] is False
+        assert "not writable" in result["error"]
