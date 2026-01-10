@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import struct
 from typing import Any
@@ -598,10 +599,8 @@ class ModbusClient:
         # Connection lost or not established - try to reconnect
         self._connected = False
         if self._client:
-            try:
+            with contextlib.suppress(Exception):
                 self._client.close()
-            except Exception:
-                pass
 
         logger.info(f"Connecting to {self._connection_str}...")
         return await self.connect()
