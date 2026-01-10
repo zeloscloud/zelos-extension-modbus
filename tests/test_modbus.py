@@ -720,6 +720,29 @@ class TestDemoServerIntegration:
 # =============================================================================
 
 
+class TestReconnection:
+    """Tests for connection error detection."""
+
+    def test_is_connection_error_timeout(self):
+        """Timeout errors are detected as connection errors."""
+        client = ModbusClient()
+        assert client._is_connection_error(Exception("Connection timeout")) is True
+        assert client._is_connection_error(Exception("No response received")) is True
+
+    def test_is_connection_error_refused(self):
+        """Connection refused errors are detected."""
+        client = ModbusClient()
+        assert client._is_connection_error(Exception("Connection refused")) is True
+        assert client._is_connection_error(Exception("connection reset by peer")) is True
+
+    def test_is_connection_error_false_for_other(self):
+        """Non-connection errors return False."""
+        client = ModbusClient()
+        assert client._is_connection_error(Exception("Invalid address")) is False
+        assert client._is_connection_error(Exception("Value out of range")) is False
+        assert client._is_connection_error(ValueError("bad value")) is False
+
+
 class TestActionsUnit:
     """Unit tests for SDK actions (no network)."""
 

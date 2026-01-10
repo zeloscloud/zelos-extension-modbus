@@ -586,15 +586,41 @@ class ModbusClient:
         """Run the polling loop (blocking)."""
         asyncio.run(self._run_async())
 
+    async def _ensure_connected(self) -> bool:
+        """Ensure connection is established, reconnecting if needed.
+
+        Returns:
+            True if connected
+        """
+        if self._connected and self._client and self._client.connected:
+            return True
+
+        # Connection lost or not established - try to reconnect
+        self._connected = False
+        if self._client:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+
+        logger.info(f"Connecting to {self._connection_str}...")
+        return await self.connect()
+
     async def _run_async(self) -> None:
-        """Async polling loop."""
-        connected = await self.connect()
-        if not connected:
-            logger.error("Failed to connect, exiting")
-            return
+        """Async polling loop with automatic reconnection."""
+        reconnect_interval = 3.0  # seconds between reconnect attempts
 
         try:
             while self._running:
+                # Ensure we're connected
+                if not await self._ensure_connected():
+                    logger.warning(
+                        f"Connection failed, retrying in {reconnect_interval}s..."
+                    )
+                    await asyncio.sleep(reconnect_interval)
+                    continue
+
+                # Poll registers
                 try:
                     values = await self._poll_registers()
                     await self._log_values(values)
@@ -607,9 +633,30 @@ class ModbusClient:
                     self._error_count += 1
                     logger.error(f"Poll error: {e}")
 
+                    # Check if this looks like a connection error
+                    if self._is_connection_error(e):
+                        self._connected = False
+                        logger.warning("Connection lost, will reconnect...")
+                        continue  # Skip sleep, reconnect immediately
+
                 await asyncio.sleep(self.poll_interval)
         finally:
             await self.disconnect()
+
+    def _is_connection_error(self, error: Exception) -> bool:
+        """Check if an exception indicates a connection problem."""
+        error_str = str(error).lower()
+        connection_indicators = [
+            "connection",
+            "timeout",
+            "refused",
+            "reset",
+            "broken pipe",
+            "no response",
+            "disconnected",
+            "not connected",
+        ]
+        return any(ind in error_str for ind in connection_indicators)
 
     # SDK Action methods
     @zelos_sdk.action("Get Status", "Get connection and polling status")
