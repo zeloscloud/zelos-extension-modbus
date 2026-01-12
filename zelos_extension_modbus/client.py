@@ -252,7 +252,7 @@ class ModbusClient:
     def _get_sdk_datatype(self, datatype: str) -> zelos_sdk.DataType:
         """Map register datatype to Zelos SDK DataType."""
         mapping = {
-            "bool": zelos_sdk.DataType.Bool,
+            "bool": zelos_sdk.DataType.Boolean,
             "uint16": zelos_sdk.DataType.UInt16,
             "int16": zelos_sdk.DataType.Int16,
             "uint32": zelos_sdk.DataType.UInt32,
