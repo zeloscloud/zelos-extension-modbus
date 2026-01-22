@@ -17,7 +17,6 @@ Examples:
 
     # CLI trace mode
     uv run main.py trace 192.168.1.100 registers.json
-    uv run main.py trace /dev/ttyUSB0 registers.json --transport rtu
 """
 
 from __future__ import annotations
@@ -119,19 +118,9 @@ def demo(ctx: click.Context) -> None:
 
 
 @cli.command()
-@click.argument("host_or_port", type=str)
+@click.argument("host", type=str)
 @click.argument("register_map_file", type=click.Path(exists=True), required=False)
-@click.option(
-    "--transport",
-    "-t",
-    type=click.Choice(["tcp", "rtu"]),
-    default="tcp",
-    help="Modbus transport type",
-)
-@click.option("--port", "-p", type=int, default=502, help="TCP port (for tcp transport)")
-@click.option(
-    "--baudrate", "-b", type=int, default=9600, help="Serial baudrate (for rtu transport)"
-)
+@click.option("--port", "-p", type=int, default=502, help="Modbus TCP port")
 @click.option("--unit-id", "-u", type=int, default=1, help="Modbus unit/slave ID")
 @click.option(
     "--interval", "-i", type=float, default=1.0, help="Poll interval in seconds"
@@ -140,19 +129,16 @@ def demo(ctx: click.Context) -> None:
 @click.pass_context
 def trace(
     ctx: click.Context,
-    host_or_port: str,
+    host: str,
     register_map_file: str | None,
-    transport: str,
     port: int,
-    baudrate: int,
     unit_id: int,
     interval: float,
     timeout: float,
 ) -> None:
     """Trace Modbus registers from command line.
 
-    HOST_OR_PORT is either the TCP host address (e.g., 192.168.1.100) for TCP,
-    or the serial port (e.g., /dev/ttyUSB0) for RTU.
+    HOST is the TCP host address (e.g., 192.168.1.100).
 
     REGISTER_MAP_FILE is an optional path to a JSON register map file.
 
@@ -163,9 +149,6 @@ def trace(
 
         # TCP with custom port
         uv run main.py trace 192.168.1.100 registers.json --port 5020
-
-        # RTU serial
-        uv run main.py trace /dev/ttyUSB0 registers.json -t rtu -b 19200
 
         # TCP without register map (raw address mode)
         uv run main.py trace 192.168.1.100
@@ -193,21 +176,16 @@ def trace(
         except Exception as e:
             raise click.ClickException(f"Invalid register map: {e}") from e
 
-    # Build client kwargs
+    # Build client kwargs (TCP only)
     client_kwargs = {
-        "transport": transport,
+        "transport": "tcp",
+        "host": host,
+        "port": port,
         "unit_id": unit_id,
         "timeout": timeout,
         "register_map": register_map,
         "poll_interval": interval,
     }
-
-    if transport == "tcp":
-        client_kwargs["host"] = host_or_port
-        client_kwargs["port"] = port
-    else:  # rtu
-        client_kwargs["serial_port"] = host_or_port
-        client_kwargs["baudrate"] = baudrate
 
     global _client
     _client = ModbusClient(**client_kwargs)
@@ -215,7 +193,7 @@ def trace(
     # Register actions
     zelos_sdk.actions_registry.register(_client)
 
-    logger.info(f"Starting Modbus trace: {transport}://{host_or_port}")
+    logger.info(f"Starting Modbus trace: tcp://{host}:{port}")
     _client.start()
     _client.run()
 

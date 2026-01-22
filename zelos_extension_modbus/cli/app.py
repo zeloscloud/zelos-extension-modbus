@@ -127,23 +127,16 @@ def run_app_mode(demo: bool = False) -> None:
         else:
             logger.warning(f"Register map file not found: {map_file}")
 
-    # Create client based on transport type
-    transport = config.get("transport", "tcp")
-
+    # Create client (TCP only)
     client_kwargs: dict[str, Any] = {
-        "transport": transport,
+        "transport": "tcp",
+        "host": config.get("host", "127.0.0.1"),
+        "port": config.get("port", 502),
         "unit_id": config.get("unit_id", 1),
         "timeout": config.get("timeout", 3.0),
         "register_map": register_map,
         "poll_interval": config.get("poll_interval", 1.0),
     }
-
-    if transport == "tcp":
-        client_kwargs["host"] = config.get("host", "127.0.0.1")
-        client_kwargs["port"] = config.get("port", 502)
-    else:  # rtu
-        client_kwargs["serial_port"] = config.get("serial_port", "/dev/ttyUSB0")
-        client_kwargs["baudrate"] = config.get("baudrate", 9600)
 
     client = ModbusClient(**client_kwargs)
 
