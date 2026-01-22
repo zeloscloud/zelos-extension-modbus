@@ -1,10 +1,10 @@
 # Zelos Modbus
 
-A Zelos extension implementing Modbus TCP/RTU protocol for reading, writing, and monitoring registers. Built with the [Zelos SDK](https://docs.zeloscloud.io/sdk).
+A Zelos extension implementing Modbus TCP protocol for reading, writing, and monitoring registers. Built with the [Zelos SDK](https://docs.zeloscloud.io/sdk).
 
 ## Features
 
-- **Modbus TCP/RTU** - Both transport types supported
+- **Modbus TCP** - Industrial standard protocol
 - **All Register Types** - Holding, input, coils, discrete inputs
 - **User-Defined Events** - Group registers semantically for Zelos App
 - **Read/Write Actions** - Interactive register access from Zelos App
@@ -21,19 +21,16 @@ uv run main.py demo
 # TCP connection
 uv run main.py trace 192.168.1.100 registers.json
 
-# RTU serial
-uv run main.py trace /dev/ttyUSB0 registers.json --transport rtu --baudrate 19200
+# Custom port
+uv run main.py trace 192.168.1.100 registers.json --port 5020
 ```
 
 ## Configuration
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `transport` | string | `tcp` | `tcp` or `rtu` |
 | `host` | string | `127.0.0.1` | TCP host address |
 | `port` | int | `502` | TCP port |
-| `serial_port` | string | `/dev/ttyUSB0` | Serial port for RTU |
-| `baudrate` | int | `9600` | Serial baudrate |
 | `unit_id` | int | `1` | Modbus unit/slave ID |
 | `poll_interval` | float | `1.0` | Polling interval (seconds) |
 | `timeout` | float | `3.0` | Request timeout (seconds) |

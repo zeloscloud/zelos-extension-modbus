@@ -3,7 +3,7 @@
 
 name = "Zelos Modbus"
 version = "0.1.0"
-description = "Modbus TCP/RTU protocol extension for Zelos - read, write, and monitor Modbus registers"
+description = "Modbus TCP protocol extension for Zelos - read, write, and monitor Modbus registers"
 author = "Zelos"
 repository = "https://github.com/zeloscloud/zelos-extension-modbus"
 homepage = "https://github.com/zeloscloud/zelos-extension-modbus"
