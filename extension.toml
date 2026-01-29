@@ -1,7 +1,7 @@
 # Zelos Extension Manifest
 # See https://docs.zeloscloud.io/sdk/how-to/develop-extensions/ for full documentation
 
-name = "Zelos Modbus"
+name = "Modbus"
 version = "0.1.0"
 description = "Modbus TCP protocol extension for Zelos - read, write, and monitor Modbus registers"
 author = "Zelos"
@@ -11,7 +11,7 @@ keywords = ["modbus", "plc", "scada", "industrial", "automation"]
 categories = ["Industrial", "IoT", "Networking", "Automation"]
 
 # File references (relative paths in archive)
-icon = "assets/icon.svg"
+icon = "assets/modbus-icon.png"
 readme = "README.md"
 changelog = "CHANGELOG.md"
 
