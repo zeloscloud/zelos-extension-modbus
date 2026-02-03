@@ -1,0 +1,126 @@
+{
+  "name": "public_modbus_test_server",
+  "description": "Register map for public Modbus test server at 45.8.248.56:502 (Slave ID 1 - UINT16 format)",
+  "events": {
+    "holding_registers": [
+      {
+        "name": "hr_1",
+        "type": "holding",
+        "address": 0,
+        "datatype": "uint16",
+        "description": "Holding Register 1 (writable, may be overwritten by other users)"
+      },
+      {
+        "name": "hr_2",
+        "type": "holding",
+        "address": 1,
+        "datatype": "uint16",
+        "description": "Holding Register 2"
+      },
+      {
+        "name": "hr_3",
+        "type": "holding",
+        "address": 2,
+        "datatype": "uint16",
+        "description": "Holding Register 3"
+      },
+      {
+        "name": "hr_4",
+        "type": "holding",
+        "address": 3,
+        "datatype": "uint16",
+        "description": "Holding Register 4"
+      },
+      {
+        "name": "hr_5",
+        "type": "holding",
+        "address": 4,
+        "datatype": "uint16",
+        "description": "Holding Register 5"
+      }
+    ],
+    "input_registers": [
+      {
+        "name": "ir_1",
+        "type": "input",
+        "address": 0,
+        "datatype": "uint16",
+        "description": "Input Register 1 (auto-incremented every second)"
+      },
+      {
+        "name": "ir_2",
+        "type": "input",
+        "address": 1,
+        "datatype": "uint16",
+        "description": "Input Register 2"
+      },
+      {
+        "name": "ir_3",
+        "type": "input",
+        "address": 2,
+        "datatype": "uint16",
+        "description": "Input Register 3"
+      },
+      {
+        "name": "ir_4",
+        "type": "input",
+        "address": 3,
+        "datatype": "uint16",
+        "description": "Input Register 4"
+      },
+      {
+        "name": "ir_5",
+        "type": "input",
+        "address": 4,
+        "datatype": "uint16",
+        "description": "Input Register 5"
+      }
+    ],
+    "coils": [
+      {
+        "name": "coil_1",
+        "type": "coil",
+        "address": 0,
+        "datatype": "bool",
+        "description": "Coil 1 (writable)"
+      },
+      {
+        "name": "coil_2",
+        "type": "coil",
+        "address": 1,
+        "datatype": "bool",
+        "description": "Coil 2 (writable)"
+      },
+      {
+        "name": "coil_3",
+        "type": "coil",
+        "address": 2,
+        "datatype": "bool",
+        "description": "Coil 3 (writable)"
+      }
+    ],
+    "discrete_inputs": [
+      {
+        "name": "di_1",
+        "type": "discrete_input",
+        "address": 0,
+        "datatype": "bool",
+        "description": "Discrete Input 1 (read-only, auto-generated)"
+      },
+      {
+        "name": "di_2",
+        "type": "discrete_input",
+        "address": 1,
+        "datatype": "bool",
+        "description": "Discrete Input 2"
+      },
+      {
+        "name": "di_3",
+        "type": "discrete_input",
+        "address": 2,
+        "datatype": "bool",
+        "description": "Discrete Input 3"
+      }
+    ]
+  }
+}

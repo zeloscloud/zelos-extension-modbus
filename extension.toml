@@ -2,7 +2,7 @@
 # See https://docs.zeloscloud.io/sdk/how-to/develop-extensions/ for full documentation
 
 name = "Modbus"
-version = "0.1.0"
+version = "0.1.1"
 description = "Modbus TCP protocol extension for Zelos - read, write, and monitor Modbus registers"
 author = "Zelos"
 repository = "https://github.com/zeloscloud/zelos-extension-modbus"

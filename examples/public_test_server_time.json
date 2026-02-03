@@ -1,0 +1,162 @@
+{
+  "name": "public_modbus_time_server",
+  "description": "Register map for public Modbus test server at 45.8.248.56:502 (Slave ID 10 - Time data)",
+  "events": {
+    "utc_time": [
+      {
+        "name": "year",
+        "type": "input",
+        "address": 0,
+        "datatype": "uint16",
+        "description": "UTC Year (Z=0: UTC+00:00)"
+      },
+      {
+        "name": "month",
+        "type": "input",
+        "address": 1,
+        "datatype": "uint16",
+        "description": "UTC Month (1-12)"
+      },
+      {
+        "name": "day",
+        "type": "input",
+        "address": 2,
+        "datatype": "uint16",
+        "description": "UTC Day of month"
+      },
+      {
+        "name": "hour",
+        "type": "input",
+        "address": 3,
+        "datatype": "uint16",
+        "description": "UTC Hour (0-23)"
+      },
+      {
+        "name": "minute",
+        "type": "input",
+        "address": 4,
+        "datatype": "uint16",
+        "description": "UTC Minute (0-59)"
+      },
+      {
+        "name": "second",
+        "type": "input",
+        "address": 5,
+        "datatype": "uint16",
+        "description": "UTC Second (0-59)"
+      },
+      {
+        "name": "day_of_week",
+        "type": "input",
+        "address": 6,
+        "datatype": "uint16",
+        "description": "UTC Day of week"
+      },
+      {
+        "name": "timezone_offset",
+        "type": "input",
+        "address": 7,
+        "datatype": "uint16",
+        "description": "Timezone offset from UTC (hours)"
+      }
+    ],
+    "us_eastern_time": [
+      {
+        "name": "year",
+        "type": "input",
+        "address": 200,
+        "datatype": "uint16",
+        "description": "US Eastern Year (Z=20: UTC-05:00)"
+      },
+      {
+        "name": "month",
+        "type": "input",
+        "address": 201,
+        "datatype": "uint16",
+        "description": "US Eastern Month"
+      },
+      {
+        "name": "day",
+        "type": "input",
+        "address": 202,
+        "datatype": "uint16",
+        "description": "US Eastern Day"
+      },
+      {
+        "name": "hour",
+        "type": "input",
+        "address": 203,
+        "datatype": "uint16",
+        "description": "US Eastern Hour"
+      },
+      {
+        "name": "minute",
+        "type": "input",
+        "address": 204,
+        "datatype": "uint16",
+        "description": "US Eastern Minute"
+      },
+      {
+        "name": "second",
+        "type": "input",
+        "address": 205,
+        "datatype": "uint16",
+        "description": "US Eastern Second"
+      }
+    ],
+    "us_pacific_time": [
+      {
+        "name": "year",
+        "type": "input",
+        "address": 230,
+        "datatype": "uint16",
+        "description": "US Pacific Year (Z=23: UTC-08:00)"
+      },
+      {
+        "name": "month",
+        "type": "input",
+        "address": 231,
+        "datatype": "uint16",
+        "description": "US Pacific Month"
+      },
+      {
+        "name": "day",
+        "type": "input",
+        "address": 232,
+        "datatype": "uint16",
+        "description": "US Pacific Day"
+      },
+      {
+        "name": "hour",
+        "type": "input",
+        "address": 233,
+        "datatype": "uint16",
+        "description": "US Pacific Hour"
+      },
+      {
+        "name": "minute",
+        "type": "input",
+        "address": 234,
+        "datatype": "uint16",
+        "description": "US Pacific Minute"
+      },
+      {
+        "name": "second",
+        "type": "input",
+        "address": 235,
+        "datatype": "uint16",
+        "description": "US Pacific Second"
+      }
+    ],
+    "unix_timestamp": [
+      {
+        "name": "timestamp",
+        "type": "input",
+        "address": 299,
+        "datatype": "uint32",
+        "byte_order": "big",
+        "description": "Unix timestamp (UINT32_ABCD format)"
+      }
+    ]
+  }
+}
