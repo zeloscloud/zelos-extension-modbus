@@ -133,9 +133,7 @@ def demo(ctx: click.Context) -> None:
     "--baudrate", "-b", type=int, default=9600, help="Serial baudrate (for rtu transport)"
 )
 @click.option("--unit-id", "-u", type=int, default=1, help="Modbus unit/slave ID")
-@click.option(
-    "--interval", "-i", type=float, default=1.0, help="Poll interval in seconds"
-)
+@click.option("--interval", "-i", type=float, default=1.0, help="Poll interval in seconds")
 @click.option("--timeout", type=float, default=3.0, help="Request timeout in seconds")
 @click.pass_context
 def trace(

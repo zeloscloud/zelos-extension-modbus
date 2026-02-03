@@ -243,9 +243,7 @@ class ModbusClient:
             fields = []
             for reg in regs:
                 dtype = self._get_sdk_datatype(reg.datatype)
-                fields.append(
-                    zelos_sdk.TraceEventFieldMetadata(reg.name, dtype, reg.unit)
-                )
+                fields.append(zelos_sdk.TraceEventFieldMetadata(reg.name, dtype, reg.unit))
 
             self._source.add_event(event_name, fields)
 
@@ -298,9 +296,7 @@ class ModbusClient:
             return f"{self.host}:{self.port}"
         return f"{self.serial_port}@{self.baudrate}"
 
-    async def read_holding_registers(
-        self, address: int, count: int = 1
-    ) -> list[int] | None:
+    async def read_holding_registers(self, address: int, count: int = 1) -> list[int] | None:
         """Read holding registers.
 
         Args:
@@ -325,9 +321,7 @@ class ModbusClient:
             logger.error(f"Modbus exception reading {address}: {e}")
             return None
 
-    async def read_input_registers(
-        self, address: int, count: int = 1
-    ) -> list[int] | None:
+    async def read_input_registers(self, address: int, count: int = 1) -> list[int] | None:
         """Read input registers.
 
         Args:
@@ -377,9 +371,7 @@ class ModbusClient:
             logger.error(f"Modbus exception reading {address}: {e}")
             return None
 
-    async def read_discrete_inputs(
-        self, address: int, count: int = 1
-    ) -> list[bool] | None:
+    async def read_discrete_inputs(self, address: int, count: int = 1) -> list[bool] | None:
         """Read discrete inputs.
 
         Args:
@@ -506,9 +498,7 @@ class ModbusClient:
 
         return decode_value(raw, register.datatype, register.scale, register.byte_order)
 
-    async def write_register_value(
-        self, register: Register, value: float | int | bool
-    ) -> bool:
+    async def write_register_value(self, register: Register, value: float | int | bool) -> bool:
         """Write a value to a register using its definition.
 
         Args:
@@ -613,9 +603,7 @@ class ModbusClient:
             while self._running:
                 # Ensure we're connected
                 if not await self._ensure_connected():
-                    logger.warning(
-                        f"Connection failed, retrying in {reconnect_interval}s..."
-                    )
+                    logger.warning(f"Connection failed, retrying in {reconnect_interval}s...")
                     await asyncio.sleep(reconnect_interval)
                     continue
 
@@ -681,10 +669,9 @@ class ModbusClient:
         title="Register Type",
     )
     @zelos_sdk.action.number("count", minimum=1, maximum=125, default=1, title="Count")
-    def read_register_action(
-        self, address: int, reg_type: str, count: int
-    ) -> dict[str, Any]:
+    def read_register_action(self, address: int, reg_type: str, count: int) -> dict[str, Any]:
         """Read register(s) by address."""
+
         async def _read() -> list | None:
             if not self._connected:
                 await self.connect()
@@ -711,6 +698,7 @@ class ModbusClient:
     @zelos_sdk.action.number("value", title="Value")
     def write_register_action(self, address: int, value: int) -> dict[str, Any]:
         """Write a single register."""
+
         async def _write() -> bool:
             if not self._connected:
                 await self.connect()

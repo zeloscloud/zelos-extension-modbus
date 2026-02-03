@@ -144,10 +144,10 @@ class PowerMeterSimulator:
         # Power calculation (3-phase)
         power_factor = 0.85 + 0.1 * math.sin(t * 0.02)  # Varies 0.75-0.95
         power_total = (
-            voltage_l1 * current_l1
-            + voltage_l2 * current_l2
-            + voltage_l3 * current_l3
-        ) * power_factor / 1000.0  # kW
+            (voltage_l1 * current_l1 + voltage_l2 * current_l2 + voltage_l3 * current_l3)
+            * power_factor
+            / 1000.0
+        )  # kW
 
         # Frequency with tiny drift
         frequency = self.nominal_frequency + 0.05 * math.sin(t * 0.3)

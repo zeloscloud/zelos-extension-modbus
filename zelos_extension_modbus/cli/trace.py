@@ -24,9 +24,7 @@ logger = logging.getLogger(__name__)
 @click.argument("register_map_file", type=click.Path(exists=True), required=False)
 @click.option("--port", "-p", type=int, default=502, help="Modbus TCP port")
 @click.option("--unit-id", "-u", type=int, default=1, help="Modbus unit/slave ID")
-@click.option(
-    "--interval", "-i", type=float, default=1.0, help="Poll interval in seconds"
-)
+@click.option("--interval", "-i", type=float, default=1.0, help="Poll interval in seconds")
 @click.option("--timeout", type=float, default=3.0, help="Request timeout in seconds")
 @click.pass_context
 def trace(
