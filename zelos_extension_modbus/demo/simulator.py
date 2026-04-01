@@ -275,10 +275,8 @@ class SimulatorUpdater:
         # Temperature (int16, scaled)
         hr.setValues(ADDR_TEMPERATURE + 1, [values["temperature"] & 0xFFFF])
 
-        # Coils
+        # Coils — only write alarm (simulator-driven); relay1/relay2 are user-controlled
         coils = device.store["c"]
-        coils.setValues(ADDR_COIL_RELAY1 + 1, [values["relay1"]])
-        coils.setValues(ADDR_COIL_RELAY2 + 1, [values["relay2"]])
         coils.setValues(ADDR_COIL_ALARM + 1, [values["alarm"]])
 
         # Input registers (read-only values that change over time)

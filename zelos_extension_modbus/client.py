@@ -238,7 +238,6 @@ class ModbusClient:
 
         # Zelos SDK trace source
         self._source: zelos_sdk.TraceSourceCacheLast | None = None
-        self._schema_emitted = False
 
     def _create_client(self) -> AsyncModbusTcpClient | AsyncModbusSerialClient:
         """Create the appropriate Modbus client."""
@@ -666,10 +665,13 @@ class ModbusClient:
 
     def _is_connection_error(self, error: Exception) -> bool:
         """Check if an exception indicates a connection problem."""
+        if isinstance(error, (ConnectionError, TimeoutError, OSError)):
+            return True
         error_str = str(error).lower()
         connection_indicators = [
             "connection",
             "timeout",
+            "timed out",
             "refused",
             "reset",
             "broken pipe",
