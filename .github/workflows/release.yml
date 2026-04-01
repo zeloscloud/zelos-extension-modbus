@@ -75,7 +75,7 @@ jobs:
           echo "✓ Package created: $(ls $PACKAGE_FILE)"
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2.5.0
+        uses: softprops/action-gh-release@v2.6.1
         with:
           files: "*-v${{ steps.version.outputs.VERSION }}.tar.gz"
           generate_release_notes: true
