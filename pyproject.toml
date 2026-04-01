@@ -17,8 +17,9 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "zelos-sdk>=0.0.8",
+    "zelos-sdk>=0.0.9",
     "pymodbus>=3.6.0",
+    "pyserial>=3.5",
     "rich-click>=1.8.0",
 ]
 

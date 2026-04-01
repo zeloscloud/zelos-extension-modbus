@@ -2,68 +2,263 @@
   "$comment": "Modbus extension configuration schema. See https://docs.zeloscloud.io/sdk/how-to/develop-extensions/#configuration",
   "type": "object",
   "title": "Modbus Configuration",
-  "description": "Configure your Modbus TCP connection and register polling",
+  "description": "Connect to one or more Modbus devices over TCP or RS232/RS485 serial (RTU).",
   "properties": {
-    "demo": {
-      "type": "boolean",
-      "title": "Demo Mode",
-      "description": "Use built-in power meter simulator (no hardware required)",
-      "default": false
-    },
-    "host": {
-      "type": "string",
-      "title": "Host",
-      "description": "Modbus TCP host address",
-      "default": "127.0.0.1"
-    },
-    "port": {
-      "type": "integer",
-      "title": "Port",
-      "description": "Modbus TCP port",
-      "default": 502,
-      "minimum": 1,
-      "maximum": 65535
-    },
-    "unit_id": {
-      "type": "integer",
-      "title": "Unit ID",
-      "description": "Modbus slave/unit ID",
-      "default": 1,
-      "minimum": 0,
-      "maximum": 255
-    },
-    "register_map_file": {
-      "type": "string",
-      "title": "Register Map File",
-      "description": "Path to JSON register map file (optional)",
-      "ui:widget": "file-picker",
-      "ui:options": {
-        "accept": ".json"
+    "interfaces": {
+      "type": "array",
+      "title": "Interfaces",
+      "description": "Configure Modbus interfaces to monitor. Click 'Add' to add a new interface.",
+      "minItems": 1,
+      "items": {
+        "title": "Interface",
+        "type": "object",
+        "properties": {
+          "transport": {
+            "type": "string",
+            "title": "Transport",
+            "description": "How does your device communicate? Select TCP for Ethernet/IP connections, or RTU for RS232/RS485 serial.",
+            "enum": [
+              "tcp",
+              "rtu"
+            ],
+            "enumNames": [
+              "TCP (Ethernet)",
+              "RTU (Serial RS232/RS485)"
+            ],
+            "default": "tcp"
+          }
+        },
+        "required": [
+          "transport"
+        ],
+        "dependencies": {
+          "transport": {
+            "oneOf": [
+              {
+                "properties": {
+                  "transport": {
+                    "enum": [
+                      "tcp"
+                    ]
+                  },
+                  "name": {
+                    "type": "string",
+                    "title": "Name",
+                    "description": "Optional name to identify this interface (defaults to host address)",
+                    "ui:placeholder": "power_meter_1"
+                  },
+                  "host": {
+                    "type": "string",
+                    "title": "Host",
+                    "description": "IP address or hostname of the Modbus TCP device",
+                    "default": "127.0.0.1",
+                    "ui:placeholder": "192.168.1.100"
+                  },
+                  "port": {
+                    "type": "integer",
+                    "title": "Port",
+                    "description": "Modbus TCP port (standard: 502)",
+                    "default": 502,
+                    "minimum": 1,
+                    "maximum": 65535
+                  },
+                  "unit_id": {
+                    "type": "integer",
+                    "title": "Unit ID",
+                    "description": "Modbus slave/unit ID of the target device",
+                    "default": 1,
+                    "minimum": 0,
+                    "maximum": 255
+                  },
+                  "register_map_file": {
+                    "type": "string",
+                    "title": "Register Map File",
+                    "description": "JSON file that defines which registers to read and how to decode them",
+                    "ui:widget": "file-picker",
+                    "ui:options": {
+                      "accept": ".json"
+                    }
+                  },
+                  "poll_interval": {
+                    "type": "number",
+                    "title": "Poll Interval (seconds)",
+                    "description": "How often to read all registers",
+                    "default": 1.0,
+                    "minimum": 0.1,
+                    "maximum": 60.0
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "title": "Timeout (seconds)",
+                    "description": "How long to wait for a response before retrying",
+                    "default": 3.0,
+                    "minimum": 0.5,
+                    "maximum": 30.0
+                  },
+                  "write_mode": {
+                    "type": "string",
+                    "title": "Write Mode",
+                    "description": "Function code for single-register writes. 'auto' uses FC 6; 'fc16' always uses FC 16 (required by some devices).",
+                    "enum": [
+                      "auto",
+                      "fc16"
+                    ],
+                    "enumNames": [
+                      "Auto (FC 6 / FC 16)",
+                      "Always FC 16"
+                    ],
+                    "default": "auto"
+                  }
+                },
+                "required": [
+                  "host",
+                  "port",
+                  "unit_id"
+                ]
+              },
+              {
+                "properties": {
+                  "transport": {
+                    "enum": [
+                      "rtu"
+                    ]
+                  },
+                  "name": {
+                    "type": "string",
+                    "title": "Name",
+                    "description": "Optional name to identify this interface (defaults to serial port path)",
+                    "ui:placeholder": "generator_rs232"
+                  },
+                  "serial_port": {
+                    "type": "string",
+                    "title": "Serial Port",
+                    "description": "Device path for the RS232/RS485 adapter (e.g. /dev/ttyUSB0 on Linux, COM3 on Windows)",
+                    "ui:placeholder": "/dev/ttyUSB0"
+                  },
+                  "baudrate": {
+                    "type": "integer",
+                    "title": "Baudrate",
+                    "description": "Serial communication speed \u2014 must match the device setting",
+                    "enum": [
+                      1200,
+                      2400,
+                      4800,
+                      9600,
+                      19200,
+                      38400,
+                      57600,
+                      115200
+                    ],
+                    "default": 9600
+                  },
+                  "parity": {
+                    "type": "string",
+                    "title": "Parity",
+                    "description": "Error-checking parity bit \u2014 must match the device setting",
+                    "enum": [
+                      "N",
+                      "E",
+                      "O"
+                    ],
+                    "enumNames": [
+                      "None",
+                      "Even",
+                      "Odd"
+                    ],
+                    "default": "N"
+                  },
+                  "stopbits": {
+                    "type": "integer",
+                    "title": "Stop Bits",
+                    "description": "Number of stop bits \u2014 must match the device setting",
+                    "enum": [
+                      1,
+                      2
+                    ],
+                    "default": 1
+                  },
+                  "bytesize": {
+                    "type": "integer",
+                    "title": "Data Bits",
+                    "description": "Number of data bits per frame \u2014 must match the device setting",
+                    "enum": [
+                      7,
+                      8
+                    ],
+                    "default": 8
+                  },
+                  "unit_id": {
+                    "type": "integer",
+                    "title": "Unit ID",
+                    "description": "Modbus slave/unit ID of the target device",
+                    "default": 1,
+                    "minimum": 0,
+                    "maximum": 255
+                  },
+                  "register_map_file": {
+                    "type": "string",
+                    "title": "Register Map File",
+                    "description": "JSON file that defines which registers to read and how to decode them",
+                    "ui:widget": "file-picker",
+                    "ui:options": {
+                      "accept": ".json"
+                    }
+                  },
+                  "poll_interval": {
+                    "type": "number",
+                    "title": "Poll Interval (seconds)",
+                    "description": "How often to read all registers. For intermittent-access devices, 1.0s or higher is recommended.",
+                    "default": 1.0,
+                    "minimum": 0.1,
+                    "maximum": 60.0
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "title": "Timeout (seconds)",
+                    "description": "How long to wait for a response before retrying",
+                    "default": 3.0,
+                    "minimum": 0.5,
+                    "maximum": 30.0
+                  },
+                  "write_mode": {
+                    "type": "string",
+                    "title": "Write Mode",
+                    "description": "Function code for single-register writes. 'auto' uses FC 6; 'fc16' always uses FC 16 (required by some devices).",
+                    "enum": [
+                      "auto",
+                      "fc16"
+                    ],
+                    "enumNames": [
+                      "Auto (FC 6 / FC 16)",
+                      "Always FC 16"
+                    ],
+                    "default": "auto"
+                  }
+                },
+                "required": [
+                  "serial_port",
+                  "unit_id"
+                ]
+              }
+            ]
+          }
+        }
       }
-    },
-    "poll_interval": {
-      "type": "number",
-      "title": "Poll Interval (seconds)",
-      "description": "How often to poll registers",
-      "default": 1.0,
-      "minimum": 0.1,
-      "maximum": 60.0
-    },
-    "timeout": {
-      "type": "number",
-      "title": "Timeout (seconds)",
-      "description": "Modbus request timeout",
-      "default": 3.0,
-      "minimum": 0.5,
-      "maximum": 30.0
     },
     "log_level": {
       "type": "string",
       "title": "Log Level",
-      "description": "Logging verbosity",
-      "enum": ["DEBUG", "INFO", "WARNING", "ERROR"],
+      "description": "Extension logging verbosity",
+      "enum": [
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR"
+      ],
       "default": "INFO"
     }
   },
-  "required": ["host", "port", "unit_id"]
+  "required": [
+    "interfaces"
+  ]
 }
