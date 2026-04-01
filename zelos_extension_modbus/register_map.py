@@ -30,10 +30,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from zelos_extension_modbus.constants import ByteOrder, RegisterType
+
 logger = logging.getLogger(__name__)
 
 # Supported register types (Modbus protocol)
-REGISTER_TYPES = {"coil", "discrete_input", "input", "holding"}
+REGISTER_TYPES = set(RegisterType)
 
 # Supported data types and their register counts
 DATATYPES = {
@@ -49,11 +51,7 @@ DATATYPES = {
 }
 
 # Supported byte orders for multi-register values
-# big: AB CD (standard Modbus)
-# little: DC BA
-# big_swap: CD AB (common in some PLCs - big endian with word swap)
-# little_swap: BA DC
-BYTE_ORDERS = {"big", "little", "big_swap", "little_swap"}
+BYTE_ORDERS = set(ByteOrder)
 
 
 @dataclass
@@ -62,11 +60,11 @@ class Register:
 
     address: int
     name: str
-    type: str = "holding"
+    type: str = RegisterType.HOLDING
     datatype: str = "uint16"
     unit: str = ""
     scale: float = 1.0
-    byte_order: str = "big"
+    byte_order: str = ByteOrder.BIG
     description: str = ""
     writable: bool = True
 
@@ -87,7 +85,7 @@ class Register:
             msg = f"Invalid byte_order '{self.byte_order}'. Must be one of {BYTE_ORDERS}"
             raise ValueError(msg)
         # Input registers and discrete inputs are read-only by Modbus spec
-        if self.type in ("input", "discrete_input"):
+        if self.type in (RegisterType.INPUT, RegisterType.DISCRETE_INPUT):
             self.writable = False
 
 

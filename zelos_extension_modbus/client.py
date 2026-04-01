@@ -12,9 +12,28 @@ import zelos_sdk
 from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient
 from pymodbus.exceptions import ModbusException
 
+from zelos_extension_modbus.constants import (
+    ByteOrder,
+    RegisterType,
+    Transport,
+    WriteMode,
+)
 from zelos_extension_modbus.register_map import Register, RegisterMap
 
 logger = logging.getLogger(__name__)
+
+# SDK data type mapping (module-level constant)
+SDK_DATATYPE_MAP: dict[str, zelos_sdk.DataType] = {
+    "bool": zelos_sdk.DataType.Boolean,
+    "uint16": zelos_sdk.DataType.UInt16,
+    "int16": zelos_sdk.DataType.Int16,
+    "uint32": zelos_sdk.DataType.UInt32,
+    "int32": zelos_sdk.DataType.Int32,
+    "float32": zelos_sdk.DataType.Float32,
+    "uint64": zelos_sdk.DataType.UInt64,
+    "int64": zelos_sdk.DataType.Int64,
+    "float64": zelos_sdk.DataType.Float64,
+}
 
 
 def _reorder_registers(registers: list[int], byte_order: str, for_decode: bool = True) -> list[int]:
@@ -33,19 +52,19 @@ def _reorder_registers(registers: list[int], byte_order: str, for_decode: bool =
 
     regs = list(registers)
 
-    if byte_order == "big":
+    if byte_order == ByteOrder.BIG:
         # Standard Modbus: AB CD (no change)
         pass
-    elif byte_order == "little":
+    elif byte_order == ByteOrder.LITTLE:
         # Full little endian: DC BA (reverse all)
         regs = regs[::-1]
-    elif byte_order == "big_swap":
+    elif byte_order == ByteOrder.BIG_SWAP:
         # Big endian with word swap: CD AB (swap pairs)
         if len(regs) == 2:
             regs = [regs[1], regs[0]]
         elif len(regs) == 4:
             regs = [regs[1], regs[0], regs[3], regs[2]]
-    elif byte_order == "little_swap":
+    elif byte_order == ByteOrder.LITTLE_SWAP:
         # Little endian with word swap: BA DC
         if len(regs) == 2:
             regs = [regs[1], regs[0]]
@@ -161,15 +180,20 @@ class ModbusClient:
 
     def __init__(
         self,
-        transport: str = "tcp",
+        transport: str = Transport.TCP,
         host: str = "127.0.0.1",
         port: int = 502,
         serial_port: str = "/dev/ttyUSB0",
         baudrate: int = 9600,
+        parity: str = "N",
+        stopbits: int = 1,
+        bytesize: int = 8,
         unit_id: int = 1,
         timeout: float = 3.0,
         register_map: RegisterMap | None = None,
         poll_interval: float = 1.0,
+        write_mode: str = WriteMode.AUTO,
+        interface_name: str | None = None,
     ) -> None:
         """Initialize Modbus client.
 
@@ -179,26 +203,38 @@ class ModbusClient:
             port: TCP port
             serial_port: Serial port for RTU
             baudrate: Serial baudrate for RTU
+            parity: Serial parity ('N', 'E', 'O')
+            stopbits: Number of stop bits (1 or 2)
+            bytesize: Number of data bits (7 or 8)
             unit_id: Modbus slave/unit ID
             timeout: Request timeout in seconds
             register_map: Optional register map for named access
             poll_interval: Polling interval in seconds
+            write_mode: 'auto' (FC 6 for single, FC 16 for multi) or
+                        'fc16' (always FC 16 for all writes)
+            interface_name: Optional name for this interface (used for trace source naming)
         """
         self.transport = transport
         self.host = host
         self.port = port
         self.serial_port = serial_port
         self.baudrate = baudrate
+        self.parity = parity
+        self.stopbits = stopbits
+        self.bytesize = bytesize
         self.unit_id = unit_id
         self.timeout = timeout
         self.register_map = register_map
         self.poll_interval = poll_interval
+        self.write_mode = write_mode
+        self.interface_name = interface_name
 
         self._client: AsyncModbusTcpClient | AsyncModbusSerialClient | None = None
         self._running = False
         self._connected = False
         self._poll_count = 0
         self._error_count = 0
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         # Zelos SDK trace source
         self._source: zelos_sdk.TraceSourceCacheLast | None = None
@@ -206,7 +242,7 @@ class ModbusClient:
 
     def _create_client(self) -> AsyncModbusTcpClient | AsyncModbusSerialClient:
         """Create the appropriate Modbus client."""
-        if self.transport == "tcp":
+        if self.transport == Transport.TCP:
             return AsyncModbusTcpClient(
                 host=self.host,
                 port=self.port,
@@ -216,12 +252,20 @@ class ModbusClient:
             return AsyncModbusSerialClient(
                 port=self.serial_port,
                 baudrate=self.baudrate,
+                parity=self.parity,
+                stopbits=self.stopbits,
+                bytesize=self.bytesize,
                 timeout=self.timeout,
             )
 
     def _init_trace_source(self) -> None:
         """Initialize Zelos trace source and define schema from register map."""
-        source_name = self.register_map.name if self.register_map else "modbus"
+        if self.interface_name:
+            source_name = self.interface_name
+        elif self.register_map:
+            source_name = self.register_map.name
+        else:
+            source_name = "modbus"
         self._source = zelos_sdk.TraceSourceCacheLast(source_name)
 
         if not self.register_map or not self.register_map.events:
@@ -249,18 +293,7 @@ class ModbusClient:
 
     def _get_sdk_datatype(self, datatype: str) -> zelos_sdk.DataType:
         """Map register datatype to Zelos SDK DataType."""
-        mapping = {
-            "bool": zelos_sdk.DataType.Boolean,
-            "uint16": zelos_sdk.DataType.UInt16,
-            "int16": zelos_sdk.DataType.Int16,
-            "uint32": zelos_sdk.DataType.UInt32,
-            "int32": zelos_sdk.DataType.Int32,
-            "float32": zelos_sdk.DataType.Float32,
-            "uint64": zelos_sdk.DataType.UInt64,
-            "int64": zelos_sdk.DataType.Int64,
-            "float64": zelos_sdk.DataType.Float64,
-        }
-        return mapping.get(datatype, zelos_sdk.DataType.Int32)
+        return SDK_DATATYPE_MAP.get(datatype, zelos_sdk.DataType.Int32)
 
     async def connect(self) -> bool:
         """Connect to Modbus device.
@@ -292,9 +325,10 @@ class ModbusClient:
     @property
     def _connection_str(self) -> str:
         """Get connection string for logging."""
-        if self.transport == "tcp":
-            return f"{self.host}:{self.port}"
-        return f"{self.serial_port}@{self.baudrate}"
+        prefix = f"[{self.interface_name}] " if self.interface_name else ""
+        if self.transport == Transport.TCP:
+            return f"{prefix}{self.host}:{self.port}"
+        return f"{prefix}{self.serial_port}@{self.baudrate}"
 
     async def read_holding_registers(self, address: int, count: int = 1) -> list[int] | None:
         """Read holding registers.
@@ -480,14 +514,14 @@ class ModbusClient:
         Returns:
             Decoded value or None on error
         """
-        if register.type == "holding":
+        if register.type == RegisterType.HOLDING:
             raw = await self.read_holding_registers(register.address, register.count)
-        elif register.type == "input":
+        elif register.type == RegisterType.INPUT:
             raw = await self.read_input_registers(register.address, register.count)
-        elif register.type == "coil":
+        elif register.type == RegisterType.COIL:
             result = await self.read_coils(register.address, 1)
             return result[0] if result else None
-        elif register.type == "discrete_input":
+        elif register.type == RegisterType.DISCRETE_INPUT:
             result = await self.read_discrete_inputs(register.address, 1)
             return result[0] if result else None
         else:
@@ -512,15 +546,14 @@ class ModbusClient:
             logger.warning(f"Register '{register.name}' is not writable (type: {register.type})")
             return False
 
-        if register.type == "coil":
+        if register.type == RegisterType.COIL:
             return await self.write_coil(register.address, bool(value))
 
         raw = encode_value(value, register.datatype, register.scale, register.byte_order)
 
-        if len(raw) == 1:
+        if len(raw) == 1 and self.write_mode != WriteMode.FC16:
             return await self.write_register(register.address, raw[0])
-        else:
-            return await self.write_registers(register.address, raw)
+        return await self.write_registers(register.address, raw)
 
     async def _poll_registers(self) -> dict[str, dict[str, Any]]:
         """Poll all registers in the register map.
@@ -597,6 +630,7 @@ class ModbusClient:
 
     async def _run_async(self) -> None:
         """Async polling loop with automatic reconnection."""
+        self._loop = asyncio.get_running_loop()
         reconnect_interval = 3.0  # seconds between reconnect attempts
 
         try:
@@ -644,188 +678,3 @@ class ModbusClient:
             "not connected",
         ]
         return any(ind in error_str for ind in connection_indicators)
-
-    # SDK Action methods
-    @zelos_sdk.action("Get Status", "Get connection and polling status")
-    def get_status(self) -> dict[str, Any]:
-        """Get current client status."""
-        return {
-            "connected": self._connected,
-            "transport": self.transport,
-            "connection": self._connection_str,
-            "unit_id": self.unit_id,
-            "poll_count": self._poll_count,
-            "error_count": self._error_count,
-            "poll_interval": self.poll_interval,
-            "registers": len(self.register_map.registers) if self.register_map else 0,
-        }
-
-    @zelos_sdk.action("Read Register", "Read a single register by address")
-    @zelos_sdk.action.number("address", minimum=0, maximum=65535, title="Address")
-    @zelos_sdk.action.select(
-        "reg_type",
-        choices=["holding", "input", "coil", "discrete_input"],
-        default="holding",
-        title="Register Type",
-    )
-    @zelos_sdk.action.number("count", minimum=1, maximum=125, default=1, title="Count")
-    def read_register_action(self, address: int, reg_type: str, count: int) -> dict[str, Any]:
-        """Read register(s) by address."""
-
-        async def _read() -> list | None:
-            if not self._connected:
-                await self.connect()
-            if reg_type == "holding":
-                return await self.read_holding_registers(int(address), int(count))
-            elif reg_type == "input":
-                return await self.read_input_registers(int(address), int(count))
-            elif reg_type == "coil":
-                return await self.read_coils(int(address), int(count))
-            else:  # discrete_input
-                return await self.read_discrete_inputs(int(address), int(count))
-
-        result = asyncio.run(_read())
-        return {
-            "address": address,
-            "type": reg_type,
-            "count": count,
-            "values": result,
-            "success": result is not None,
-        }
-
-    @zelos_sdk.action("Write Register", "Write a value to a holding register")
-    @zelos_sdk.action.number("address", minimum=0, maximum=65535, title="Address")
-    @zelos_sdk.action.number("value", title="Value")
-    def write_register_action(self, address: int, value: int) -> dict[str, Any]:
-        """Write a single register."""
-
-        async def _write() -> bool:
-            if not self._connected:
-                await self.connect()
-            return await self.write_register(int(address), int(value))
-
-        success = asyncio.run(_write())
-        return {
-            "address": address,
-            "value": value,
-            "success": success,
-        }
-
-    @zelos_sdk.action("Read Named Register", "Read a register by name from the map")
-    @zelos_sdk.action.text("name", title="Register Name")
-    def read_named_register(self, name: str) -> dict[str, Any]:
-        """Read a register by name from the register map."""
-        if not self.register_map:
-            return {"error": "No register map loaded", "success": False}
-
-        reg = self.register_map.get_by_name(name)
-        if not reg:
-            return {"error": f"Register '{name}' not found", "success": False}
-
-        async def _read() -> Any:
-            if not self._connected:
-                await self.connect()
-            return await self.read_register_value(reg)
-
-        value = asyncio.run(_read())
-        return {
-            "name": name,
-            "address": reg.address,
-            "type": reg.type,
-            "datatype": reg.datatype,
-            "value": value,
-            "unit": reg.unit,
-            "success": value is not None,
-        }
-
-    @zelos_sdk.action("List Registers", "List all registers in the map")
-    def list_registers(self) -> dict[str, Any]:
-        """List all registers in the register map."""
-        if not self.register_map:
-            return {"registers": [], "count": 0}
-
-        regs = [
-            {
-                "name": r.name,
-                "address": r.address,
-                "type": r.type,
-                "datatype": r.datatype,
-                "unit": r.unit,
-                "writable": r.writable,
-                "byte_order": r.byte_order,
-            }
-            for r in self.register_map.registers
-        ]
-        return {"registers": regs, "count": len(regs)}
-
-    @zelos_sdk.action("Write Named Register", "Write a value to a register by name")
-    @zelos_sdk.action.text("name", title="Register Name")
-    @zelos_sdk.action.number("value", title="Value")
-    def write_named_register(self, name: str, value: float) -> dict[str, Any]:
-        """Write a value to a register by name from the register map."""
-        if not self.register_map:
-            return {"error": "No register map loaded", "success": False}
-
-        reg = self.register_map.get_by_name(name)
-        if not reg:
-            return {"error": f"Register '{name}' not found", "success": False}
-
-        if not reg.writable:
-            return {
-                "error": f"Register '{name}' is not writable (type: {reg.type})",
-                "success": False,
-            }
-
-        async def _write() -> bool:
-            if not self._connected:
-                await self.connect()
-            return await self.write_register_value(reg, value)
-
-        success = asyncio.run(_write())
-        return {
-            "name": name,
-            "address": reg.address,
-            "type": reg.type,
-            "datatype": reg.datatype,
-            "value": value,
-            "unit": reg.unit,
-            "success": success,
-        }
-
-    @zelos_sdk.action("Write Coil", "Write a boolean value to a coil")
-    @zelos_sdk.action.number("address", minimum=0, maximum=65535, title="Address")
-    @zelos_sdk.action.select("value", choices=["ON", "OFF"], default="OFF", title="Value")
-    def write_coil_action(self, address: int, value: str) -> dict[str, Any]:
-        """Write a coil by address."""
-        bool_value = value == "ON"
-
-        async def _write() -> bool:
-            if not self._connected:
-                await self.connect()
-            return await self.write_coil(int(address), bool_value)
-
-        success = asyncio.run(_write())
-        return {
-            "address": address,
-            "value": bool_value,
-            "success": success,
-        }
-
-    @zelos_sdk.action("List Writable Registers", "List all writable registers")
-    def list_writable_registers(self) -> dict[str, Any]:
-        """List all writable registers in the register map."""
-        if not self.register_map:
-            return {"registers": [], "count": 0}
-
-        regs = [
-            {
-                "name": r.name,
-                "address": r.address,
-                "type": r.type,
-                "datatype": r.datatype,
-                "unit": r.unit,
-                "byte_order": r.byte_order,
-            }
-            for r in self.register_map.writable_registers
-        ]
-        return {"registers": regs, "count": len(regs)}

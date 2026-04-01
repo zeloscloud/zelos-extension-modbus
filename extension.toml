@@ -13,7 +13,6 @@ categories = ["Industrial", "IoT", "Networking", "Automation"]
 # File references (relative paths in archive)
 icon = "assets/modbus-icon.png"
 readme = "README.md"
-changelog = "CHANGELOG.md"
 
 # Compatibility (optional, defaults to ^25.0.20)
 [zelos]
