@@ -8,8 +8,11 @@ Tests core functionality:
 """
 
 import asyncio
+import contextlib
 import json
+import shutil
 import struct
+import subprocess
 import tempfile
 import threading
 import time
@@ -393,7 +396,7 @@ class DemoServer:
         self.port = port
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._server_task = None
+        self._server = None
 
     def start(self):
         """Start server in background thread."""
@@ -404,7 +407,7 @@ class DemoServer:
 
     def _run(self):
         """Run server event loop."""
-        from pymodbus.server import StartAsyncTcpServer
+        from pymodbus.server import ModbusTcpServer
 
         from zelos_extension_modbus.demo.simulator import SimulatorUpdater
 
@@ -413,23 +416,32 @@ class DemoServer:
 
         context = create_demo_context()
         simulator = PowerMeterSimulator()
-        updater = SimulatorUpdater(simulator, context, interval=0.05)
-        updater.start()
+        self._updater = SimulatorUpdater(simulator, context, interval=0.05)
+        self._updater.start()
 
         async def run_server():
-            await StartAsyncTcpServer(context=context, address=(self.host, self.port))
+            self._server = ModbusTcpServer(context, address=(self.host, self.port))
+            await self._server.serve_forever()
 
         try:
             self._loop.run_until_complete(run_server())
         except Exception:
             pass
         finally:
-            updater.stop()
+            self._updater.stop()
 
     def stop(self):
-        """Stop the server."""
-        if self._loop:
+        """Stop the server and release the port."""
+        if self._server and self._loop and not self._loop.is_closed():
+            future = asyncio.run_coroutine_threadsafe(self._server.shutdown(), self._loop)
+            with contextlib.suppress(Exception):
+                future.result(timeout=3)
+        if self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread:
+            self._thread.join(timeout=3)
+        if self._loop and not self._loop.is_closed():
+            self._loop.close()
 
 
 @pytest.fixture(scope="module")
@@ -743,6 +755,701 @@ class TestReconnection:
         assert client._is_connection_error(Exception("Invalid address")) is False
         assert client._is_connection_error(Exception("Value out of range")) is False
         assert client._is_connection_error(ValueError("bad value")) is False
+
+
+# =============================================================================
+# Trace Source Init Tests
+# =============================================================================
+
+
+class TestInitTraceSource:
+    """Tests for _init_trace_source."""
+
+    def test_init_trace_source_no_register_map(self):
+        """Without a register map, a generic 'raw' event is created."""
+        client = ModbusClient()
+        client._init_trace_source()
+        assert client._source is not None
+
+    def test_init_trace_source_with_register_map(self):
+        """With a register map, events match the map."""
+        data = {
+            "name": "device",
+            "events": {
+                "sensors": [
+                    {"name": "temp", "address": 0, "datatype": "uint16"},
+                ],
+            },
+        }
+        reg_map = RegisterMap.from_dict(data)
+        client = ModbusClient(register_map=reg_map)
+        client._init_trace_source()
+        assert client._source is not None
+
+
+# =============================================================================
+# Write Mode Tests
+# =============================================================================
+
+
+class TestWriteMode:
+    """Tests for write_mode=fc16."""
+
+    def test_fc16_mode_uses_write_registers(self, demo_server, register_map):
+        """With write_mode='fc16', even single-register writes use FC 16."""
+        client = ModbusClient(
+            host=demo_server.host,
+            port=demo_server.port,
+            register_map=register_map,
+            write_mode="fc16",
+        )
+
+        async def run():
+            await client.connect()
+            reg = register_map.get_by_name("voltage_high_limit")
+            # This is a uint16 (single register) but fc16 mode should still work
+            success = await client.write_register_value(reg, 240)
+            assert success is True
+            value = await client.read_register_value(reg)
+            assert value == 240
+            await client.disconnect()
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+
+# =============================================================================
+# TCP Reconnection Integration Tests
+# =============================================================================
+
+
+class TestTcpReconnection:
+    """Test that the polling loop recovers when a TCP server goes offline and comes back."""
+
+    def test_tcp_reconnect_after_server_restart(self, register_map):
+        """Server goes offline, reads fail, server comes back, reads succeed again."""
+        port = 15021  # dedicated port to avoid collision with module-scoped demo_server
+
+        # Start server
+        server = DemoServer(port=port)
+        server.start()
+
+        client = ModbusClient(
+            host="127.0.0.1",
+            port=port,
+            register_map=register_map,
+            timeout=1.0,
+        )
+
+        async def run():
+            # Phase 1: connect and read successfully
+            await client.connect()
+            assert client._connected
+            reg = register_map.get_by_name("voltage_high_limit")
+            val = await client.read_register_value(reg)
+            assert val is not None
+
+            # Phase 2: kill server — next read should fail
+            server.stop()
+            await asyncio.sleep(0.5)
+
+            val = await client.read_register_value(reg)
+            assert val is None  # read fails
+
+            # Phase 3: mark disconnected (as _run_async would) then restart
+            client._connected = False
+            await asyncio.sleep(1)  # allow socket cleanup after server.stop()
+
+            server2 = DemoServer(port=port)
+            server2.start()
+
+            # Phase 4: reconnect succeeds and reads work again
+            connected = await client._ensure_connected()
+            assert connected
+            assert client._connected
+
+            val = await client.read_register_value(reg)
+            assert val is not None
+
+            await client.disconnect()
+            server2.stop()
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_tcp_poll_loop_survives_server_restart(self, register_map):
+        """The _run_async polling loop reconnects automatically after server outage."""
+        port = 15022
+        server = DemoServer(port=port)
+        server.start()
+
+        client = ModbusClient(
+            host="127.0.0.1",
+            port=port,
+            register_map=register_map,
+            timeout=1.0,
+            poll_interval=0.5,
+        )
+
+        poll_results: list[dict] = []
+        original_poll = client._poll_registers
+
+        async def tracking_poll():
+            result = await original_poll()
+            poll_results.append(result)
+            return result
+
+        client._poll_registers = tracking_poll
+
+        async def run():
+            loop = asyncio.get_event_loop()
+            client._loop = loop
+            client._running = True
+
+            # Start polling in background
+            poll_task = asyncio.create_task(client._run_async())
+
+            # Wait for a few successful polls
+            for _ in range(40):
+                if len(poll_results) >= 2:
+                    break
+                await asyncio.sleep(0.1)
+            assert len(poll_results) >= 2, "Should have polled at least twice"
+
+            good_count = len(poll_results)
+
+            # Kill server
+            server.stop()
+            await asyncio.sleep(4.0)  # let reconnect attempts happen + TIME_WAIT clear
+
+            # Restart server
+            server2 = DemoServer(port=port)
+            server2.start()
+
+            # Wait for recovery — new successful polls should appear
+            for _ in range(60):
+                if len(poll_results) > good_count:
+                    break
+                await asyncio.sleep(0.1)
+
+            assert len(poll_results) > good_count, (
+                "Should have resumed polling after server restart"
+            )
+            assert client._connected
+
+            # Shutdown
+            client._running = False
+            poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poll_task
+            server2.stop()
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_tcp_connect_to_nonexistent_server(self, register_map):
+        """Connecting to a server that doesn't exist returns False, doesn't hang."""
+        client = ModbusClient(
+            host="127.0.0.1",
+            port=19999,  # nothing listening here
+            register_map=register_map,
+            timeout=1.0,
+        )
+
+        async def run():
+            result = await client.connect()
+            assert result is False or not client._connected
+            await client.disconnect()
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+
+# =============================================================================
+# RTU Serial Integration Tests (virtual serial ports via socat)
+# =============================================================================
+
+requires_socat = pytest.mark.skipif(
+    shutil.which("socat") is None,
+    reason="socat not installed (brew install socat)",
+)
+
+
+class RtuDemoServer:
+    """Helper to run Modbus RTU server on a virtual serial port."""
+
+    def __init__(self, serial_port: str):
+        self.serial_port = serial_port
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        time.sleep(2.0)  # serial startup is slower than TCP
+
+    def _run(self):
+        from pymodbus.server import StartAsyncSerialServer
+
+        from zelos_extension_modbus.demo.simulator import SimulatorUpdater
+
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+
+        context = create_demo_context()
+        simulator = PowerMeterSimulator()
+        updater = SimulatorUpdater(simulator, context, interval=0.05)
+        updater.start()
+
+        async def run_server():
+            await StartAsyncSerialServer(
+                context=context,
+                port=self.serial_port,
+                baudrate=9600,
+                timeout=1,
+            )
+
+        try:
+            self._loop.run_until_complete(run_server())
+        except Exception:
+            pass
+        finally:
+            updater.stop()
+
+    def stop(self):
+        if self._loop:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+
+
+@pytest.fixture(scope="module")
+def serial_ports(tmp_path_factory):
+    """Create a virtual serial port pair using socat.
+
+    Yields (server_port, client_port) paths.
+    """
+    if shutil.which("socat") is None:
+        pytest.skip("socat not installed")
+
+    tmpdir = tmp_path_factory.mktemp("socat")
+    server_link = str(tmpdir / "server")
+    client_link = str(tmpdir / "client")
+
+    proc = subprocess.Popen(
+        [
+            "socat",
+            f"PTY,raw,echo=0,link={server_link}",
+            f"PTY,raw,echo=0,link={client_link}",
+        ],
+        stderr=subprocess.PIPE,
+    )
+
+    # Wait for symlinks to appear
+    for link in (server_link, client_link):
+        for _ in range(40):
+            if Path(link).exists():
+                break
+            time.sleep(0.05)
+        else:
+            proc.terminate()
+            pytest.fail(f"socat PTY link {link} did not appear")
+
+    yield server_link, client_link
+
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="module")
+def rtu_demo_server(serial_ports):
+    """Start RTU demo server on one end of the virtual serial pair."""
+    server_port, _ = serial_ports
+    server = RtuDemoServer(serial_port=server_port)
+    server.start()
+    yield server
+    server.stop()
+
+
+@pytest.fixture
+def rtu_client(serial_ports, rtu_demo_server, register_map):
+    """Create a connected ModbusClient in RTU mode on the other end."""
+    _, client_port = serial_ports
+    rtu = ModbusClient(
+        transport="rtu",
+        serial_port=client_port,
+        baudrate=9600,
+        unit_id=1,
+        timeout=2.0,
+        register_map=register_map,
+    )
+
+    async def connect():
+        await rtu.connect()
+
+    asyncio.get_event_loop().run_until_complete(connect())
+    yield rtu
+
+    async def disconnect():
+        await rtu.disconnect()
+
+    asyncio.get_event_loop().run_until_complete(disconnect())
+
+
+@requires_socat
+class TestRtuIntegration:
+    """Integration tests over virtual serial RTU — mirrors TestDemoServerIntegration."""
+
+    def test_rtu_read_holding_float32(self, rtu_client):
+        """Read float32 holding register (voltage) over RTU."""
+        reg = rtu_client.register_map.get_by_name("L1")
+        assert reg is not None
+
+        async def read():
+            return await rtu_client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value is not None
+        assert 200 < value < 260
+
+    def test_rtu_read_holding_uint32(self, rtu_client):
+        """Read uint32 holding register (energy) over RTU."""
+        reg = rtu_client.register_map.get_by_name("energy")
+        assert reg is not None
+
+        async def read():
+            return await rtu_client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value is not None
+        assert isinstance(value, int)
+        assert value >= 0
+
+    def test_rtu_read_holding_int16_scaled(self, rtu_client):
+        """Read int16 holding register with scale (temperature) over RTU."""
+        reg = rtu_client.register_map.get_by_name("temperature")
+        assert reg is not None
+
+        async def read():
+            return await rtu_client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value is not None
+        assert 0 < value < 100
+
+    def test_rtu_read_input_register(self, rtu_client):
+        """Read input register (firmware_version) over RTU."""
+        reg = rtu_client.register_map.get_by_name("firmware_version")
+        assert reg is not None
+        assert reg.type == "input"
+
+        async def read():
+            return await rtu_client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value == 0x0102
+
+    def test_rtu_read_input_uint32(self, rtu_client):
+        """Read uint32 input register (serial_number) over RTU."""
+        reg = rtu_client.register_map.get_by_name("serial_number")
+        assert reg is not None
+
+        async def read():
+            return await rtu_client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value == 12345678
+
+    def test_rtu_read_coil(self, rtu_client):
+        """Read coil register over RTU."""
+        reg = rtu_client.register_map.get_by_name("relay1")
+        assert reg is not None
+        assert reg.type == "coil"
+
+        async def read():
+            return await rtu_client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value in (True, False)
+
+    def test_rtu_read_discrete_input(self, rtu_client):
+        """Read discrete input over RTU."""
+        reg = rtu_client.register_map.get_by_name("grid_connected")
+        assert reg is not None
+        assert reg.type == "discrete_input"
+
+        async def read():
+            return await rtu_client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value is True
+
+    def test_rtu_write_holding_and_readback(self, rtu_client):
+        """Write uint16 holding register and read back over RTU."""
+        reg = rtu_client.register_map.get_by_name("voltage_high_limit")
+        assert reg is not None
+
+        async def write_and_read():
+            success = await rtu_client.write_register_value(reg, 242)
+            assert success is True
+            return await rtu_client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(write_and_read())
+        assert value == 242
+
+    def test_rtu_write_coil_and_readback(self, rtu_client):
+        """Write coil and read back over RTU."""
+        reg = rtu_client.register_map.get_by_name("relay1")
+        assert reg is not None
+
+        async def write_and_read():
+            success = await rtu_client.write_register_value(reg, True)
+            assert success is True
+            val = await rtu_client.read_register_value(reg)
+            assert val is True
+
+            success = await rtu_client.write_register_value(reg, False)
+            assert success is True
+            val = await rtu_client.read_register_value(reg)
+            assert val is False
+
+        asyncio.get_event_loop().run_until_complete(write_and_read())
+
+    def test_rtu_read_swapped_float(self, rtu_client):
+        """Read float32 with big_swap byte order over RTU."""
+        reg = rtu_client.register_map.get_by_name("calibration_factor")
+        assert reg is not None
+        assert reg.byte_order == "big_swap"
+
+        async def read():
+            return await rtu_client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(read())
+        assert value is not None
+        assert abs(value - 1.0) < 0.01
+
+    def test_rtu_write_int32(self, rtu_client):
+        """Write int32 holding register over RTU."""
+        reg = rtu_client.register_map.get_by_name("power_limit")
+        assert reg is not None
+
+        async def write_and_read():
+            success = await rtu_client.write_register_value(reg, -5000)
+            assert success is True
+            return await rtu_client.read_register_value(reg)
+
+        value = asyncio.get_event_loop().run_until_complete(write_and_read())
+        assert value == -5000
+
+    def test_rtu_values_change_over_time(self, rtu_client):
+        """Two consecutive polls return different simulator values."""
+        reg = rtu_client.register_map.get_by_name("L1")
+        assert reg is not None
+
+        async def two_reads():
+            v1 = await rtu_client.read_register_value(reg)
+            await asyncio.sleep(0.3)
+            v2 = await rtu_client.read_register_value(reg)
+            return v1, v2
+
+        v1, v2 = asyncio.get_event_loop().run_until_complete(two_reads())
+        # Both should be valid voltages
+        assert 200 < v1 < 260
+        assert 200 < v2 < 260
+
+    def test_rtu_poll_all_events(self, rtu_client):
+        """Poll all registers via register map over RTU."""
+
+        async def poll():
+            return await rtu_client._poll_registers()
+
+        results = asyncio.get_event_loop().run_until_complete(poll())
+
+        assert "voltage" in results
+        assert "current" in results
+        assert "power" in results
+        assert "status" in results
+        assert "inputs" in results
+        assert "digital_inputs" in results
+        assert "setpoints" in results
+        assert "swapped_floats" in results
+
+        assert "L1" in results["voltage"]
+        assert 200 < results["voltage"]["L1"] < 260
+
+    def test_rtu_transport_is_rtu(self, rtu_client):
+        """Client transport reflects RTU mode."""
+        assert rtu_client._connected is True
+        assert rtu_client.transport == "rtu"
+
+
+# =============================================================================
+# RTU Reconnection Tests
+# =============================================================================
+
+
+@requires_socat
+class TestRtuReconnection:
+    """Test RTU reconnection when serial link is interrupted."""
+
+    def test_rtu_read_fails_when_server_stops(self, register_map):
+        """Reads return None after RTU server stops."""
+        tmpdir = tempfile.mkdtemp(prefix="socat_recon_")
+        server_link = f"{tmpdir}/server"
+        client_link = f"{tmpdir}/client"
+
+        # Create PTY pair
+        socat_proc = subprocess.Popen(
+            [
+                "socat",
+                f"PTY,raw,echo=0,link={server_link}",
+                f"PTY,raw,echo=0,link={client_link}",
+            ],
+            stderr=subprocess.PIPE,
+        )
+        time.sleep(0.5)
+
+        # Start RTU server
+        rtu_server = RtuDemoServer(serial_port=server_link)
+        rtu_server.start()
+
+        client = ModbusClient(
+            transport="rtu",
+            serial_port=client_link,
+            baudrate=9600,
+            unit_id=1,
+            timeout=2.0,
+            register_map=register_map,
+        )
+
+        async def run():
+            await client.connect()
+            assert client._connected
+
+            reg = register_map.get_by_name("voltage_high_limit")
+
+            # Phase 1: reads work
+            val = await client.read_register_value(reg)
+            assert val is not None
+
+            # Phase 2: kill server — reads should fail
+            rtu_server.stop()
+            socat_proc.terminate()
+            socat_proc.wait(timeout=5)
+            await asyncio.sleep(0.5)
+
+            val = await client.read_register_value(reg)
+            # After socat dies, read should return None (not hang)
+            assert val is None
+
+            await client.disconnect()
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_rtu_reconnect_after_link_restored(self, register_map):
+        """Client reconnects when serial link is re-established."""
+        tmpdir = tempfile.mkdtemp(prefix="socat_recon2_")
+        server_link = f"{tmpdir}/server"
+        client_link = f"{tmpdir}/client"
+
+        # Create PTY pair
+        socat_proc = subprocess.Popen(
+            [
+                "socat",
+                f"PTY,raw,echo=0,link={server_link}",
+                f"PTY,raw,echo=0,link={client_link}",
+            ],
+            stderr=subprocess.PIPE,
+        )
+        time.sleep(0.5)
+
+        rtu_server = RtuDemoServer(serial_port=server_link)
+        rtu_server.start()
+
+        client = ModbusClient(
+            transport="rtu",
+            serial_port=client_link,
+            baudrate=9600,
+            unit_id=1,
+            timeout=2.0,
+            register_map=register_map,
+        )
+
+        async def run():
+            await client.connect()
+            reg = register_map.get_by_name("voltage_high_limit")
+
+            # Phase 1: reads work
+            val = await client.read_register_value(reg)
+            assert val is not None
+
+            # Phase 2: kill everything
+            rtu_server.stop()
+            socat_proc.terminate()
+            socat_proc.wait(timeout=5)
+            await asyncio.sleep(0.5)
+            client._connected = False
+
+            # Phase 3: re-establish link + server
+            socat_proc2 = subprocess.Popen(
+                [
+                    "socat",
+                    f"PTY,raw,echo=0,link={server_link}",
+                    f"PTY,raw,echo=0,link={client_link}",
+                ],
+                stderr=subprocess.PIPE,
+            )
+            time.sleep(0.5)
+
+            rtu_server2 = RtuDemoServer(serial_port=server_link)
+            rtu_server2.start()
+
+            # Phase 4: reconnect and read
+            connected = await client._ensure_connected()
+            assert connected
+
+            val = await client.read_register_value(reg)
+            assert val is not None
+
+            await client.disconnect()
+            rtu_server2.stop()
+            socat_proc2.terminate()
+            socat_proc2.wait(timeout=5)
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_rtu_is_connection_error_detection(self):
+        """Verify _is_connection_error catches serial-related exceptions."""
+        client = ModbusClient(transport="rtu", serial_port="/dev/null", unit_id=1)
+
+        # By exception type (isinstance check)
+        assert client._is_connection_error(ConnectionError("anything"))
+        assert client._is_connection_error(TimeoutError("read timed out"))
+        assert client._is_connection_error(OSError("serial port not available"))
+
+        # By error message string matching
+        assert client._is_connection_error(Exception("device disconnected"))
+        assert client._is_connection_error(Exception("connection refused"))
+        assert client._is_connection_error(Exception("No response received after 3 retries"))
+
+        # Non-connection errors
+        assert not client._is_connection_error(ValueError("bad register value"))
+        assert not client._is_connection_error(KeyError("missing_field"))
+
+
+# =============================================================================
+# Action-Specific Edge Cases
+# =============================================================================
+
+
+class TestActionEdgeCases:
+    """Edge case tests for action functions."""
+
+    def test_write_registers_action_invalid_values(self):
+        """Write Registers action with non-integer values returns error."""
+        # Register a dummy client so the interface lookup succeeds
+        client = ModbusClient(interface_name="edge_test")
+        registry.register("edge_test", client)
+        try:
+            result = actions.write_registers(interface="edge_test", address=0, values="abc,def")
+            assert result["success"] is False
+            assert "error" in result
+        finally:
+            registry.clear()
 
 
 class TestActionsUnit:
