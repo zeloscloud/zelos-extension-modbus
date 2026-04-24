@@ -252,3 +252,8 @@ __marimo__/
 # Zelos
 .last_config
 config.json
+
+# Keep customer/local register maps & spreadsheets out of the repo
+examples/*_local.json
+examples/*.xlsx
+scratch/

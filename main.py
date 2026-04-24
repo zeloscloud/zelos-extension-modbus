@@ -194,5 +194,45 @@ def trace(
     _client.run()
 
 
+@cli.command("mock-server")
+@click.argument("register_map_file", type=click.Path(exists=True))
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address")
+@click.option("--port", "-p", type=int, default=5020, show_default=True, help="TCP port")
+@click.option(
+    "--interval",
+    "-i",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help="Seconds between randomization passes",
+)
+def mock_server(register_map_file: str, host: str, port: int, interval: float) -> None:
+    """Run a generic mock Modbus TCP server driven by a register-map JSON file.
+
+    Read-only registers are randomized every --interval seconds to values
+    within their datatype range; writable registers are left untouched so
+    writes from a client persist and can be observed on the next poll.
+
+    \b
+    Example:
+        uv run main.py mock-server examples/example_registers.json --port 5020
+    """
+    from zelos_extension_modbus.demo.mock_server import run_mock_server_sync
+    from zelos_extension_modbus.register_map import RegisterMap
+
+    try:
+        register_map = RegisterMap.from_file(register_map_file)
+    except Exception as e:  # noqa: BLE001
+        raise click.ClickException(f"Invalid register map: {e}") from e
+
+    logger.info(
+        "Loaded register map %r: %d events, %d registers",
+        register_map.name,
+        len(register_map.events),
+        len(register_map.registers),
+    )
+    run_mock_server_sync(register_map, host=host, port=port, update_interval=interval)
+
+
 if __name__ == "__main__":
     cli()
