@@ -1,6 +1,23 @@
 """Shared constants for the Modbus extension."""
 
+import re
 from enum import StrEnum
+
+# Trace source and action names are used as path segments by the Zelos agent
+# (e.g. "source/event.field"), so "." and "/" are reserved separators.
+_UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def sanitize_source_name(raw: str, fallback: str) -> str:
+    """Return a trace-source/actions-safe name derived from ``raw``.
+
+    Collapses runs of reserved/special characters to ``_`` and trims leading
+    and trailing ``_``. Host addresses (``192.168.1.100``) and serial port
+    paths (``/dev/ttyUSB0``) contain ``.`` and ``/``, which would otherwise
+    fragment the path. Returns ``fallback`` if nothing usable remains.
+    """
+    cleaned = _UNSAFE_NAME_CHARS.sub("_", raw).strip("_")
+    return cleaned or fallback
 
 
 class Transport(StrEnum):
