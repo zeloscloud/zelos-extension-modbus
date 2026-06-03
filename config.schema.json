@@ -47,6 +47,15 @@
                     "description": "Optional name to identify this interface (defaults to host address)",
                     "ui:placeholder": "power_meter_1"
                   },
+                  "register_map_file": {
+                    "type": "string",
+                    "title": "Register Map File",
+                    "description": "JSON file that defines which registers to read and how to decode them",
+                    "ui:widget": "file-picker",
+                    "ui:options": {
+                      "accept": ".json"
+                    }
+                  },
                   "host": {
                     "type": "string",
                     "title": "Host",
@@ -69,15 +78,6 @@
                     "default": 1,
                     "minimum": 0,
                     "maximum": 255
-                  },
-                  "register_map_file": {
-                    "type": "string",
-                    "title": "Register Map File",
-                    "description": "JSON file that defines which registers to read and how to decode them",
-                    "ui:widget": "file-picker",
-                    "ui:options": {
-                      "accept": ".json"
-                    }
                   },
                   "poll_interval": {
                     "type": "number",
@@ -127,7 +127,16 @@
                     "type": "string",
                     "title": "Name",
                     "description": "Optional name to identify this interface (defaults to serial port path)",
-                    "ui:placeholder": "generator_rs232"
+                    "ui:placeholder": "modbus"
+                  },
+                  "register_map_file": {
+                    "type": "string",
+                    "title": "Register Map File",
+                    "description": "JSON file that defines which registers to read and how to decode them",
+                    "ui:widget": "file-picker",
+                    "ui:options": {
+                      "accept": ".json"
+                    }
                   },
                   "serial_port": {
                     "type": "string",
@@ -195,19 +204,10 @@
                     "minimum": 0,
                     "maximum": 255
                   },
-                  "register_map_file": {
-                    "type": "string",
-                    "title": "Register Map File",
-                    "description": "JSON file that defines which registers to read and how to decode them",
-                    "ui:widget": "file-picker",
-                    "ui:options": {
-                      "accept": ".json"
-                    }
-                  },
                   "poll_interval": {
                     "type": "number",
                     "title": "Poll Interval (seconds)",
-                    "description": "How often to read all registers. For intermittent-access devices, 1.0s or higher is recommended.",
+                    "description": "How often to read all registers",
                     "default": 1.0,
                     "minimum": 0.1,
                     "maximum": 60.0
