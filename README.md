@@ -1,6 +1,6 @@
 # Zelos Modbus
 
-A Zelos extension for the Modbus protocol. Read, write, and monitor registers from PLCs, power meters, generators, sensors, and other Modbus devices over TCP or RS232/RS485 serial.
+A Zelos extension for the Modbus protocol. Read, write, and monitor registers from PLCs, power meters, sensors, and other Modbus devices over TCP or RS232/RS485 serial.
 
 ## Features
 
