@@ -17,6 +17,7 @@ from zelos_extension_modbus.constants import (
     RegisterType,
     Transport,
     WriteMode,
+    sanitize_source_name,
 )
 from zelos_extension_modbus.register_map import Register, RegisterMap
 
@@ -265,6 +266,10 @@ class ModbusClient:
             source_name = self.register_map.name
         else:
             source_name = "modbus"
+        # Backstop: ensure the name is safe as a trace-source path segment
+        # regardless of how the client was constructed (idempotent on names
+        # already sanitized by the app runner).
+        source_name = sanitize_source_name(source_name, "modbus")
         self._source = zelos_sdk.TraceSourceCacheLast(source_name)
 
         if not self.register_map or not self.register_map.events:

@@ -19,7 +19,7 @@ from zelos_sdk.extensions import load_config
 from zelos_sdk.hooks.logging import TraceLoggingHandler
 
 from zelos_extension_modbus.client import ModbusClient
-from zelos_extension_modbus.constants import Transport, WriteMode
+from zelos_extension_modbus.constants import Transport, WriteMode, sanitize_source_name
 from zelos_extension_modbus.register_map import RegisterMap
 
 if TYPE_CHECKING:
@@ -122,16 +122,19 @@ def _create_clients(config: dict[str, Any]) -> list[tuple[ModbusClient, str]]:
     for i, iface_config in enumerate(interfaces):
         transport = iface_config.get("transport", Transport.TCP)
 
-        # Determine interface name
+        # Determine interface name. Names become trace-source / actions path
+        # segments, so they are sanitized — host addresses ("192.168.1.100")
+        # and serial paths ("/dev/ttyUSB0") contain reserved "." and "/".
         config_name = (iface_config.get("name") or "").strip() or None
         if config_name:
-            iface_name = config_name
+            iface_name = sanitize_source_name(config_name, f"{transport}{i}")
         elif is_multi:
             # Default: host for TCP, serial_port for RTU
             if transport == Transport.TCP:
-                iface_name = iface_config.get("host", f"tcp{i}")
+                raw_name = iface_config.get("host", f"tcp{i}")
             else:
-                iface_name = iface_config.get("serial_port", f"rtu{i}")
+                raw_name = iface_config.get("serial_port", f"rtu{i}")
+            iface_name = sanitize_source_name(raw_name, f"{transport}{i}")
         else:
             # Single interface, no explicit name
             iface_name = None
@@ -176,7 +179,7 @@ def _create_clients(config: dict[str, Any]) -> list[tuple[ModbusClient, str]]:
         if iface_name:
             registry_name = iface_name
         elif register_map:
-            registry_name = register_map.name
+            registry_name = sanitize_source_name(register_map.name, "modbus")
         else:
             registry_name = "modbus"
 
