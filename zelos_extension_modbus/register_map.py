@@ -93,6 +93,17 @@ class Register:
         """
         if not self.name:
             self.name = f"r{self.address}"
+        # Reject non-numeric poll_interval before the range check: a JSON string
+        # ("2") would otherwise raise TypeError, and bool (an int subclass) would
+        # sneak True/False through as 1/0.
+        if self.poll_interval is not None and (
+            isinstance(self.poll_interval, bool) or not isinstance(self.poll_interval, (int, float))
+        ):
+            msg = (
+                "poll_interval must be a number of seconds (0 disables polling), "
+                f"got {self.poll_interval!r}"
+            )
+            raise ValueError(msg)
         if self.poll_interval is not None and self.poll_interval < 0:
             msg = f"poll_interval must be >= 0 (0 disables polling), got {self.poll_interval}"
             raise ValueError(msg)
@@ -177,7 +188,8 @@ class RegisterMap:
                 if field_name in seen_fields:
                     msg = (
                         f"Duplicate field name '{field_name}' in event '{event_name}': "
-                        f"registers '{seen_fields[field_name]}' and '{reg.name}' collide"
+                        f"registers '{seen_fields[field_name]}' and '{reg.name}' collide "
+                        "(give registers sharing an address explicit 'name' fields)"
                     )
                     raise ValueError(msg)
                 seen_fields[field_name] = reg.name

@@ -10,6 +10,7 @@ Tests core functionality:
 import asyncio
 import contextlib
 import json
+import logging
 import shutil
 import struct
 import subprocess
@@ -125,6 +126,40 @@ class TestRegister:
             Register(address=0, name="t", poll_interval=-1.0)
         with pytest.raises(ValueError, match="poll_interval must be >= 0"):
             Register(address=0, name="t", poll_interval=-0.5)
+
+
+class TestPollIntervalTypeRejection:
+    """poll_interval must be a real number — not a string, and not a bool."""
+
+    def test_string_rejected_at_register(self):
+        """A string poll_interval raises ValueError, not TypeError."""
+        with pytest.raises(ValueError, match="poll_interval must be a number"):
+            Register(address=0, name="t", poll_interval="2")
+
+    def test_true_rejected_at_register(self):
+        """bool True must not sneak through as 1 (bool is an int subclass)."""
+        with pytest.raises(ValueError, match="poll_interval must be a number"):
+            Register(address=0, name="t", poll_interval=True)
+
+    def test_false_rejected_at_register(self):
+        """bool False must not sneak through as 0 (which would disable polling)."""
+        with pytest.raises(ValueError, match="poll_interval must be a number"):
+            Register(address=0, name="t", poll_interval=False)
+
+    def test_string_rejected_from_dict(self):
+        """A string poll_interval in JSON raises ValueError at load."""
+        with pytest.raises(ValueError, match="poll_interval must be a number"):
+            RegisterMap.from_dict(
+                {"events": {"e": [{"name": "x", "address": 0, "poll_interval": "2"}]}}
+            )
+
+    def test_bool_rejected_from_dict(self):
+        """A bool poll_interval in JSON raises ValueError at load."""
+        for bad in (True, False):
+            with pytest.raises(ValueError, match="poll_interval must be a number"):
+                RegisterMap.from_dict(
+                    {"events": {"e": [{"name": "x", "address": 0, "poll_interval": bad}]}}
+                )
 
 
 class TestRegisterMap:
@@ -1341,6 +1376,38 @@ class TestReconnection:
         assert client._is_connection_error(Exception("Invalid address")) is False
         assert client._is_connection_error(Exception("Value out of range")) is False
         assert client._is_connection_error(ValueError("bad value")) is False
+
+
+# =============================================================================
+# Constructor Backstop Clamp Tests
+# =============================================================================
+
+
+class TestConstructorClamps:
+    """The constructor is the backstop for out-of-range block-read / poll knobs."""
+
+    def test_max_block_size_floor(self):
+        """max_block_size below 1 is clamped up to 1."""
+        assert ModbusClient(max_block_size=0).max_block_size == 1
+
+    def test_max_block_size_ceiling(self):
+        """max_block_size above 125 is clamped down to 125."""
+        assert ModbusClient(max_block_size=200).max_block_size == 125
+
+    def test_max_read_gap_floor(self):
+        """A negative max_read_gap is clamped up to 0."""
+        assert ModbusClient(max_read_gap=-1).max_read_gap == 0
+
+    def test_poll_interval_floor(self, caplog):
+        """poll_interval below 0.01s is floored to 0.01s with a warning."""
+        with caplog.at_level(logging.WARNING):
+            client = ModbusClient(poll_interval=0)
+        assert client.poll_interval == 0.01
+        assert "poll_interval" in caplog.text
+
+    def test_poll_interval_normal_unchanged(self):
+        """A poll_interval at or above the floor is left untouched."""
+        assert ModbusClient(poll_interval=1.0).poll_interval == 1.0
 
 
 # =============================================================================

@@ -89,20 +89,26 @@ def start_demo_server() -> threading.Thread:
 
 
 def _load_register_map(path_str: str | None) -> RegisterMap | None:
-    """Load a register map from a file path string."""
+    """Load a register map from a file path string.
+
+    An unset/empty path is a deliberate raw-address-mode choice and returns
+    None. A configured-but-broken map (missing file, or a load/validation
+    failure) is a config error and exits — silently degrading to no-data would
+    hide a misconfiguration behind an empty signal tree.
+    """
     if not path_str:
         return None
     map_path = Path(path_str)
     if not map_path.exists():
-        logger.warning(f"Register map file not found: {path_str}")
-        return None
+        logger.error(f"Register map file not found: {path_str}")
+        sys.exit(1)
     try:
         reg_map = RegisterMap.from_file(map_path)
         logger.info(f"Loaded register map with {len(reg_map.registers)} registers")
         return reg_map
     except Exception as e:
         logger.error(f"Failed to load register map: {e}")
-        return None
+        sys.exit(1)
 
 
 def _create_clients(config: dict[str, Any]) -> list[tuple[ModbusClient, str]]:
