@@ -10,11 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from zelos_extension_modbus.constants import RegisterType
+from zelos_extension_modbus.constants import MODBUS_MAX_READ_COUNT
 from zelos_extension_modbus.register_map import Register
-
-# Bit-addressable types span one address each regardless of datatype.
-_BIT_TYPES = {RegisterType.COIL, RegisterType.DISCRETE_INPUT}
 
 
 @dataclass(frozen=True)
@@ -27,14 +24,9 @@ class ReadBlock:
     registers: tuple[Register, ...]  # sorted by address
 
 
-def _span(reg: Register) -> int:
-    """Number of addresses a register occupies (1 for bits, datatype size otherwise)."""
-    return 1 if reg.type in _BIT_TYPES else reg.count
-
-
 def plan_blocks(
     registers: list[Register],
-    max_block_size: int = 125,
+    max_block_size: int = MODBUS_MAX_READ_COUNT,
     max_read_gap: int = 0,
 ) -> list[ReadBlock]:
     """Group registers into range-read blocks per register type.
@@ -63,37 +55,19 @@ def plan_blocks(
     blocks: list[ReadBlock] = []
     for reg_type in sorted(by_type):
         regs = sorted(by_type[reg_type], key=lambda r: (r.address, r.count, r.name))
-        cur: list[Register] = []
-        block_start = 0
-        block_end = 0  # exclusive: covers [block_start, block_end)
-        for reg in regs:
-            reg_end = reg.address + _span(reg)
-            if not cur:
+        # Seed the run with the first register; block start is always cur[0].address.
+        cur: list[Register] = [regs[0]]
+        end = regs[0].address + regs[0].address_span  # exclusive block end
+        for reg in regs[1:]:
+            reg_end = reg.address + reg.address_span
+            new_end = max(end, reg_end)
+            if reg.address - end > max_read_gap or (new_end - cur[0].address) > max_block_size:
+                blocks.append(ReadBlock(reg_type, cur[0].address, end - cur[0].address, tuple(cur)))
                 cur = [reg]
-                block_start = reg.address
-                block_end = reg_end
-                continue
-            gap = reg.address - block_end
-            new_end = max(block_end, reg_end)
-            if gap > max_read_gap or (new_end - block_start) > max_block_size:
-                blocks.append(_make_block(reg_type, block_start, block_end, cur))
-                cur = [reg]
-                block_start = reg.address
-                block_end = reg_end
+                end = reg_end
             else:
                 cur.append(reg)
-                block_end = new_end
-        if cur:
-            blocks.append(_make_block(reg_type, block_start, block_end, cur))
+                end = new_end
+        blocks.append(ReadBlock(reg_type, cur[0].address, end - cur[0].address, tuple(cur)))
 
     return blocks
-
-
-def _make_block(reg_type: str, start: int, end: int, regs: list[Register]) -> ReadBlock:
-    """Build a ReadBlock from an accumulated register run."""
-    return ReadBlock(
-        type=reg_type,
-        address=start,
-        count=end - start,
-        registers=tuple(regs),
-    )

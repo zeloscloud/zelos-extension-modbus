@@ -84,7 +84,7 @@
                     "title": "Poll Interval (seconds)",
                     "description": "Default poll rate for all registers (a register may override this with its own poll_interval)",
                     "default": 1.0,
-                    "minimum": 0.1,
+                    "minimum": 0.01,
                     "maximum": 60.0
                   },
                   "timeout": {
@@ -231,7 +231,7 @@
                     "title": "Poll Interval (seconds)",
                     "description": "Default poll rate for all registers (a register may override this with its own poll_interval)",
                     "default": 1.0,
-                    "minimum": 0.1,
+                    "minimum": 0.01,
                     "maximum": 60.0
                   },
                   "timeout": {

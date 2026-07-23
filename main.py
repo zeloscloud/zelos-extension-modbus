@@ -32,7 +32,11 @@ import rich_click as click
 import zelos_sdk
 from zelos_sdk.hooks.logging import TraceLoggingHandler
 
-from zelos_extension_modbus.constants import Transport
+from zelos_extension_modbus.constants import (
+    MIN_POLL_INTERVAL,
+    MODBUS_MAX_READ_COUNT,
+    Transport,
+)
 
 if TYPE_CHECKING:
     from zelos_extension_modbus.client import ModbusClient
@@ -111,7 +115,7 @@ def cli(ctx: click.Context, demo: bool) -> None:
 @click.option(
     "--interval",
     "-i",
-    type=click.FloatRange(min=0.01),
+    type=click.FloatRange(min=MIN_POLL_INTERVAL),
     default=1.0,
     help="Poll interval in seconds",
 )
@@ -123,8 +127,8 @@ def cli(ctx: click.Context, demo: bool) -> None:
 )
 @click.option(
     "--max-block-size",
-    type=click.IntRange(1, 125),
-    default=125,
+    type=click.IntRange(1, MODBUS_MAX_READ_COUNT),
+    default=MODBUS_MAX_READ_COUNT,
     help="Maximum registers per range read",
 )
 @click.option(

@@ -36,7 +36,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from zelos_extension_modbus.constants import ByteOrder, RegisterType, sanitize_source_name
+from zelos_extension_modbus.constants import (
+    BIT_REGISTER_TYPES,
+    MIN_POLL_INTERVAL,
+    ByteOrder,
+    RegisterType,
+    sanitize_source_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +87,11 @@ class Register:
         return DATATYPES.get(self.datatype, 1)
 
     @property
+    def address_span(self) -> int:
+        """Number of addresses this register occupies (1 for bits, count otherwise)."""
+        return 1 if self.type in BIT_REGISTER_TYPES else self.count
+
+    @property
     def polled(self) -> bool:
         """Whether this register is polled (a poll_interval of 0 disables it)."""
         return self.poll_interval != 0
@@ -89,10 +100,13 @@ class Register:
         """Validate register definition.
 
         A poll_interval of 0 disables polling for this register; a negative
-        value is rejected.
+        value (or a positive value below MIN_POLL_INTERVAL) is rejected.
         """
         if not self.name:
             self.name = f"r{self.address}"
+        # Trace-safe field name, derived once (schema and rows must agree, and
+        # this keeps the sanitizing regex out of the poll hot loop).
+        self.field_name = sanitize_source_name(self.name, f"r{self.address}")
         # Reject non-numeric poll_interval before the range check: a JSON string
         # ("2") would otherwise raise TypeError, and bool (an int subclass) would
         # sneak True/False through as 1/0.
@@ -106,6 +120,12 @@ class Register:
             raise ValueError(msg)
         if self.poll_interval is not None and self.poll_interval < 0:
             msg = f"poll_interval must be >= 0 (0 disables polling), got {self.poll_interval}"
+            raise ValueError(msg)
+        if self.poll_interval is not None and 0 < self.poll_interval < MIN_POLL_INTERVAL:
+            msg = (
+                f"poll_interval must be 0 (disabled) or >= {MIN_POLL_INTERVAL}s, "
+                f"got {self.poll_interval}"
+            )
             raise ValueError(msg)
         if self.type not in REGISTER_TYPES:
             msg = f"Invalid register type '{self.type}'. Must be one of {REGISTER_TYPES}"
@@ -184,7 +204,7 @@ class RegisterMap:
                     writable=reg_data.get("writable", True),
                     poll_interval=poll_interval,
                 )
-                field_name = sanitize_source_name(reg.name, f"r{reg.address}")
+                field_name = reg.field_name
                 if field_name in seen_fields:
                     msg = (
                         f"Duplicate field name '{field_name}' in event '{event_name}': "
@@ -209,6 +229,16 @@ class RegisterMap:
         for regs in self.events.values():
             all_regs.extend(regs)
         return all_regs
+
+    @property
+    def polled_events(self) -> dict[str, list[Register]]:
+        """Events mapped to only their polled registers, all-disabled events omitted."""
+        result: dict[str, list[Register]] = {}
+        for event_name, regs in self.events.items():
+            polled = [r for r in regs if r.polled]
+            if polled:
+                result[event_name] = polled
+        return result
 
     @property
     def event_names(self) -> list[str]:
