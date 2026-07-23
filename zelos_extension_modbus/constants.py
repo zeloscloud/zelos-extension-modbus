@@ -32,6 +32,16 @@ class RegisterType(StrEnum):
     DISCRETE_INPUT = "discrete_input"
 
 
+# Bit-addressable types span one address each and return raw booleans (not words).
+BIT_REGISTER_TYPES = {RegisterType.COIL, RegisterType.DISCRETE_INPUT}
+
+# Modbus caps a single word/bit read at 125 addresses.
+MODBUS_MAX_READ_COUNT = 125
+
+# Fastest poll cadence we accept; below this a "rate" is almost certainly a mistake.
+MIN_POLL_INTERVAL = 0.01
+
+
 class ByteOrder(StrEnum):
     BIG = "big"
     LITTLE = "little"

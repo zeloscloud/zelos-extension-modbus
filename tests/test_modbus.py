@@ -127,6 +127,21 @@ class TestRegister:
         with pytest.raises(ValueError, match="poll_interval must be >= 0"):
             Register(address=0, name="t", poll_interval=-0.5)
 
+    def test_poll_interval_below_min_raises(self):
+        """A positive poll_interval below MIN_POLL_INTERVAL is rejected."""
+        with pytest.raises(ValueError, match="poll_interval must be 0"):
+            Register(address=0, name="t", poll_interval=0.005)
+
+    def test_poll_interval_at_min_ok(self):
+        """poll_interval exactly at MIN_POLL_INTERVAL (0.01) is accepted."""
+        assert Register(address=0, name="t", poll_interval=0.01).poll_interval == 0.01
+
+    def test_poll_interval_zero_still_disables_below_min(self):
+        """0 stays the disable sentinel — the sub-minimum rule never catches it."""
+        reg = Register(address=0, name="t", poll_interval=0)
+        assert reg.poll_interval == 0
+        assert reg.polled is False
+
 
 class TestPollIntervalTypeRejection:
     """poll_interval must be a real number — not a string, and not a bool."""
@@ -146,20 +161,16 @@ class TestPollIntervalTypeRejection:
         with pytest.raises(ValueError, match="poll_interval must be a number"):
             Register(address=0, name="t", poll_interval=False)
 
-    def test_string_rejected_from_dict(self):
-        """A string poll_interval in JSON raises ValueError at load."""
+    def test_bad_type_rejected_from_dict(self):
+        """A non-numeric poll_interval in JSON raises at load (from_dict passthrough).
+
+        Register-level tests above pin the string/bool cases; this one representative
+        case confirms from_dict routes them through the same validation.
+        """
         with pytest.raises(ValueError, match="poll_interval must be a number"):
             RegisterMap.from_dict(
                 {"events": {"e": [{"name": "x", "address": 0, "poll_interval": "2"}]}}
             )
-
-    def test_bool_rejected_from_dict(self):
-        """A bool poll_interval in JSON raises ValueError at load."""
-        for bad in (True, False):
-            with pytest.raises(ValueError, match="poll_interval must be a number"):
-                RegisterMap.from_dict(
-                    {"events": {"e": [{"name": "x", "address": 0, "poll_interval": bad}]}}
-                )
 
 
 class TestRegisterMap:
@@ -526,13 +537,9 @@ class TestBlockPlanner:
         blocks = plan_blocks(regs)
         assert _block_tuples(blocks) == [("coil", 0, 3)]
 
-    def test_demo_map_coalescing(self):
+    def test_demo_map_coalescing(self, register_map):
         """The bundled demo map coalesces into the expected transactions."""
-        map_path = (
-            Path(__file__).parent.parent / "zelos_extension_modbus" / "demo" / "power_meter.json"
-        )
-        reg_map = RegisterMap.from_file(str(map_path))
-        blocks = plan_blocks(reg_map.registers)
+        blocks = plan_blocks(register_map.registers)
         by_type = {}
         for b in blocks:
             by_type.setdefault(b.type, []).append((b.address, b.count))
@@ -554,7 +561,7 @@ class TestDecodeBlock:
         block = ReadBlock(type="holding", address=0, count=4, registers=regs)
         # 3.14 ≈ [0x4048, 0xF5C3]; 1.0 = [0x3F80, 0x0000]
         raw = [0x4048, 0xF5C3, 0x3F80, 0x0000]
-        decoded = decode_block(block, raw)
+        decoded = {id(r): v for r, v in decode_block(block, raw)}
         assert abs(decoded[id(regs[0])] - 3.14) < 0.01
         assert abs(decoded[id(regs[1])] - 1.0) < 0.01
 
@@ -563,7 +570,7 @@ class TestDecodeBlock:
         r1 = Register(address=0, name="a", datatype="uint16")
         r2 = Register(address=0, name="b", datatype="uint16", scale=0.1)
         block = ReadBlock(type="holding", address=0, count=1, registers=(r1, r2))
-        decoded = decode_block(block, [1000])
+        decoded = {id(r): v for r, v in decode_block(block, [1000])}
         assert decoded[id(r1)] == 1000
         assert decoded[id(r2)] == 100
 
@@ -571,7 +578,7 @@ class TestDecodeBlock:
         """A register whose slice is truncated is skipped, not decoded from garbage."""
         reg = Register(address=0, name="a", datatype="float32")
         block = ReadBlock(type="holding", address=0, count=2, registers=(reg,))
-        decoded = decode_block(block, [0x4048])  # only one register, need two
+        decoded = {id(r): v for r, v in decode_block(block, [0x4048])}  # need two, got one
         assert id(reg) not in decoded
 
     def test_bit_block_returns_bools(self):
@@ -581,7 +588,7 @@ class TestDecodeBlock:
             Register(address=1, name="b", type="coil"),
         )
         block = ReadBlock(type="coil", address=0, count=2, registers=regs)
-        decoded = decode_block(block, [True, False])
+        decoded = {id(r): v for r, v in decode_block(block, [True, False])}
         assert decoded[id(regs[0])] is True
         assert decoded[id(regs[1])] is False
 
@@ -763,6 +770,29 @@ def client(demo_server, register_map):
         await client.disconnect()
 
     asyncio.get_event_loop().run_until_complete(disconnect())
+
+
+def _demo_client(demo_server, register_map, **kwargs):
+    """A ModbusClient pointed at the demo server with the given register map."""
+    return ModbusClient(
+        host=demo_server.host,
+        port=demo_server.port,
+        register_map=register_map,
+        **kwargs,
+    )
+
+
+def _connected_poll(client):
+    """Connect, run one poll cycle, disconnect; return the poll results."""
+
+    async def run():
+        await client.connect()
+        try:
+            return await client._poll_registers()
+        finally:
+            await client.disconnect()
+
+    return asyncio.get_event_loop().run_until_complete(run())
 
 
 class TestDemoServerIntegration:
@@ -1059,21 +1089,9 @@ class TestBlockReadsIntegration:
 
     def test_block_reads_false_one_call_per_register(self, demo_server, register_map):
         """With block_reads disabled there is one transaction per register."""
-        client = ModbusClient(
-            host=demo_server.host,
-            port=demo_server.port,
-            register_map=register_map,
-            block_reads=False,
-        )
+        client = _demo_client(demo_server, register_map, block_reads=False)
         calls = _spy_reads(client)
-
-        async def run():
-            await client.connect()
-            res = await client._poll_registers()
-            await client.disconnect()
-            return res
-
-        results = asyncio.get_event_loop().run_until_complete(run())
+        results = _connected_poll(client)
 
         holding_regs = [r for r in register_map.registers if r.type == "holding"]
         assert len(calls["holding"]) == len(holding_regs)
@@ -1089,39 +1107,16 @@ class TestBlockReadsIntegration:
                 "bad": [{"name": "x", "address": 5000, "datatype": "uint16"}],
             },
         }
-        client = ModbusClient(
-            host=demo_server.host,
-            port=demo_server.port,
-            register_map=RegisterMap.from_dict(data),
-        )
-
-        async def run():
-            await client.connect()
-            res = await client._poll_registers()
-            await client.disconnect()
-            return res
-
-        results = asyncio.get_event_loop().run_until_complete(run())
+        client = _demo_client(demo_server, RegisterMap.from_dict(data))
+        results = _connected_poll(client)
         assert "v" in results.get("good", {})
         assert "bad" not in results
 
     def test_max_block_size_limits_counts(self, demo_server, register_map):
         """max_block_size caps every transaction's count while keeping full coverage."""
-        client = ModbusClient(
-            host=demo_server.host,
-            port=demo_server.port,
-            register_map=register_map,
-            max_block_size=8,
-        )
+        client = _demo_client(demo_server, register_map, max_block_size=8)
         calls = _spy_reads(client)
-
-        async def run():
-            await client.connect()
-            res = await client._poll_registers()
-            await client.disconnect()
-            return res
-
-        results = asyncio.get_event_loop().run_until_complete(run())
+        results = _connected_poll(client)
 
         all_counts = [count for kind in calls.values() for (_, count) in kind]
         assert all_counts  # something was read
@@ -1139,18 +1134,19 @@ class TestBlockReadsIntegration:
 class TestPollScheduler:
     """Per-register poll scheduling with a fake clock."""
 
-    def _make_client(self):
-        """Client with a fast (interface-rate) and a slow (5s) register, no network."""
-        data = {
-            "name": "sched",
-            "events": {
+    def _make_client(self, events=None, poll_interval=1.0):
+        """Client over ``events`` (a fast + slow-5s register by default), no network.
+
+        Fake reads record each polled register's name into the returned list.
+        """
+        if events is None:
+            events = {
                 "fast": [{"name": "f", "address": 0}],
                 "slow": [{"name": "s", "address": 1, "poll_interval": 5.0}],
-            },
-        }
+            }
         client = ModbusClient(
-            register_map=RegisterMap.from_dict(data),
-            poll_interval=1.0,
+            register_map=RegisterMap.from_dict({"name": "sched", "events": events}),
+            poll_interval=poll_interval,
             block_reads=False,
         )
         polled: list[str] = []
@@ -1207,13 +1203,6 @@ class TestPollScheduler:
         client = ModbusClient(poll_interval=2.5)
         assert client._seconds_until_next_due() == 2.5
 
-    def test_poll_interval_negative_rejected(self):
-        """A negative per-register poll_interval is rejected at load."""
-        with pytest.raises(ValueError, match="poll_interval must be >= 0"):
-            RegisterMap.from_dict(
-                {"events": {"e": [{"name": "x", "address": 0, "poll_interval": -1}]}}
-            )
-
     def test_build_poll_items_excludes_disabled(self):
         """A disabled register (poll_interval == 0) produces no poll item."""
         data = {
@@ -1243,25 +1232,12 @@ class TestPollScheduler:
 
     def test_disabled_register_never_polls(self):
         """A disabled register never polls, even after many clock cycles."""
-        data = {
-            "name": "sched",
-            "events": {
+        client, polled = self._make_client(
+            events={
                 "on": [{"name": "f", "address": 0}],
                 "off": [{"name": "d", "address": 1, "poll_interval": 0}],
-            },
-        }
-        client = ModbusClient(
-            register_map=RegisterMap.from_dict(data),
-            poll_interval=1.0,
-            block_reads=False,
+            }
         )
-        polled: list[str] = []
-
-        async def fake_read(reg):
-            polled.append(reg.name)
-            return 123
-
-        client.read_register_value = fake_read
         run = asyncio.get_event_loop().run_until_complete
 
         for now in range(0, 100, 1):  # 100 cycles across the clock
@@ -1272,25 +1248,13 @@ class TestPollScheduler:
 
     def test_real_clock_fast_polls_more_than_slow(self):
         """Smoke test with the real clock: the fast register polls more often."""
-        data = {
-            "name": "smoke",
-            "events": {
+        client, polled = self._make_client(
+            events={
                 "fast": [{"name": "f", "address": 0}],
                 "slow": [{"name": "s", "address": 1, "poll_interval": 0.5}],
             },
-        }
-        client = ModbusClient(
-            register_map=RegisterMap.from_dict(data),
             poll_interval=0.05,
-            block_reads=False,
         )
-        counts = {"f": 0, "s": 0}
-
-        async def fake_read(reg):
-            counts[reg.name] += 1
-            return 1
-
-        client.read_register_value = fake_read
 
         async def run():
             client._build_poll_items()
@@ -1300,8 +1264,8 @@ class TestPollScheduler:
                 await asyncio.sleep(0.02)
 
         asyncio.get_event_loop().run_until_complete(run())
-        assert counts["f"] > counts["s"]
-        assert counts["s"] >= 1
+        assert polled.count("f") > polled.count("s")
+        assert polled.count("s") >= 1
 
 
 # =============================================================================
@@ -1314,14 +1278,12 @@ class TestFieldSanitization:
 
     def test_field_name_sanitizes_reserved_chars(self):
         """Dots and slashes/spaces collapse to underscores."""
-        client = ModbusClient()
-        assert client._field_name(Register(address=1, name="pcb.temp")) == "pcb_temp"
-        assert client._field_name(Register(address=2, name="amps/phase a")) == "amps_phase_a"
+        assert Register(address=1, name="pcb.temp").field_name == "pcb_temp"
+        assert Register(address=2, name="amps/phase a").field_name == "amps_phase_a"
 
     def test_field_name_all_junk_falls_back(self):
         """A name with nothing usable falls back to r<address>."""
-        client = ModbusClient()
-        assert client._field_name(Register(address=7, name="...")) == "r7"
+        assert Register(address=7, name="...").field_name == "r7"
 
     def test_dotted_name_roundtrips(self, demo_server):
         """A dotted register name flows through init + poll as a sanitized field."""
@@ -1333,20 +1295,9 @@ class TestFieldSanitization:
                 ]
             },
         }
-        client = ModbusClient(
-            host=demo_server.host,
-            port=demo_server.port,
-            register_map=RegisterMap.from_dict(data),
-        )
+        client = _demo_client(demo_server, RegisterMap.from_dict(data))
         client._init_trace_source()  # schema uses the sanitized field name
-
-        async def run():
-            await client.connect()
-            res = await client._poll_registers()
-            await client.disconnect()
-            return res
-
-        results = asyncio.get_event_loop().run_until_complete(run())
+        results = _connected_poll(client)
         assert "pcb_temp" in results.get("temps", {})
 
 

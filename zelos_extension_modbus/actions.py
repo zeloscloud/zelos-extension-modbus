@@ -13,7 +13,7 @@ from typing import Any
 
 import zelos_sdk
 
-from zelos_extension_modbus.constants import RegisterType
+from zelos_extension_modbus.constants import MODBUS_MAX_READ_COUNT, RegisterType
 from zelos_extension_modbus.registry import (
     all_interfaces,
     get_client,
@@ -122,7 +122,9 @@ def get_status(interface: str) -> dict[str, Any]:
     default=RegisterType.HOLDING,
     title="Register Type",
 )
-@zelos_sdk.action.number("count", minimum=1, maximum=125, default=1, title="Count")
+@zelos_sdk.action.number(
+    "count", minimum=1, maximum=MODBUS_MAX_READ_COUNT, default=1, title="Count"
+)
 def read_register(interface: str, address: int, reg_type: str, count: int) -> dict[str, Any]:
     """Read register(s) by address."""
     client, err = _get_client_or_error(interface)

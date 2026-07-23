@@ -55,6 +55,23 @@ class TestCreateClients:
         assert client.unit_id == 7
         assert client.timeout == 5.0
 
+    def test_absent_keys_use_constructor_defaults(self):
+        """Keys omitted from interface config fall back to ModbusClient defaults."""
+        config = {"interfaces": [{"transport": "tcp", "host": "10.0.0.5"}]}
+        pairs = _create_clients(config)
+        client, _registry_name = pairs[0]
+
+        assert client.host == "10.0.0.5"  # the one key we did set
+        # Everything else is the constructor's default, not restated in app.py.
+        assert client.port == 502
+        assert client.unit_id == 1
+        assert client.timeout == 3.0
+        assert client.poll_interval == 1.0
+        assert client.write_mode == "auto"
+        assert client.block_reads is True
+        assert client.max_block_size == 125
+        assert client.max_read_gap == 0
+
     def test_no_interfaces_exits(self):
         """An empty interface list is a config error and exits."""
         with pytest.raises(SystemExit) as exc:

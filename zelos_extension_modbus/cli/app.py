@@ -19,7 +19,7 @@ from zelos_sdk.extensions import load_config
 from zelos_sdk.hooks.logging import TraceLoggingHandler
 
 from zelos_extension_modbus.client import ModbusClient
-from zelos_extension_modbus.constants import Transport, WriteMode, sanitize_source_name
+from zelos_extension_modbus.constants import Transport, sanitize_source_name
 from zelos_extension_modbus.register_map import RegisterMap
 
 if TYPE_CHECKING:
@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 # Demo server settings
 DEMO_HOST = "127.0.0.1"
 DEMO_PORT = 5020
+
+# Interface-config keys forwarded to ModbusClient only when present, so the
+# constructor stays the single authority on defaults.
+PASSTHROUGH_KEYS = (
+    "unit_id",
+    "timeout",
+    "poll_interval",
+    "write_mode",
+    "block_reads",
+    "max_block_size",
+    "max_read_gap",
+)
+TCP_KEYS = ("host", "port")
+RTU_KEYS = ("serial_port", "baudrate", "parity", "stopbits", "bytesize")
 
 
 def get_demo_register_map_path() -> Path:
@@ -98,12 +112,9 @@ def _load_register_map(path_str: str | None) -> RegisterMap | None:
     """
     if not path_str:
         return None
-    map_path = Path(path_str)
-    if not map_path.exists():
-        logger.error(f"Register map file not found: {path_str}")
-        sys.exit(1)
     try:
-        reg_map = RegisterMap.from_file(map_path)
+        # from_file raises FileNotFoundError for a missing path, caught below.
+        reg_map = RegisterMap.from_file(path_str)
         logger.info(f"Loaded register map with {len(reg_map.registers)} registers")
         return reg_map
     except Exception as e:
@@ -158,29 +169,17 @@ def _create_clients(config: dict[str, Any]) -> list[tuple[ModbusClient, str]]:
         # Load register map
         register_map = _load_register_map(iface_config.get("register_map_file"))
 
-        # Build client kwargs
+        # Forward only keys the user actually set, so ModbusClient.__init__ is the
+        # sole default authority (no defaults restated here).
         client_kwargs: dict[str, Any] = {
             "transport": transport,
-            "unit_id": iface_config.get("unit_id", 1),
-            "timeout": iface_config.get("timeout", 3.0),
             "register_map": register_map,
-            "poll_interval": iface_config.get("poll_interval", 1.0),
-            "write_mode": iface_config.get("write_mode", WriteMode.AUTO),
-            "block_reads": iface_config.get("block_reads", True),
-            "max_block_size": iface_config.get("max_block_size", 125),
-            "max_read_gap": iface_config.get("max_read_gap", 0),
             "interface_name": iface_name,
         }
-
-        if transport == Transport.RTU:
-            client_kwargs["serial_port"] = iface_config.get("serial_port", "/dev/ttyUSB0")
-            client_kwargs["baudrate"] = iface_config.get("baudrate", 9600)
-            client_kwargs["parity"] = iface_config.get("parity", "N")
-            client_kwargs["stopbits"] = iface_config.get("stopbits", 1)
-            client_kwargs["bytesize"] = iface_config.get("bytesize", 8)
-        else:
-            client_kwargs["host"] = iface_config.get("host", "127.0.0.1")
-            client_kwargs["port"] = iface_config.get("port", 502)
+        transport_keys = RTU_KEYS if transport == Transport.RTU else TCP_KEYS
+        for key in PASSTHROUGH_KEYS + transport_keys:
+            if key in iface_config:
+                client_kwargs[key] = iface_config[key]
 
         client = ModbusClient(**client_kwargs)
 
