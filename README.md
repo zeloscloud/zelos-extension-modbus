@@ -27,7 +27,8 @@ All configuration is managed through the Zelos App settings interface.
 - **Transport** — `tcp` or `rtu` (determines which connection fields appear)
 - **Unit ID** — Modbus slave/unit ID (default: `1`)
 - **Register Map File** — Path to a JSON register map file (`.json`)
-- **Poll Interval** — How often to poll registers (default: `1.0s`)
+- **Poll Interval** — Default poll rate (default: `1.0s`; a register may override it with its own `poll_interval`)
+- **Block Reads** — Coalesce contiguous registers into range reads (on by default; tune with `max_block_size` / `max_read_gap`). A failed block skips only its own registers.
 - **Timeout** — Modbus request timeout (default: `3.0s`)
 - **Log Level** — Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
 
@@ -71,12 +72,13 @@ A register map file defines which registers to read and how to decode them. Even
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `name` | Yes | — | Field name in Zelos event |
 | `address` | Yes | — | Register address (0–65535) |
+| `name` | No | `r<address>` | Field name in Zelos event (unique per event — duplicates fail at load) |
 | `type` | No | `holding` | `holding`, `input`, `coil`, `discrete_input` |
 | `datatype` | No | `uint16` | See data types below |
 | `unit` | No | — | Display unit |
 | `scale` | No | `1.0` | Scale factor |
+| `poll_interval` | No | interface rate | Per-register poll rate (seconds); `0` or `null` disables polling |
 | `byte_order` | No | `big` | `big`, `little`, `big_swap`, `little_swap` |
 | `writable` | No | auto | Override write permission |
 

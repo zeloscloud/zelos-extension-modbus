@@ -160,6 +160,9 @@ def _create_clients(config: dict[str, Any]) -> list[tuple[ModbusClient, str]]:
             "register_map": register_map,
             "poll_interval": iface_config.get("poll_interval", 1.0),
             "write_mode": iface_config.get("write_mode", WriteMode.AUTO),
+            "block_reads": iface_config.get("block_reads", True),
+            "max_block_size": iface_config.get("max_block_size", 125),
+            "max_read_gap": iface_config.get("max_read_gap", 0),
             "interface_name": iface_name,
         }
 

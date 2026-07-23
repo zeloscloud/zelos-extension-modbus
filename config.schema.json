@@ -82,7 +82,7 @@
                   "poll_interval": {
                     "type": "number",
                     "title": "Poll Interval (seconds)",
-                    "description": "How often to read all registers",
+                    "description": "Default poll rate for all registers (a register may override this with its own poll_interval)",
                     "default": 1.0,
                     "minimum": 0.1,
                     "maximum": 60.0
@@ -94,6 +94,28 @@
                     "default": 3.0,
                     "minimum": 0.5,
                     "maximum": 30.0
+                  },
+                  "block_reads": {
+                    "type": "boolean",
+                    "title": "Block Reads",
+                    "description": "Coalesce contiguous registers into range reads (far fewer transactions per sweep)",
+                    "default": true,
+                    "ui:widget": "toggle"
+                  },
+                  "max_block_size": {
+                    "type": "integer",
+                    "title": "Max Block Size",
+                    "description": "Maximum registers per range read",
+                    "default": 125,
+                    "minimum": 1,
+                    "maximum": 125
+                  },
+                  "max_read_gap": {
+                    "type": "integer",
+                    "title": "Max Read Gap",
+                    "description": "Maximum uncovered registers to bridge within a block (0 = strictly contiguous)",
+                    "default": 0,
+                    "minimum": 0
                   },
                   "write_mode": {
                     "type": "string",
@@ -207,7 +229,7 @@
                   "poll_interval": {
                     "type": "number",
                     "title": "Poll Interval (seconds)",
-                    "description": "How often to read all registers",
+                    "description": "Default poll rate for all registers (a register may override this with its own poll_interval)",
                     "default": 1.0,
                     "minimum": 0.1,
                     "maximum": 60.0
@@ -219,6 +241,28 @@
                     "default": 3.0,
                     "minimum": 0.5,
                     "maximum": 30.0
+                  },
+                  "block_reads": {
+                    "type": "boolean",
+                    "title": "Block Reads",
+                    "description": "Coalesce contiguous registers into range reads (far fewer transactions per sweep)",
+                    "default": true,
+                    "ui:widget": "toggle"
+                  },
+                  "max_block_size": {
+                    "type": "integer",
+                    "title": "Max Block Size",
+                    "description": "Maximum registers per range read",
+                    "default": 125,
+                    "minimum": 1,
+                    "maximum": 125
+                  },
+                  "max_read_gap": {
+                    "type": "integer",
+                    "title": "Max Read Gap",
+                    "description": "Maximum uncovered registers to bridge within a block (0 = strictly contiguous)",
+                    "default": 0,
+                    "minimum": 0
                   },
                   "write_mode": {
                     "type": "string",

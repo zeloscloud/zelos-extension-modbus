@@ -34,3 +34,6 @@ uv run main.py trace 192.168.1.100
 | `--unit-id` | `-u` | `1` | Modbus slave/unit ID |
 | `--interval` | `-i` | `1.0` | Poll interval in seconds |
 | `--timeout` | | `3.0` | Request timeout in seconds |
+| `--block-reads` / `--no-block-reads` | | on | Coalesce contiguous registers into range reads |
+| `--max-block-size` | | `125` | Max registers per range read (1–125) |
+| `--max-read-gap` | | `0` | Max uncovered registers to bridge within a block |

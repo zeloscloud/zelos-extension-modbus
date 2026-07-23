@@ -110,6 +110,23 @@ def cli(ctx: click.Context, demo: bool) -> None:
 @click.option("--unit-id", "-u", type=int, default=1, help="Modbus unit/slave ID")
 @click.option("--interval", "-i", type=float, default=1.0, help="Poll interval in seconds")
 @click.option("--timeout", type=float, default=3.0, help="Request timeout in seconds")
+@click.option(
+    "--block-reads/--no-block-reads",
+    default=True,
+    help="Coalesce contiguous registers into range reads (default: on)",
+)
+@click.option(
+    "--max-block-size",
+    type=click.IntRange(1, 125),
+    default=125,
+    help="Maximum registers per range read",
+)
+@click.option(
+    "--max-read-gap",
+    type=click.IntRange(min=0),
+    default=0,
+    help="Maximum uncovered registers to bridge within a block (0 = strictly contiguous)",
+)
 @click.pass_context
 def trace(
     ctx: click.Context,
@@ -124,6 +141,9 @@ def trace(
     unit_id: int,
     interval: float,
     timeout: float,
+    block_reads: bool,
+    max_block_size: int,
+    max_read_gap: int,
 ) -> None:
     """Trace Modbus registers from command line.
 
@@ -167,6 +187,9 @@ def trace(
         "timeout": timeout,
         "register_map": register_map,
         "poll_interval": interval,
+        "block_reads": block_reads,
+        "max_block_size": max_block_size,
+        "max_read_gap": max_read_gap,
     }
 
     if transport == Transport.TCP:

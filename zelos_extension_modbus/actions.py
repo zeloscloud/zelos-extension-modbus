@@ -106,6 +106,9 @@ def get_status(interface: str) -> dict[str, Any]:
         "error_count": client._error_count,
         "poll_interval": client.poll_interval,
         "write_mode": client.write_mode,
+        "block_reads": client.block_reads,
+        "max_block_size": client.max_block_size,
+        "max_read_gap": client.max_read_gap,
         "registers": len(client.register_map.registers) if client.register_map else 0,
     }
 
