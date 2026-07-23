@@ -18,8 +18,14 @@ The register map format uses user-defined events to group registers semantically
 Event names become Zelos trace events. Register names become fields within those events.
 Register type (holding/input/coil/discrete_input) is just the Modbus protocol detail.
 
-Required fields per register: address, name
-Optional fields: type (default: holding), datatype (default: uint16), unit, scale (default: 1.0)
+Required fields per register: address
+Optional fields: name (default: r<address>), type (default: holding),
+datatype (default: uint16), unit, scale (default: 1.0),
+poll_interval (per-register poll rate in seconds; default: interface interval;
+0 or null disables polling)
+
+Within a single event, register field names must be unique after sanitization
+(the same rule the trace layer applies); duplicates raise a ValueError at load.
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from zelos_extension_modbus.constants import ByteOrder, RegisterType
+from zelos_extension_modbus.constants import ByteOrder, RegisterType, sanitize_source_name
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +65,7 @@ class Register:
     """A single Modbus register definition."""
 
     address: int
-    name: str
+    name: str = ""
     type: str = RegisterType.HOLDING
     datatype: str = "uint16"
     unit: str = ""
@@ -67,14 +73,29 @@ class Register:
     byte_order: str = ByteOrder.BIG
     description: str = ""
     writable: bool = True
+    poll_interval: float | None = None
 
     @property
     def count(self) -> int:
         """Number of 16-bit registers this value spans."""
         return DATATYPES.get(self.datatype, 1)
 
+    @property
+    def polled(self) -> bool:
+        """Whether this register is polled (a poll_interval of 0 disables it)."""
+        return self.poll_interval != 0
+
     def __post_init__(self) -> None:
-        """Validate register definition."""
+        """Validate register definition.
+
+        A poll_interval of 0 disables polling for this register; a negative
+        value is rejected.
+        """
+        if not self.name:
+            self.name = f"r{self.address}"
+        if self.poll_interval is not None and self.poll_interval < 0:
+            msg = f"poll_interval must be >= 0 (0 disables polling), got {self.poll_interval}"
+            raise ValueError(msg)
         if self.type not in REGISTER_TYPES:
             msg = f"Invalid register type '{self.type}'. Must be one of {REGISTER_TYPES}"
             raise ValueError(msg)
@@ -130,10 +151,19 @@ class RegisterMap:
 
         for event_name, registers_data in data.get("events", {}).items():
             registers = []
+            # Field names must be unique per event after sanitization, since the
+            # trace layer collapses reserved characters and clobbers colliding
+            # rows on log. Reject both raw and post-sanitization collisions here.
+            seen_fields: dict[str, str] = {}
             for reg_data in registers_data:
+                # Explicit JSON null means "disabled" (same as 0); an absent key
+                # keeps the interface-default rate (None).
+                poll_interval = reg_data.get("poll_interval")
+                if "poll_interval" in reg_data and poll_interval is None:
+                    poll_interval = 0.0
                 reg = Register(
                     address=reg_data["address"],
-                    name=reg_data["name"],
+                    name=reg_data.get("name", ""),
                     type=reg_data.get("type", "holding"),
                     datatype=reg_data.get("datatype", "uint16"),
                     unit=reg_data.get("unit", ""),
@@ -141,7 +171,16 @@ class RegisterMap:
                     byte_order=reg_data.get("byte_order", "big"),
                     description=reg_data.get("description", ""),
                     writable=reg_data.get("writable", True),
+                    poll_interval=poll_interval,
                 )
+                field_name = sanitize_source_name(reg.name, f"r{reg.address}")
+                if field_name in seen_fields:
+                    msg = (
+                        f"Duplicate field name '{field_name}' in event '{event_name}': "
+                        f"registers '{seen_fields[field_name]}' and '{reg.name}' collide"
+                    )
+                    raise ValueError(msg)
+                seen_fields[field_name] = reg.name
                 registers.append(reg)
             events[event_name] = registers
 

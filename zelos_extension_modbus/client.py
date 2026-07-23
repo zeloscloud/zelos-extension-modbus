@@ -6,12 +6,15 @@ import asyncio
 import contextlib
 import logging
 import struct
+import time
+from dataclasses import dataclass
 from typing import Any
 
 import zelos_sdk
 from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient
 from pymodbus.exceptions import ModbusException
 
+from zelos_extension_modbus.blocks import ReadBlock, plan_blocks
 from zelos_extension_modbus.constants import (
     ByteOrder,
     RegisterType,
@@ -22,6 +25,20 @@ from zelos_extension_modbus.constants import (
 from zelos_extension_modbus.register_map import Register, RegisterMap
 
 logger = logging.getLogger(__name__)
+
+# Bit-addressable register types return raw booleans (not decoded words).
+_BIT_TYPES = {RegisterType.COIL, RegisterType.DISCRETE_INPUT}
+
+
+@dataclass
+class _PollItem:
+    """A single register scheduled for polling at its own cadence."""
+
+    event: str
+    register: Register
+    interval: float
+    next_due: float = 0.0  # monotonic deadline; 0.0 = due immediately
+
 
 # SDK data type mapping (module-level constant)
 SDK_DATATYPE_MAP: dict[str, zelos_sdk.DataType] = {
@@ -176,6 +193,40 @@ def encode_value(
     return _reorder_registers(regs, byte_order, for_decode=False)
 
 
+def decode_block(block: ReadBlock, raw: list[int] | list[bool]) -> dict[int, float | int | bool]:
+    """Decode a block's raw response into per-register values keyed by id(register).
+
+    Each register is sliced out of ``raw`` at its offset from the block start and
+    decoded like a standalone read. Bit types return the raw boolean; word types
+    go through ``decode_value``. Registers whose slice is short (truncated
+    response) are warned about and skipped rather than decoded from garbage.
+
+    Args:
+        block: The planned block that produced ``raw``.
+        raw: The register/bit values returned for the block's address range.
+
+    Returns:
+        Mapping of ``id(register)`` to decoded value (skipped registers absent).
+    """
+    results: dict[int, float | int | bool] = {}
+    is_bits = block.type in _BIT_TYPES
+    for reg in block.registers:
+        offset = reg.address - block.address
+        span = 1 if is_bits else reg.count
+        chunk = raw[offset : offset + span]
+        if len(chunk) < span:
+            logger.warning(
+                f"Short block response for register '{reg.name}' at address "
+                f"{reg.address}: expected {span}, got {len(chunk)}"
+            )
+            continue
+        if is_bits:
+            results[id(reg)] = bool(chunk[0])
+        else:
+            results[id(reg)] = decode_value(chunk, reg.datatype, reg.scale, reg.byte_order)
+    return results
+
+
 class ModbusClient:
     """Modbus client with polling and Zelos SDK integration."""
 
@@ -194,6 +245,9 @@ class ModbusClient:
         register_map: RegisterMap | None = None,
         poll_interval: float = 1.0,
         write_mode: str = WriteMode.AUTO,
+        block_reads: bool = True,
+        max_block_size: int = 125,
+        max_read_gap: int = 0,
         interface_name: str | None = None,
     ) -> None:
         """Initialize Modbus client.
@@ -210,9 +264,14 @@ class ModbusClient:
             unit_id: Modbus slave/unit ID
             timeout: Request timeout in seconds
             register_map: Optional register map for named access
-            poll_interval: Polling interval in seconds
+            poll_interval: Default polling interval in seconds (per-register
+                poll_interval overrides this)
             write_mode: 'auto' (FC 6 for single, FC 16 for multi) or
                         'fc16' (always FC 16 for all writes)
+            block_reads: Coalesce contiguous registers into range reads
+            max_block_size: Maximum addresses per range read (clamped to 1-125)
+            max_read_gap: Maximum uncovered addresses to bridge within a block
+                (clamped to >= 0; 0 = strictly contiguous)
             interface_name: Optional name for this interface (used for trace source naming)
         """
         self.transport = transport
@@ -228,6 +287,20 @@ class ModbusClient:
         self.register_map = register_map
         self.poll_interval = poll_interval
         self.write_mode = write_mode
+
+        # The schema oneOf branch isn't validated by the SDK, so the constructor
+        # is the backstop for out-of-range block-read knobs.
+        if not 1 <= max_block_size <= 125:
+            clamped = max(1, min(125, max_block_size))
+            logger.warning(f"max_block_size {max_block_size} out of range; clamping to {clamped}")
+            max_block_size = clamped
+        if max_read_gap < 0:
+            logger.warning(f"max_read_gap {max_read_gap} < 0; clamping to 0")
+            max_read_gap = 0
+        self.block_reads = block_reads
+        self.max_block_size = max_block_size
+        self.max_read_gap = max_read_gap
+
         self.interface_name = interface_name
 
         self._client: AsyncModbusTcpClient | AsyncModbusSerialClient | None = None
@@ -236,6 +309,10 @@ class ModbusClient:
         self._poll_count = 0
         self._error_count = 0
         self._loop: asyncio.AbstractEventLoop | None = None
+
+        # Per-register poll scheduler state (built lazily / on start).
+        self._poll_items: list[_PollItem] = []
+        self._clock = time.monotonic  # test seam for a fake clock
 
         # Zelos SDK trace source
         self._source: zelos_sdk.TraceSourceCacheLast | None = None
@@ -283,17 +360,29 @@ class ModbusClient:
             )
             return
 
-        # Create events from user-defined event names
+        # Create events from user-defined event names. Only polled registers are
+        # advertised as fields; an event whose registers are all disabled is
+        # skipped entirely (no dead leaves in the signal tree).
         for event_name, regs in self.register_map.events.items():
-            if not regs:
+            fields = [
+                zelos_sdk.TraceEventFieldMetadata(
+                    self._field_name(reg), self._get_sdk_datatype(reg.datatype), reg.unit
+                )
+                for reg in regs
+                if reg.polled
+            ]
+            if not fields:
                 continue
 
-            fields = []
-            for reg in regs:
-                dtype = self._get_sdk_datatype(reg.datatype)
-                fields.append(zelos_sdk.TraceEventFieldMetadata(reg.name, dtype, reg.unit))
-
             self._source.add_event(event_name, fields)
+
+    def _field_name(self, reg: Register) -> str:
+        """Trace-safe field name for a register (schema and rows must agree).
+
+        Collisions are impossible here — ``RegisterMap.from_dict`` rejects
+        registers whose sanitized names collide within an event.
+        """
+        return sanitize_source_name(reg.name, f"r{reg.address}")
 
     def _get_sdk_datatype(self, datatype: str) -> zelos_sdk.DataType:
         """Map register datatype to Zelos SDK DataType."""
@@ -559,8 +648,60 @@ class ModbusClient:
             return await self.write_register(register.address, raw[0])
         return await self.write_registers(register.address, raw)
 
-    async def _poll_registers(self) -> dict[str, dict[str, Any]]:
-        """Poll all registers in the register map.
+    async def _read_block(self, block: ReadBlock) -> list[int] | list[bool] | None:
+        """Read one planned block via the matching typed read.
+
+        Returns:
+            Raw register/bit values for the block's range, or None on error.
+        """
+        if block.type == RegisterType.HOLDING:
+            return await self.read_holding_registers(block.address, block.count)
+        elif block.type == RegisterType.INPUT:
+            return await self.read_input_registers(block.address, block.count)
+        elif block.type == RegisterType.COIL:
+            return await self.read_coils(block.address, block.count)
+        elif block.type == RegisterType.DISCRETE_INPUT:
+            return await self.read_discrete_inputs(block.address, block.count)
+        return None
+
+    def _build_poll_items(self) -> None:
+        """Flatten the register map into per-register poll items.
+
+        Disabled registers (poll_interval == 0) are skipped and never polled.
+        Each remaining register polls at its own poll_interval when set,
+        otherwise at the interface interval. Items start due immediately
+        (next_due == 0.0).
+        """
+        items: list[_PollItem] = []
+        if self.register_map:
+            for event_name, regs in self.register_map.events.items():
+                for reg in regs:
+                    if not reg.polled:
+                        continue
+                    # ``is None`` (not truthiness): a disabled register is
+                    # already filtered out above, so 0 never reaches here.
+                    interval = (
+                        self.poll_interval if reg.poll_interval is None else reg.poll_interval
+                    )
+                    items.append(_PollItem(event=event_name, register=reg, interval=interval))
+        self._poll_items = items
+
+    def _seconds_until_next_due(self, now: float | None = None) -> float:
+        """Seconds until the earliest-due poll item (>= 0).
+
+        Falls back to poll_interval when there are no items (raw/no-map mode).
+        """
+        if not self._poll_items:
+            return self.poll_interval
+        if now is None:
+            now = self._clock()
+        return max(0.0, min(it.next_due - now for it in self._poll_items))
+
+    async def _poll_registers(self, now: float | None = None) -> dict[str, dict[str, Any]]:
+        """Poll the registers that are due, honoring per-register poll rates.
+
+        Args:
+            now: Monotonic time to schedule against (defaults to the clock).
 
         Returns:
             Dictionary of {event_name: {field_name: value}}
@@ -568,17 +709,44 @@ class ModbusClient:
         if not self.register_map:
             return {}
 
+        if not self._poll_items:
+            self._build_poll_items()
+        if now is None:
+            now = self._clock()
+
+        due = [it for it in self._poll_items if it.next_due <= now]
+        if not due:
+            return {}
+
         results: dict[str, dict[str, Any]] = {}
 
-        for event_name, regs in self.register_map.events.items():
-            event_results: dict[str, Any] = {}
-            for reg in regs:
-                value = await self.read_register_value(reg)
+        if self.block_reads:
+            blocks = plan_blocks(
+                [it.register for it in due], self.max_block_size, self.max_read_gap
+            )
+            decoded: dict[int, Any] = {}
+            for block in blocks:
+                raw = await self._read_block(block)
+                if raw is None:
+                    logger.warning(
+                        f"Block read failed for {block.type} at address {block.address} "
+                        f"(count {block.count}); skipping {len(block.registers)} register(s)"
+                    )
+                    continue
+                decoded.update(decode_block(block, raw))
+            for it in due:
+                value = decoded.get(id(it.register))
                 if value is not None:
-                    event_results[reg.name] = value
+                    results.setdefault(it.event, {})[self._field_name(it.register)] = value
+        else:
+            for it in due:
+                value = await self.read_register_value(it.register)
+                if value is not None:
+                    results.setdefault(it.event, {})[self._field_name(it.register)] = value
 
-            if event_results:
-                results[event_name] = event_results
+        # Reschedule from now — no backlog after a stall.
+        for it in due:
+            it.next_due = now + it.interval
 
         return results
 
@@ -603,6 +771,7 @@ class ModbusClient:
         """Start the client (initialize trace source)."""
         self._running = True
         self._init_trace_source()
+        self._build_poll_items()
         logger.info("ModbusClient started")
 
     def stop(self) -> None:
@@ -664,7 +833,13 @@ class ModbusClient:
                         logger.warning("Connection lost, will reconnect...")
                         continue  # Skip sleep, reconnect immediately
 
-                await asyncio.sleep(self.poll_interval)
+                # Sleep until the earliest-due poll item, chunked at <= 1s so a
+                # shutdown (self._running flips false) is observed promptly.
+                remaining = self._seconds_until_next_due()
+                while remaining > 0 and self._running:
+                    chunk = min(remaining, 1.0)
+                    await asyncio.sleep(chunk)
+                    remaining -= chunk
         finally:
             await self.disconnect()
 
