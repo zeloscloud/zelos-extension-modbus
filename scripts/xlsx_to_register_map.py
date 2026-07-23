@@ -75,10 +75,17 @@ def parse_row(row: tuple[Any, ...]) -> dict[str, Any] | None:
     if not row or row[0] is None:
         return None
     idx, name, rw, _resettable, value, unit, desc = (row + (None,) * 7)[:7]
+    # bool is an int subclass, so guard it before the int check: a TRUE/FALSE
+    # cell is not a register index.
+    if isinstance(idx, bool):
+        return None
     # Excel sheets often store some indices as text cells; accept "8505" but
     # still skip range rows like "10010-10015" (reserved/log blocks).
     if isinstance(idx, str) and idx.strip().isdigit():
         idx = int(idx.strip())
+    # Whole-number float cells (8505.0) are valid indices; fractional ones are not.
+    if isinstance(idx, float) and idx.is_integer():
+        idx = int(idx)
     if not isinstance(idx, int):
         return None
     if not name:
@@ -157,9 +164,8 @@ def build_register_map(
     }
 
 
-def load_rows(xlsx_path: Path, sheet: str | None) -> list[tuple[Any, ...]]:
-    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-    ws = wb[sheet] if sheet else wb[wb.sheetnames[0]]
+def load_rows(ws: Any) -> list[tuple[Any, ...]]:
+    """Read the data rows (everything after the header) from an open worksheet."""
     all_rows = list(ws.iter_rows(values_only=True))
     if not all_rows:
         return []
@@ -172,7 +178,7 @@ def load_rows(xlsx_path: Path, sheet: str | None) -> list[tuple[Any, ...]]:
     return all_rows[1:]
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -182,14 +188,21 @@ def main() -> int:
     ap.add_argument("--sheet", default=None, help="Worksheet name (default: first sheet)")
     ap.add_argument("--name", default=None, help="Device name (default: sheet name lowercased)")
     ap.add_argument("--description", default=None, help="Register-map description")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if not args.input.exists():
         sys.stderr.write(f"input not found: {args.input}\n")
         return 2
 
-    rows = load_rows(args.input, args.sheet)
-    sheet_name = args.sheet or openpyxl.load_workbook(args.input, read_only=True).sheetnames[0]
+    # Load once and resolve the worksheet up front so the sheet title can be
+    # threaded through without a second workbook load.
+    wb = openpyxl.load_workbook(args.input, data_only=True)
+    if args.sheet is not None and args.sheet not in wb.sheetnames:
+        sys.stderr.write(f"sheet {args.sheet!r} not found. Available sheets: {wb.sheetnames}\n")
+        return 2
+    sheet_name = args.sheet or wb.sheetnames[0]
+
+    rows = load_rows(wb[sheet_name])
     device_name = args.name or to_snake(sheet_name)
     description = args.description or f"Generated from {args.input.name}"
 

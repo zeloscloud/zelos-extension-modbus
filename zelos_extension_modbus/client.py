@@ -285,11 +285,13 @@ class ModbusClient:
         self.unit_id = unit_id
         self.timeout = timeout
         self.register_map = register_map
-        self.poll_interval = poll_interval
         self.write_mode = write_mode
 
         # The schema oneOf branch isn't validated by the SDK, so the constructor
-        # is the backstop for out-of-range block-read knobs.
+        # is the backstop for out-of-range block-read and poll knobs.
+        if poll_interval < 0.01:
+            logger.warning(f"poll_interval {poll_interval} < 0.01s; flooring to 0.01s")
+            poll_interval = 0.01
         if not 1 <= max_block_size <= 125:
             clamped = max(1, min(125, max_block_size))
             logger.warning(f"max_block_size {max_block_size} out of range; clamping to {clamped}")
@@ -297,6 +299,7 @@ class ModbusClient:
         if max_read_gap < 0:
             logger.warning(f"max_read_gap {max_read_gap} < 0; clamping to 0")
             max_read_gap = 0
+        self.poll_interval = poll_interval
         self.block_reads = block_reads
         self.max_block_size = max_block_size
         self.max_read_gap = max_read_gap
@@ -310,8 +313,10 @@ class ModbusClient:
         self._error_count = 0
         self._loop: asyncio.AbstractEventLoop | None = None
 
-        # Per-register poll scheduler state (built lazily / on start).
-        self._poll_items: list[_PollItem] = []
+        # Per-register poll scheduler state. None means "not yet built"; an empty
+        # list means "built, nothing to poll" (an all-disabled map) and must not
+        # be rebuilt every cycle.
+        self._poll_items: list[_PollItem] | None = None
         self._clock = time.monotonic  # test seam for a fake clock
 
         # Zelos SDK trace source
@@ -709,7 +714,9 @@ class ModbusClient:
         if not self.register_map:
             return {}
 
-        if not self._poll_items:
+        # Build once: None = not yet built. An all-disabled map builds to an
+        # empty list and is never re-walked on subsequent cycles.
+        if self._poll_items is None:
             self._build_poll_items()
         if now is None:
             now = self._clock()
@@ -836,6 +843,13 @@ class ModbusClient:
                 # Sleep until the earliest-due poll item, chunked at <= 1s so a
                 # shutdown (self._running flips false) is observed promptly.
                 remaining = self._seconds_until_next_due()
+                if remaining <= 0:
+                    # Guarantee at least one suspension point per iteration: with
+                    # no poll work (no map, or all registers disabled) the while
+                    # loop below never runs, so without this yield the loop would
+                    # starve every other task sharing the event loop. asyncio
+                    # special-cases sleep(0) as a bare yield.
+                    await asyncio.sleep(0)
                 while remaining > 0 and self._running:
                     chunk = min(remaining, 1.0)
                     await asyncio.sleep(chunk)

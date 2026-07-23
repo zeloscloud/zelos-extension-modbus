@@ -108,7 +108,13 @@ def cli(ctx: click.Context, demo: bool) -> None:
 @click.option("--stopbits", type=click.Choice(["1", "2"]), default="1", help="Stop bits")
 @click.option("--bytesize", type=click.Choice(["7", "8"]), default="8", help="Data bits")
 @click.option("--unit-id", "-u", type=int, default=1, help="Modbus unit/slave ID")
-@click.option("--interval", "-i", type=float, default=1.0, help="Poll interval in seconds")
+@click.option(
+    "--interval",
+    "-i",
+    type=click.FloatRange(min=0.01),
+    default=1.0,
+    help="Poll interval in seconds",
+)
 @click.option("--timeout", type=float, default=3.0, help="Request timeout in seconds")
 @click.option(
     "--block-reads/--no-block-reads",

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("openpyxl")
+openpyxl = pytest.importorskip("openpyxl")
 
 _SCRIPT = Path(__file__).parent.parent / "scripts" / "xlsx_to_register_map.py"
 
@@ -70,6 +70,52 @@ class TestBuildRegisterMap:
         rows = [_row(0, "Setpoint", rw="R/W")]
         result = conv.build_register_map(rows, "dev", "desc")
         assert result["events"]["setpoint"][0]["writable"] is True
+
+
+class TestParseRow:
+    """Index-cell coercion edge cases."""
+
+    def test_whole_float_index_parsed(self):
+        """A whole-number float index cell (8505.0) parses to the int address."""
+        reg = conv.parse_row(_row(8505.0, "Serial"))
+        assert reg is not None
+        assert reg["address"] == 8505
+
+    def test_fractional_float_index_skipped(self):
+        """A fractional float index is not a valid register address; skip it."""
+        assert conv.parse_row(_row(8505.5, "Serial")) is None
+
+    def test_bool_index_skipped(self):
+        """A TRUE/FALSE cell is not a register index (bool is an int subclass)."""
+        assert conv.parse_row(_row(True, "Flag")) is None
+        assert conv.parse_row(_row(False, "Flag")) is None
+
+
+class TestMainSheetSelection:
+    """main() resolves and validates the worksheet."""
+
+    def _write_workbook(self, path):
+        wb = openpyxl.Workbook()
+        wb.active.title = "Registers"
+        wb.save(str(path))
+
+    def test_missing_sheet_exits_2(self, tmp_path):
+        """A nonexistent --sheet prints available sheets and returns exit code 2."""
+        xlsx = tmp_path / "in.xlsx"
+        self._write_workbook(xlsx)
+        out = tmp_path / "out.json"
+        rc = conv.main([str(xlsx), str(out), "--sheet", "NoSuchSheet"])
+        assert rc == 2
+        assert not out.exists()  # nothing written on error
+
+    def test_default_sheet_resolves(self, tmp_path):
+        """With no --sheet the first worksheet is used and output is written."""
+        xlsx = tmp_path / "in.xlsx"
+        self._write_workbook(xlsx)
+        out = tmp_path / "out.json"
+        rc = conv.main([str(xlsx), str(out)])
+        assert rc == 0
+        assert out.exists()
 
 
 class TestParseUnit:
