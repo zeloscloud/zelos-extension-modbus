@@ -26,8 +26,13 @@ from zelos_extension_modbus.constants import (
     sanitize_source_name,
 )
 from zelos_extension_modbus.register_map import Register, RegisterMap
+from zelos_extension_modbus.serial_diag import diagnose_serial_port
 
 logger = logging.getLogger(__name__)
+
+# Run full serial diagnostics on the 1st connect failure, then every Nth
+# consecutive failure (~30s at the 3s reconnect cadence). A success resets.
+_DIAG_EVERY = 10
 
 
 def _clamped(name: str, value: float, lo: float, hi: float) -> float:
@@ -316,6 +321,8 @@ class ModbusClient:
         self._connected = False
         self._poll_count = 0
         self._error_count = 0
+        # Consecutive connect failures; drives throttled serial diagnostics.
+        self._connect_failures = 0
         self._loop: asyncio.AbstractEventLoop | None = None
 
         # Per-register poll scheduler state. None means "not yet built"; an empty
@@ -394,22 +401,51 @@ class ModbusClient:
     async def connect(self) -> bool:
         """Connect to Modbus device.
 
+        On failure (either a False ``connected`` flag or a raised exception),
+        runs throttled serial diagnostics for RTU transports so a re-enumerated
+        or permission-blocked adapter surfaces actionable findings instead of a
+        silent retry loop. A successful connect resets the failure counter.
+
         Returns:
             True if connected successfully
         """
+        exc: Exception | None = None
         try:
             self._client = self._create_client()
             await self._client.connect()
-            self._connected = self._client.connected
-            if self._connected:
-                logger.info(f"Connected to Modbus {self.transport}://{self._connection_str}")
-            else:
-                logger.error(f"Failed to connect to {self._connection_str}")
-            return self._connected
+            self._connected = bool(self._client.connected)
         except Exception as e:
-            logger.error(f"Connection error: {e}")
+            exc = e
             self._connected = False
-            return False
+
+        if self._connected:
+            self._connect_failures = 0
+            logger.info(f"Connected to Modbus {self.transport}://{self._connection_str}")
+            return True
+
+        # pymodbus tends to swallow the underlying errno; include it when we have it.
+        self._connect_failures += 1
+        if exc is not None:
+            logger.error(f"Failed to connect to {self._connection_str}: {exc!r}")
+        else:
+            logger.error(f"Failed to connect to {self._connection_str}")
+        await self._run_serial_diagnostics()
+        return False
+
+    async def _run_serial_diagnostics(self) -> None:
+        """Emit serial-port diagnostics for RTU, throttled to 1st + every Nth failure."""
+        if self.transport == Transport.TCP:
+            return
+        if (self._connect_failures - 1) % _DIAG_EVERY != 0:
+            return
+        try:
+            # Probes can block (filesystem, subprocess) — keep them off the event loop.
+            findings = await asyncio.to_thread(diagnose_serial_port, self.serial_port)
+        except Exception as e:
+            logger.warning(f"serial diagnosis unavailable: {e!r}")
+            return
+        for finding in findings:
+            logger.warning(f"serial diagnosis: {finding}")
 
     async def disconnect(self) -> None:
         """Disconnect from Modbus device."""

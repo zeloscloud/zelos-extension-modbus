@@ -6,7 +6,7 @@
 just install      # Install deps + pre-commit hooks
 just check        # Run ruff linter
 just format       # Auto-format code
-just test         # Run pytest (189 tests)
+just test         # Run pytest (197 tests)
 just package      # Build .tar.gz for marketplace
 ```
 
@@ -21,6 +21,7 @@ just package      # Build .tar.gz for marketplace
 - `main.py` - CLI entry point (app mode, trace subcommand)
 - `zelos_extension_modbus/client.py` - Modbus client with SDK actions (TCP + RTU)
 - `zelos_extension_modbus/blocks.py` - Block-read planner (coalesce contiguous registers)
+- `zelos_extension_modbus/serial_diag.py` - RTU connect-failure diagnostics (stale node, perms, holders)
 - `zelos_extension_modbus/register_map.py` - Register definitions and JSON parsing
 - `scripts/xlsx_to_register_map.py` - Convert a register-map spreadsheet to JSON
 - `zelos_extension_modbus/cli/app.py` - App mode runner (config loading, demo server)
