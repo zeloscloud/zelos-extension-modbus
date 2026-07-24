@@ -9,15 +9,15 @@ their own — use the checks below to confirm.
 ```bash
 ls -l /dev/serial/by-id/ /dev/ttyUSB* /dev/ttyACM*   # which adapters exist; stable name → node mapping
 sudo dmesg | tail -50                                 # USB disconnect / re-enumeration / driver errors
-lsof /dev/ttyUSB9                                     # who holds the port (run as root for all users)
+lsof /dev/ttyUSB0                                     # who holds the port (run as root for all users)
 ```
 
 ## Failure modes by symptom
 
 | Symptom | Likely causes | Checks |
 |---|---|---|
-| Node missing (`ENOENT`) | Adapter unplugged, or re-enumerated to a new number (`ttyUSB9` → `ttyUSB10`) | `ls /dev/ttyUSB*`; `dmesg` shows `USB disconnect` then a new attach |
-| Open fails `EIO` | Usually a stale node (device dropped off the bus while the port was open); can also be a wedged adapter, driver fault, or failing hardware | `ls /sys/class/tty/ttyUSB9/device` — missing = stale node; replug and re-check `dmesg` |
+| Node missing (`ENOENT`) | Adapter unplugged, or re-enumerated to a new number (`ttyUSB0` → `ttyUSB1`) | `ls /dev/ttyUSB*`; `dmesg` shows `USB disconnect` then a new attach |
+| Open fails `EIO` | Usually a stale node (device dropped off the bus while the port was open); can also be a wedged adapter, driver fault, or failing hardware | `ls /sys/class/tty/ttyUSB0/device` — missing = stale node; replug and re-check `dmesg` |
 | Open fails `EACCES` | User not in the port's group (`dialout`/`uucp`), or a udev rule tightened the mode | `ls -l <port>`; `id`; fix: `sudo usermod -aG dialout $USER` + re-login |
 | Open fails `EBUSY` | Another process holds the port: a previous extension instance, ModemManager probing, a terminal session (`screen`) left attached | `lsof <port>`; `systemctl status ModemManager`; detached `screen -ls` |
 | Opens cleanly, no data | Wrong baud/parity/unit-id, RS-485 A/B swapped, TX/RX swapped, missing termination, device not powered | Single-register probe: read holding register 0 with `mbpoll -m rtu -b <baud> -P none -a <unit> -0 -r 0 -c 1 -1 <port>` (match your configured parity/stopbits — mbpoll defaults to even) |

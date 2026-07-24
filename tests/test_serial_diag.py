@@ -41,15 +41,15 @@ class TestNodeExistence:
         """An absent port names existing serial candidates in the fake dev_root."""
         dev_root = tmp_path / "dev"
         dev_root.mkdir()
-        (dev_root / "ttyUSB10").write_text("")  # a re-enumerated sibling
-        port = str(dev_root / "ttyUSB9")  # does not exist
+        (dev_root / "ttyUSB1").write_text("")  # a re-enumerated sibling
+        port = str(dev_root / "ttyUSB0")  # does not exist
 
         findings = diagnose_serial_port(
             port, dev_root=str(dev_root), sys_root=str(tmp_path / "sys")
         )
 
         assert any("node missing" in f for f in findings), findings
-        assert any("ttyUSB10" in f for f in findings), findings
+        assert any("ttyUSB1" in f for f in findings), findings
 
 
 class TestOpenProbe:
@@ -93,17 +93,17 @@ class TestSysfsLiveness:
         """Missing sysfs device link => explicit stale-node finding with candidates."""
         dev_root = tmp_path / "dev"
         dev_root.mkdir()
-        (dev_root / "ttyUSB9").write_text("")  # present in /dev
-        (dev_root / "ttyUSB10").write_text("")  # live sibling
-        sys_root = tmp_path / "sys"  # no class/tty/ttyUSB9/device
+        (dev_root / "ttyUSB0").write_text("")  # present in /dev
+        (dev_root / "ttyUSB1").write_text("")  # live sibling
+        sys_root = tmp_path / "sys"  # no class/tty/ttyUSB0/device
 
         findings = diagnose_serial_port(
-            str(dev_root / "ttyUSB9"), dev_root=str(dev_root), sys_root=str(sys_root)
+            str(dev_root / "ttyUSB0"), dev_root=str(dev_root), sys_root=str(sys_root)
         )
 
         stale = [f for f in findings if "no sysfs backing" in f]
         assert stale, findings
-        assert "ttyUSB10" in stale[0]  # sibling surfaced inline
+        assert "ttyUSB1" in stale[0]  # sibling surfaced inline
 
 
 class TestByIdAdvice:
@@ -173,7 +173,7 @@ class TestConnectDiagnosticsThrottle:
 
         monkeypatch.setattr(client_module, "diagnose_serial_port", fake_diag)
 
-        client = ModbusClient(transport="rtu", serial_port="/dev/ttyUSB9")
+        client = ModbusClient(transport="rtu", serial_port="/dev/ttyUSB0")
 
         async def scenario():
             client._create_client = lambda: _FakeClient(connected=False)

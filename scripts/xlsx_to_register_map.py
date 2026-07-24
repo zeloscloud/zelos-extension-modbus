@@ -16,8 +16,8 @@ with the `x10` stripped from the displayed unit.
 
 Usage:
     uv run --with openpyxl python scripts/xlsx_to_register_map.py \\
-        ~/Downloads/RCM_GMS_Register_Map_NoGrouping.xlsx \\
-        examples/rcm_gms_register_map.json
+        ~/Downloads/My_Device_Register_Map.xlsx \\
+        examples/my_device_register_map.json
 """
 
 from __future__ import annotations
