@@ -2,7 +2,7 @@
 
 Best-effort, dependency-free probes that turn an opaque
 ``[Errno 5] Input/output error`` on a serial open into a compact block of
-concrete, actionable findings plus suggested shell commands.
+concrete, actionable findings plus a pointer to the DEBUG.md guide.
 
 Every probe is guarded so a single failing check never aborts the rest, and all
 filesystem roots are injectable so the whole module is testable against tmp
@@ -43,11 +43,10 @@ _STALE = "stale"
 _BUSY = "busy"
 _OTHER = "other"
 
-# Suggested follow-up commands + the usual suspects. Always appended on failure.
-# These are NOT executed here (several need root); they are breadcrumbs.
-_BREADCRUMBS = (
+# Pointer to the DEBUG.md failure-mode guide. Always appended on failure.
+_DEBUG_LINK = (
     "failure modes + checks: DEBUG.md "
-    "(https://github.com/zeloscloud/zelos-extension-modbus/blob/main/DEBUG.md)",
+    "(https://github.com/zeloscloud/zelos-extension-modbus/blob/main/DEBUG.md)"
 )
 
 
@@ -57,7 +56,7 @@ def diagnose_serial_port(port: str, *, dev_root: str = "/dev", sys_root: str = "
     Runs a sequence of independent, guarded probes (node existence, an OS-level
     open with errno differentiation, stable-name advice, sysfs liveness, and
     holder detection) and returns short, single-line, human-actionable findings
-    followed by suggested follow-up commands. Never raises; a failing probe just
+    followed by a DEBUG.md pointer. Never raises; a failing probe just
     contributes nothing.
 
     Args:
@@ -69,14 +68,15 @@ def diagnose_serial_port(port: str, *, dev_root: str = "/dev", sys_root: str = "
         A compact list of finding lines (roughly <= 12).
     """
     findings: list[str] = []
-    exists = _exists(port)
+    exists = Path(port).exists()
     status = _OTHER
 
     if not exists:
         # 1. Node existence — the path is gone; a sibling may have re-enumerated.
-        with contextlib.suppress(Exception):
-            findings.append(f"node missing: {port} is absent from {dev_root}")
-            findings.append(_candidates_line(dev_root, port))
+        # Plain string appends over already-guarded helpers; the per-probe
+        # suppressions below are the load-bearing guard layer.
+        findings.append(f"node missing: {port} is absent from {dev_root}")
+        findings.append(_candidates_line(dev_root, port))
     else:
         # 2. Open probe with errno differentiation.
         with contextlib.suppress(Exception):
@@ -101,22 +101,14 @@ def diagnose_serial_port(port: str, *, dev_root: str = "/dev", sys_root: str = "
         with contextlib.suppress(Exception):
             _probe_holders(port, findings, busy=status == _BUSY)
 
-    # 6. Breadcrumb commands (always, on any failure).
-    findings.extend(_BREADCRUMBS)
+    # 6. DEBUG.md pointer (always, on any failure).
+    findings.append(_DEBUG_LINK)
     return findings
 
 
 # ---------------------------------------------------------------------------
 # Node existence + candidate listing
 # ---------------------------------------------------------------------------
-
-
-def _exists(path: str) -> bool:
-    """Whether ``path`` resolves to something (following symlinks); never raises."""
-    try:
-        return Path(path).exists()
-    except OSError:
-        return False
 
 
 def _serial_candidates(dev_root: str) -> list[str]:
@@ -129,15 +121,7 @@ def _serial_candidates(dev_root: str) -> list[str]:
     for pattern in patterns:
         with contextlib.suppress(OSError):
             found.update(str(p) for p in root.glob(pattern))
-    return _natural_sort(found)
-
-
-def _natural_sort(paths: set[str]) -> list[str]:
-    """Sort paths so ttyUSB9 precedes ttyUSB10; fall back to plain sort."""
-    try:
-        return sorted(paths, key=_natural_key)
-    except TypeError:  # pragma: no cover - defensive against mixed chunks
-        return sorted(paths)
+    return sorted(found, key=_natural_key)
 
 
 def _natural_key(text: str) -> list[object]:
@@ -145,11 +129,14 @@ def _natural_key(text: str) -> list[object]:
 
 
 def _candidates_line(dev_root: str, port: str) -> str:
-    """A single line naming other serial nodes (so a re-enumerated sibling shows)."""
+    """A single line naming up to 4 other serial nodes (so a re-enumerated sibling shows)."""
     others = [c for c in _serial_candidates(dev_root) if c != port]
-    if others:
-        return f"live serial candidates: {', '.join(others)}"
-    return f"no serial candidates found under {dev_root} (adapter may be fully gone)"
+    if not others:
+        return f"no serial candidates found under {dev_root} (adapter may be fully gone)"
+    listed = ", ".join(others[:4])
+    if len(others) > 4:
+        listed += f" +{len(others) - 4} more"
+    return f"live serial candidates: {listed}"
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +255,7 @@ def _probe_sysfs(
     if not name.startswith(_SYSFS_TTY_PREFIXES):
         return False
     device = Path(sys_root) / "class" / "tty" / name / "device"
-    if not _exists(str(device)):
+    if not device.exists():
         if stale_known:
             findings.append(f"sysfs confirms stale node: {device} is gone")
             return True
@@ -364,21 +351,26 @@ def _comm(pid: int) -> str:
 
 
 def _scan_lsof(port: str) -> list[tuple[int, str]]:
-    """Fall back to ``lsof <port>`` when available (2s timeout)."""
+    """Fall back to ``lsof -t <port>`` (terse, PIDs only) when available (2s timeout).
+
+    ``-t`` emits one PID per line with no COMMAND column, sidestepping the
+    space-splitting bug that dropped holders whose command name contains a
+    space (macOS "Google Ch"). Each PID's command is resolved best-effort via
+    ``_comm`` (returns "?" off Linux).
+    """
     lsof = shutil.which("lsof")
     if not lsof:
         return []
     try:
         result = subprocess.run(
-            [lsof, port], capture_output=True, text=True, timeout=2.0, check=False
+            [lsof, "-t", port], capture_output=True, text=True, timeout=2.0, check=False
         )
     except (OSError, subprocess.SubprocessError):
         return []
     by_pid: dict[int, str] = {}
-    for line in result.stdout.splitlines()[1:]:  # drop the header row
-        parts = line.split()
-        if len(parts) >= 2 and parts[1].isdigit():
-            by_pid.setdefault(int(parts[1]), parts[0])
+    for token in result.stdout.split():
+        if token.isdigit():
+            by_pid.setdefault(int(token), _comm(int(token)))
     return list(by_pid.items())
 
 
@@ -388,7 +380,9 @@ def _scan_lsof(port: str) -> list[tuple[int, str]]:
 
 
 def _resolve(path: Path) -> Path:
+    # Python 3.11's Path.resolve() raises RuntimeError (not OSError) on a symlink
+    # loop; catch both so one bad path degrades to itself instead of aborting a probe.
     try:
         return path.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return path

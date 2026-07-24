@@ -6,7 +6,7 @@
 just install      # Install deps + pre-commit hooks
 just check        # Run ruff linter
 just format       # Auto-format code
-just test         # Run pytest (197 tests)
+just test         # Run pytest
 just package      # Build .tar.gz for marketplace
 ```
 
