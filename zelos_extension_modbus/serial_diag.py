@@ -46,11 +46,8 @@ _OTHER = "other"
 # Suggested follow-up commands + the usual suspects. Always appended on failure.
 # These are NOT executed here (several need root); they are breadcrumbs.
 _BREADCRUMBS = (
-    "next: sudo dmesg | tail -50   # USB disconnect / re-enumeration lines",
-    "next: journalctl -k --since '-10 min' | grep -iE 'usb|tty'",
-    "next: ls -l /dev/serial/by-id/   # stable names -> current /dev nodes",
-    "usual suspects: ModemManager probing the port, brltty grabbing CH341/CP210x "
-    "adapters (newer Ubuntu), USB autosuspend, unpowered hub / marginal cable",
+    "failure modes + checks: DEBUG.md "
+    "(https://github.com/zeloscloud/zelos-extension-modbus/blob/main/DEBUG.md)",
 )
 
 
@@ -98,10 +95,7 @@ def diagnose_serial_port(port: str, *, dev_root: str = "/dev", sys_root: str = "
         # A clean open only means anything when sysfs agrees the node is live
         # (a udev leftover can be openable yet point at nothing).
         if status == _OK and not stale:
-            findings.append(
-                "port opens cleanly at the OS level — failure is likely protocol / wiring / "
-                "unit-id, not the device node"
-            )
+            findings.append("port opens cleanly — likely protocol/wiring/unit-id, not the node")
 
         # 5. Holder detection (best effort; announce "none" only when EBUSY).
         with contextlib.suppress(Exception):
@@ -186,12 +180,8 @@ def _classify_open_error(exc: OSError, port: str, dev_root: str, findings: list[
         findings.append(f"open failed (EBUSY): {port} is held by another process (see below)")
         return _BUSY
     if code == errno.EIO:
-        findings.append(
-            f"open failed (EIO): stale device node — {port} disconnected while open and "
-            "has likely re-enumerated under a new name"
-        )
+        findings.append(f"open failed (EIO) on {port} — often follows a USB disconnect")
         findings.append(_candidates_line(dev_root, port))
-        findings.append("fix: configure the /dev/serial/by-id/ path so reconnects survive this")
         return _STALE
     if code == errno.ENOENT:
         findings.append(f"open failed (ENOENT): {port} raced away mid-probe (re-enumerating)")
@@ -262,10 +252,7 @@ def _probe_by_id(port: str, dev_root: str, findings: list[str]) -> None:
         findings.append(f"stable name available: {matched} -> {port} (prefer this path in config)")
     else:
         listed = ", ".join(names[:4])
-        findings.append(
-            f"stable names present in serial/by-id ({listed}) but none resolve to {port}; "
-            "configure a by-id path so reconnects survive re-enumeration"
-        )
+        findings.append(f"no serial/by-id entry resolves to {port} (present: {listed})")
 
 
 # ---------------------------------------------------------------------------
@@ -287,10 +274,7 @@ def _probe_sysfs(
             return True
         others = [c for c in _serial_candidates(dev_root) if c != port]
         tail = f"; live candidates: {', '.join(others)}" if others else ""
-        findings.append(
-            f"stale node: {port} present in {dev_root} but missing from "
-            f"{sys_root}/class/tty/{name}/device — adapter re-enumerated{tail}"
-        )
+        findings.append(f"{port} exists but has no sysfs backing (re-enumerated?){tail}")
         return True
     identity = _usb_identity(device)
     if identity:
