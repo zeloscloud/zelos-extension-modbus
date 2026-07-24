@@ -434,7 +434,8 @@ class ModbusClient:
 
     async def _run_serial_diagnostics(self) -> None:
         """Emit serial-port diagnostics for RTU, throttled to 1st + every Nth failure."""
-        if self.transport == Transport.TCP:
+        # Fail closed: only RTU has a serial port to probe; any other transport skips.
+        if self.transport != Transport.RTU:
             return
         if (self._connect_failures - 1) % _DIAG_EVERY != 0:
             return

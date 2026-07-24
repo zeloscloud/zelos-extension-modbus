@@ -19,6 +19,21 @@ from zelos_extension_modbus.client import ModbusClient
 from zelos_extension_modbus.serial_diag import diagnose_serial_port
 
 
+@pytest.fixture
+def pty_slave_name():
+    """Yield the name of an open pty slave, closing both ends afterward.
+
+    The pty stays open for the whole test body so probes (clean open, holder
+    scan) see a live, currently-held node.
+    """
+    master, slave = pty.openpty()
+    try:
+        yield os.ttyname(slave)
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
 class TestNodeExistence:
     """Check 1: a missing node surfaces re-enumerated siblings."""
 
@@ -62,17 +77,11 @@ class TestOpenProbe:
         assert group in perm[0]
         assert "---" in perm[0]  # a mode string like '----------'
 
-    def test_success_reports_clean_open(self, tmp_path):
+    def test_success_reports_clean_open(self, tmp_path, pty_slave_name):
         """A real, openable node (pty slave) reports it opens at the OS level."""
-        master, slave = pty.openpty()
-        try:
-            slave_name = os.ttyname(slave)
-            findings = diagnose_serial_port(
-                slave_name, dev_root=str(tmp_path / "dev"), sys_root=str(tmp_path / "sys")
-            )
-        finally:
-            os.close(master)
-            os.close(slave)
+        findings = diagnose_serial_port(
+            pty_slave_name, dev_root=str(tmp_path / "dev"), sys_root=str(tmp_path / "sys")
+        )
 
         assert any("opens cleanly" in f for f in findings), findings
 
@@ -124,45 +133,28 @@ class TestByIdAdvice:
 class TestHolderDetection:
     """Check 5: a same-process fd on the port is reported as a holder."""
 
-    def test_holder_includes_own_pid(self, tmp_path):
+    def test_holder_includes_own_pid(self, tmp_path, pty_slave_name):
         """Holding the pty slave open surfaces our pid (Linux); degrades gracefully else."""
-        master, slave = pty.openpty()
-        try:
-            slave_name = os.ttyname(slave)
-            findings = diagnose_serial_port(
-                slave_name, dev_root=str(tmp_path / "dev"), sys_root=str(tmp_path / "sys")
-            )
-        finally:
-            os.close(master)
-            os.close(slave)
+        findings = diagnose_serial_port(
+            pty_slave_name, dev_root=str(tmp_path / "dev"), sys_root=str(tmp_path / "sys")
+        )
 
         if sys.platform == "linux":
             assert any(f"pid {os.getpid()}" in f for f in findings), findings
         else:
-            # No /proc: no crash, still a usable block (breadcrumbs at minimum).
+            # No /proc: no crash, still a usable block (DEBUG.md pointer at minimum).
             assert isinstance(findings, list)
             assert findings
 
 
-class _FakeFailClient:
-    """Async client stub whose connect never succeeds."""
+class _FakeClient:
+    """Async client stub with a fixed connect outcome."""
 
-    connected = False
-
-    async def connect(self) -> bool:
-        return False
-
-    def close(self) -> None:
-        pass
-
-
-class _FakeOkClient:
-    """Async client stub that connects successfully."""
-
-    connected = True
+    def __init__(self, connected: bool) -> None:
+        self.connected = connected
 
     async def connect(self) -> bool:
-        return True
+        return self.connected
 
     def close(self) -> None:
         pass
@@ -184,16 +176,16 @@ class TestConnectDiagnosticsThrottle:
         client = ModbusClient(transport="rtu", serial_port="/dev/ttyUSB9")
 
         async def scenario():
-            client._create_client = lambda: _FakeFailClient()
+            client._create_client = lambda: _FakeClient(connected=False)
             for _ in range(11):
                 await client.connect()
             assert len(calls) == 2, calls  # failures 1 and 11 only
 
-            client._create_client = lambda: _FakeOkClient()
+            client._create_client = lambda: _FakeClient(connected=True)
             await client.connect()
             assert client._connect_failures == 0
 
-            client._create_client = lambda: _FakeFailClient()
+            client._create_client = lambda: _FakeClient(connected=False)
             await client.connect()
             assert len(calls) == 3, calls  # counter reset => fires on the 1st again
 
@@ -209,7 +201,7 @@ class TestConnectDiagnosticsThrottle:
         client = ModbusClient(transport="tcp")
 
         async def scenario():
-            client._create_client = lambda: _FakeFailClient()
+            client._create_client = lambda: _FakeClient(connected=False)
             await client.connect()
 
         asyncio.run(scenario())

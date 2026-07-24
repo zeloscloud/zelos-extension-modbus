@@ -45,6 +45,8 @@ All configuration is managed through the Zelos App settings interface.
 - **Stop Bits** — 1 or 2 (default: `1`)
 - **Data Bits** — 7 or 8 (default: `8`)
 
+Troubleshooting serial/USB connection failures: see [DEBUG.md](DEBUG.md).
+
 ## Register Map
 
 A register map file defines which registers to read and how to decode them. Event names become Zelos trace events, and register names become fields within those events.
