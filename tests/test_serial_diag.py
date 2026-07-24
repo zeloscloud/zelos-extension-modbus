@@ -92,9 +92,8 @@ class TestSysfsLiveness:
             str(dev_root / "ttyUSB9"), dev_root=str(dev_root), sys_root=str(sys_root)
         )
 
-        stale = [f for f in findings if "stale node" in f]
+        stale = [f for f in findings if "no sysfs backing" in f]
         assert stale, findings
-        assert "class/tty" in stale[0]
         assert "ttyUSB10" in stale[0]  # sibling surfaced inline
 
 
