@@ -23,7 +23,7 @@ class TestCreateClients:
             "interfaces": [
                 {
                     "transport": "rtu",
-                    "serial_port": "/dev/ttyUSB9",
+                    "serial_port": "/dev/ttyUSB0",
                     "baudrate": 19200,
                     "parity": "E",
                     "stopbits": 2,
@@ -47,7 +47,7 @@ class TestCreateClients:
 
         # RTU serial fields
         assert client.transport == "rtu"
-        assert client.serial_port == "/dev/ttyUSB9"
+        assert client.serial_port == "/dev/ttyUSB0"
         assert client.baudrate == 19200
         assert client.parity == "E"
         assert client.stopbits == 2

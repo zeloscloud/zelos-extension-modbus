@@ -60,7 +60,7 @@ def diagnose_serial_port(port: str, *, dev_root: str = "/dev", sys_root: str = "
     contributes nothing.
 
     Args:
-        port: The serial device path that failed (e.g. ``/dev/ttyUSB9``).
+        port: The serial device path that failed (e.g. ``/dev/ttyUSB0``).
         dev_root: Device-node root, injectable for testing (default ``/dev``).
         sys_root: sysfs root, injectable for testing (default ``/sys``).
 
