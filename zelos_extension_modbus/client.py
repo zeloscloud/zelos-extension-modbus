@@ -105,6 +105,19 @@ def _reorder_registers(registers: list[int], byte_order: str, for_decode: bool =
     return regs
 
 
+def _scaled_int(value: int, scale: float) -> int:
+    """Apply ``scale`` to an integer-typed reading.
+
+    At scale 1 the assembled integer passes through untouched: a float multiply
+    would round anything above 2**53, so a 64-bit register reading all ones would
+    decode as 2**64 instead of 2**64 - 1. Scaled reads keep their existing
+    truncating semantics (int() toward zero).
+    """
+    if scale == 1:
+        return value
+    return int(value * scale)
+
+
 def decode_value(
     registers: list[int], datatype: str, scale: float = 1.0, byte_order: str = "big"
 ) -> float | int | bool:
@@ -125,19 +138,19 @@ def decode_value(
     if datatype == "bool":
         return bool(regs[0])
     elif datatype == "uint16":
-        return int(regs[0] * scale)
+        return _scaled_int(regs[0], scale)
     elif datatype == "int16":
         raw = struct.pack(">H", regs[0])
         value = struct.unpack(">h", raw)[0]
-        return int(value * scale)
+        return _scaled_int(value, scale)
     elif datatype == "uint32":
         raw = struct.pack(">HH", regs[0], regs[1])
         value = struct.unpack(">I", raw)[0]
-        return int(value * scale)
+        return _scaled_int(value, scale)
     elif datatype == "int32":
         raw = struct.pack(">HH", regs[0], regs[1])
         value = struct.unpack(">i", raw)[0]
-        return int(value * scale)
+        return _scaled_int(value, scale)
     elif datatype == "float32":
         raw = struct.pack(">HH", regs[0], regs[1])
         value = struct.unpack(">f", raw)[0]
@@ -145,11 +158,11 @@ def decode_value(
     elif datatype == "uint64":
         raw = struct.pack(">HHHH", *regs[:4])
         value = struct.unpack(">Q", raw)[0]
-        return int(value * scale)
+        return _scaled_int(value, scale)
     elif datatype == "int64":
         raw = struct.pack(">HHHH", *regs[:4])
         value = struct.unpack(">q", raw)[0]
-        return int(value * scale)
+        return _scaled_int(value, scale)
     elif datatype == "float64":
         raw = struct.pack(">HHHH", *regs[:4])
         value = struct.unpack(">d", raw)[0]
@@ -316,6 +329,14 @@ class ModbusClient:
 
         self.interface_name = interface_name
 
+        # Trace-source name is derived once here (not at start()) so it is
+        # reportable before the source exists (list_interfaces) and computed in
+        # exactly one place. Sanitized as a backstop: names become trace path
+        # segments, and "." / "/" are reserved separators.
+        self._source_name = sanitize_source_name(
+            interface_name or (register_map.name if register_map else "modbus"), "modbus"
+        )
+
         self._client: AsyncModbusTcpClient | AsyncModbusSerialClient | None = None
         self._running = False
         self._connected = False
@@ -338,6 +359,11 @@ class ModbusClient:
         # Zelos SDK trace source
         self._source: zelos_sdk.TraceSourceCacheLast | None = None
 
+        # Last decoded value per qualified register path ("event/name") ->
+        # (value, wall-clock ms). Fed by the poll sweep and by on-demand named
+        # reads so get_snapshot can answer without any device I/O.
+        self._last_values: dict[str, tuple[Any, int]] = {}
+
     def _create_client(self) -> AsyncModbusTcpClient | AsyncModbusSerialClient:
         """Create the appropriate Modbus client."""
         if self.transport == Transport.TCP:
@@ -358,17 +384,7 @@ class ModbusClient:
 
     def _init_trace_source(self) -> None:
         """Initialize Zelos trace source and define schema from register map."""
-        if self.interface_name:
-            source_name = self.interface_name
-        elif self.register_map:
-            source_name = self.register_map.name
-        else:
-            source_name = "modbus"
-        # Backstop: ensure the name is safe as a trace-source path segment
-        # regardless of how the client was constructed (idempotent on names
-        # already sanitized by the app runner).
-        source_name = sanitize_source_name(source_name, "modbus")
-        self._source = zelos_sdk.TraceSourceCacheLast(source_name)
+        self._source = zelos_sdk.TraceSourceCacheLast(self._source_name)
 
         if not self.register_map or not self.register_map.events:
             # No register map - create a generic raw event
@@ -397,6 +413,44 @@ class ModbusClient:
     def _get_sdk_datatype(self, datatype: str) -> zelos_sdk.DataType:
         """Map register datatype to Zelos SDK DataType."""
         return SDK_DATATYPE_MAP.get(datatype, zelos_sdk.DataType.Int32)
+
+    @property
+    def source_name(self) -> str:
+        """Trace-source name this client logs under (derived at construction)."""
+        return self._source_name
+
+    @property
+    def last_values(self) -> dict[str, tuple[Any, int]]:
+        """Copy of the last decoded value per qualified register path.
+
+        Maps ``"event/name"`` (the path the named read/write actions accept) to
+        ``(value, wall_clock_ms)``. Registers never polled or read are absent.
+        """
+        return dict(self._last_values)
+
+    def record_value(self, register: Register, value: Any, event: str | None = None) -> None:
+        """Cache a decoded value under its qualified ``event/name`` path.
+
+        Args:
+            register: Register the value was decoded for.
+            value: Decoded (scaled) value.
+            event: Owning event name. The poll sweep already knows it; on-demand
+                reads pass None and let the register map resolve it.
+        """
+        if event is None:
+            event = self._event_for(register)
+            if event is None:
+                return
+        self._last_values[f"{event}/{register.name}"] = (value, int(time.time() * 1000))
+
+    def _event_for(self, register: Register) -> str | None:
+        """Event owning ``register`` in this client's map (identity match)."""
+        if not self.register_map:
+            return None
+        for event_name, regs in self.register_map.events.items():
+            if any(reg is register for reg in regs):
+                return event_name
+        return None
 
     async def connect(self) -> bool:
         """Connect to Modbus device.
@@ -456,12 +510,22 @@ class ModbusClient:
             logger.info("Disconnected from Modbus device")
 
     @property
+    def endpoint(self) -> str:
+        """Where this client talks, with no log decoration.
+
+        ``host:port`` for TCP, ``serial_port@baudrate`` for RTU. This is the form
+        actions report on the wire; ``_connection_str`` prefixes the interface
+        name and is for log lines only.
+        """
+        if self.transport == Transport.TCP:
+            return f"{self.host}:{self.port}"
+        return f"{self.serial_port}@{self.baudrate}"
+
+    @property
     def _connection_str(self) -> str:
         """Get connection string for logging."""
         prefix = f"[{self.interface_name}] " if self.interface_name else ""
-        if self.transport == Transport.TCP:
-            return f"{prefix}{self.host}:{self.port}"
-        return f"{prefix}{self.serial_port}@{self.baudrate}"
+        return f"{prefix}{self.endpoint}"
 
     async def read_holding_registers(self, address: int, count: int = 1) -> list[int] | None:
         """Read holding registers.
@@ -787,6 +851,10 @@ class ModbusClient:
                 continue
             event = item_by_reg[id(reg)].event
             results.setdefault(event, {})[reg.field_name] = value
+            # Snapshot cache is keyed by the qualified register path, not the
+            # sanitized trace field name, so actions address it the same way
+            # read_named_register / write_named_register do.
+            self.record_value(reg, value, event)
 
         # Reschedule from now — no backlog after a stall.
         for it in due:

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import time
 from typing import Any
 
 import zelos_sdk
@@ -53,27 +55,43 @@ def _run_coro(coro: Any, client: Any) -> Any:
     return asyncio.run(coro)
 
 
-def _resolve_register(client: Any, path: str) -> tuple[str | None, Any]:
+def _json_safe(value: Any) -> Any:
+    """Make one decoded value safe to put in an action payload.
+
+    The SDK converts action results to JSON in Rust, which rejects non-finite
+    floats outright ("Invalid float value") and fails the whole action. A single
+    poisoned register (a float32 read back as 0xFFFF,0xFFFF decodes to NaN) would
+    otherwise take down every aggregate payload, permanently. Non-finite floats
+    become null on the wire; the client's cache keeps what the device reported.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _resolve_register(client: Any, path: str) -> tuple[str | None, Any, str | None]:
     """Resolve an 'event/field' path to a Register on a specific client.
 
-    Returns (error_message, register) — one is always None.
+    Returns (error_message, register, event) — ``error_message`` and ``register``
+    are mutually exclusive. ``event`` is the owning event when the path carried
+    one, else None (the bare-name compat path leaves it to the register map).
     """
     if not client.register_map:
-        return ("No register map loaded", None)
+        return ("No register map loaded", None, None)
 
     parts = path.split("/", 1)
     if len(parts) == 2:
         event_name, reg_name = parts
         for reg in client.register_map.get_event(event_name):
             if reg.name == reg_name:
-                return (None, reg)
-        return (f"Register '{path}' not found", None)
+                return (None, reg, event_name)
+        return (f"Register '{path}' not found", None, None)
 
     # Fallback: bare name lookup (backwards compat)
     reg = client.register_map.get_by_name(path)
     if not reg:
-        return (f"Register '{path}' not found", None)
-    return (None, reg)
+        return (f"Register '{path}' not found", None, None)
+    return (None, reg, None)
 
 
 def _get_client_or_error(interface: str) -> tuple[Any | None, dict | None]:
@@ -84,9 +102,74 @@ def _get_client_or_error(interface: str) -> tuple[Any | None, dict | None]:
     return client, None
 
 
+def _status_row(interface: str, client: Any) -> dict[str, Any]:
+    """The identity/connection/counter keys get_status and get_snapshot share.
+
+    ``connection`` is the prefix-free wire endpoint; get_status overrides it with
+    the log-formatted string to keep its pre-existing surface.
+    """
+    return {
+        "interface": interface,
+        "connected": client._connected,
+        "transport": client.transport,
+        "connection": client.endpoint,
+        "unit_id": client.unit_id,
+        "poll_count": client._poll_count,
+        "error_count": client._error_count,
+    }
+
+
+def _register_row(event: str, reg: Any) -> dict[str, Any]:
+    """One catalog row for a register, including its named-action ``path``.
+
+    ``poll_interval`` is the register's raw configured value: None (interface
+    default), 0 (polling disabled), or its own rate in seconds.
+    """
+    return {
+        "name": reg.name,
+        "event": event,
+        "path": f"{event}/{reg.name}",
+        "address": reg.address,
+        "type": reg.type,
+        "datatype": reg.datatype,
+        "unit": reg.unit,
+        "scale": reg.scale,
+        "description": reg.description,
+        "writable": reg.writable,
+        "byte_order": reg.byte_order,
+        "poll_interval": reg.poll_interval,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
+
+
+@zelos_sdk.action(
+    "List Interfaces",
+    "List every configured Modbus interface — the names the other actions accept",
+)
+def list_interfaces() -> dict[str, Any]:
+    """List all registered interfaces with their transport and register-map summary."""
+    interfaces = []
+    for name in all_interfaces():
+        client = get_client(name)
+        interfaces.append(
+            {
+                "name": name,
+                "transport": client.transport,
+                "connected": client._connected,
+                "connection": client.endpoint,
+                "unit_id": client.unit_id,
+                "source": client.source_name,
+                "map_name": client.register_map.name if client.register_map else None,
+                "register_count": len(client.register_map.registers) if client.register_map else 0,
+                "poll_interval": client.poll_interval,
+                "write_mode": client.write_mode,
+            }
+        )
+    return {"interfaces": interfaces, "count": len(interfaces), "success": True}
 
 
 @zelos_sdk.action("Get Status", "Get connection and polling status")
@@ -97,19 +180,50 @@ def get_status(interface: str) -> dict[str, Any]:
     if err:
         return err
     return {
-        "interface": interface,
-        "connected": client._connected,
-        "transport": client.transport,
+        **_status_row(interface, client),
+        # Pre-existing surface: this action reports the log-formatted connection
+        # string (interface-prefixed), unlike list_interfaces / get_snapshot.
         "connection": client._connection_str,
-        "unit_id": client.unit_id,
-        "poll_count": client._poll_count,
-        "error_count": client._error_count,
         "poll_interval": client.poll_interval,
         "write_mode": client.write_mode,
         "block_reads": client.block_reads,
         "max_block_size": client.max_block_size,
         "max_read_gap": client.max_read_gap,
         "registers": len(client.register_map.registers) if client.register_map else 0,
+        "success": True,
+    }
+
+
+@zelos_sdk.action(
+    "Get Snapshot",
+    "Cached status and last register values for one interface — no device I/O",
+)
+@zelos_sdk.action.select("interface", choices=all_interfaces, title="Interface")
+def get_snapshot(interface: str) -> dict[str, Any]:
+    """Snapshot of one interface's status and last-seen values, straight from cache.
+
+    Reads nothing from the bus: values come from the poll sweep's cache (and any
+    on-demand named reads), so registers with polling disabled are absent until
+    read once via read_named_register.
+    """
+    client, err = _get_client_or_error(interface)
+    if err:
+        return err
+    # Copy the cache first, stamp second: every ts_ms in the payload is then a
+    # value that existed before captured_at_unix_ms, by construction.
+    cached = client.last_values
+    captured_at_unix_ms = int(time.time() * 1000)
+    # Extension id/version/state intentionally NOT included — that info is
+    # canonical at the `extensions.list` bridge surface and the webapp consumes
+    # it from there, not from this 1 Hz polled action.
+    return {
+        **_status_row(interface, client),
+        "captured_at_unix_ms": captured_at_unix_ms,
+        "values": {
+            path: {"value": _json_safe(value), "ts_ms": ts_ms}
+            for path, (value, ts_ms) in cached.items()
+        },
+        "success": True,
     }
 
 
@@ -221,7 +335,7 @@ def read_named_register(interface: str, name: str) -> dict[str, Any]:
     if err:
         return err
 
-    error, reg = _resolve_register(client, name)
+    error, reg, event = _resolve_register(client, name)
     if error:
         return {"error": error, "success": False}
 
@@ -231,12 +345,18 @@ def read_named_register(interface: str, name: str) -> dict[str, Any]:
         return await client.read_register_value(reg)
 
     value = _run_coro(_read(), client)
+    if value is not None:
+        # Refresh the snapshot cache so an unpolled register shows a value too.
+        client.record_value(reg, value, event=event)
     return {
         "name": name,
         "address": reg.address,
         "type": reg.type,
         "datatype": reg.datatype,
-        "value": value,
+        # ``success`` tracks the read, not JSON-representability: a NaN reading is
+        # a successful read of a value that cannot be serialized, so it reports
+        # success with a null value.
+        "value": _json_safe(value),
         "unit": reg.unit,
         "success": value is not None,
     }
@@ -254,7 +374,7 @@ def write_named_register(interface: str, name: str, value: float) -> dict[str, A
     if err:
         return err
 
-    error, reg = _resolve_register(client, name)
+    error, reg, event = _resolve_register(client, name)
     if error:
         return {"error": error, "success": False}
 
@@ -270,6 +390,10 @@ def write_named_register(interface: str, name: str, value: float) -> dict[str, A
         return await client.write_register_value(reg, value)
 
     success = _run_coro(_write(), client)
+    if success:
+        # A written setpoint is the freshest thing we know about it; without this
+        # an unpolled register would read stale in snapshots forever.
+        client.record_value(reg, value, event=event)
     return {
         "name": name,
         "address": reg.address,
@@ -313,21 +437,19 @@ def list_registers(interface: str) -> dict[str, Any]:
     if err:
         return err
     if not client.register_map:
-        return {"registers": [], "count": 0}
+        return {"registers": [], "count": 0, "map_name": None, "success": True}
 
     regs = [
-        {
-            "name": r.name,
-            "address": r.address,
-            "type": r.type,
-            "datatype": r.datatype,
-            "unit": r.unit,
-            "writable": r.writable,
-            "byte_order": r.byte_order,
-        }
-        for r in client.register_map.registers
+        _register_row(event, r)
+        for event, event_regs in client.register_map.events.items()
+        for r in event_regs
     ]
-    return {"registers": regs, "count": len(regs)}
+    return {
+        "registers": regs,
+        "count": len(regs),
+        "map_name": client.register_map.name,
+        "success": True,
+    }
 
 
 @zelos_sdk.action("List Writable Registers", "List all writable registers")
@@ -338,25 +460,27 @@ def list_writable_registers(interface: str) -> dict[str, Any]:
     if err:
         return err
     if not client.register_map:
-        return {"registers": [], "count": 0}
+        return {"registers": [], "count": 0, "map_name": None, "success": True}
 
     regs = [
-        {
-            "name": r.name,
-            "address": r.address,
-            "type": r.type,
-            "datatype": r.datatype,
-            "unit": r.unit,
-            "byte_order": r.byte_order,
-        }
-        for r in client.register_map.writable_registers
+        _register_row(event, r)
+        for event, event_regs in client.register_map.events.items()
+        for r in event_regs
+        if r.writable
     ]
-    return {"registers": regs, "count": len(regs)}
+    return {
+        "registers": regs,
+        "count": len(regs),
+        "map_name": client.register_map.name,
+        "success": True,
+    }
 
 
 # Populate ALL_ACTIONS after all functions are defined
 ALL_ACTIONS = [
+    list_interfaces,
     get_status,
+    get_snapshot,
     read_register,
     write_single_register,
     write_registers,

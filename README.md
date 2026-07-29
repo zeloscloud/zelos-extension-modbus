@@ -105,16 +105,22 @@ A register map file defines which registers to read and how to decode them. Even
 
 ## Actions
 
-The extension provides actions accessible from the Zelos App:
+The extension provides actions accessible from the Zelos App (and to app extensions as
+`modbus/<action>`). Every action but `list_interfaces` takes an `interface` selector.
 
-- **Get Status** — Connection status and polling statistics
-- **Read Register** — Read a register by address
-- **Write Register** — Write to a holding register by address
-- **Read Named Register** — Read a register by name from the map
-- **Write Named Register** — Write a register by name from the map
-- **Write Coil** — Write a boolean to a coil address
-- **List Registers** — Show all mapped registers
-- **List Writable Registers** — Show writable registers only
+| Action | Description |
+|--------|-------------|
+| `list_interfaces` | All configured interfaces with transport, trace source, and map summary |
+| `get_status` | Connection status, poll/error counters, and block-read settings |
+| `get_snapshot` | Last value per `event/name` (value + timestamp) from the poll cache — no device I/O |
+| `read_register` | Read raw words/bits by address, register type, and count |
+| `write_single_register` | Write one holding register (FC 6) |
+| `write_registers` | Write one or more holding registers (FC 16) |
+| `write_coil` | Write a boolean to a coil address (FC 5) |
+| `read_named_register` | Read a mapped register by `event/name` |
+| `write_named_register` | Write a mapped register by `event/name` |
+| `list_registers` | Register catalog: `event/name` path, address, datatype, scale, unit, poll rate |
+| `list_writable_registers` | Same catalog, writable registers only |
 
 ## Development
 
@@ -123,7 +129,12 @@ just install   # Install dependencies
 just check     # Run linting
 just format    # Auto-format code
 just test      # Run tests
+just sim       # Power-meter simulator to point an interface at (127.0.0.1:5020)
 ```
+
+For a live local test, run `just sim` and configure an interface at `127.0.0.1:5020` with
+register map `zelos_extension_modbus/demo/power_meter.json` (`config.json` is gitignored —
+set it via the Zelos App config dialog or by hand).
 
 ## Links
 
