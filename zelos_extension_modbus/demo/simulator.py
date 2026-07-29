@@ -374,3 +374,25 @@ async def run_demo_server(
         )
     finally:
         updater.stop()
+
+
+def run_demo_server_sync(host: str = "127.0.0.1", port: int = 5020) -> None:
+    """Blocking wrapper around :func:`run_demo_server` for CLI use.
+
+    A failed bind raises a RuntimeError naming the endpoint. pymodbus reduces the
+    underlying EADDRINUSE to a bare "Could not start listen, please check
+    address.", which names neither the address nor the cause — and the cause is
+    almost always a simulator already running there.
+
+    Raises:
+        RuntimeError: The server could not bind ``host:port``.
+    """
+    try:
+        asyncio.run(run_demo_server(host=host, port=port))
+    except KeyboardInterrupt:
+        logger.info("Demo server stopped")
+    except (OSError, RuntimeError) as e:
+        raise RuntimeError(
+            f"Could not start demo server on {host}:{port} ({e}) — "
+            "a simulator may already be running there"
+        ) from e

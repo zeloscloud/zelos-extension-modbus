@@ -29,6 +29,10 @@ test:
 dev:
     uv run python main.py
 
+# Run the power-meter simulator to point an interface at (127.0.0.1:5020)
+sim:
+    uv run python main.py demo-server
+
 # Package extension
 package:
     uv run python scripts/package_extension.py

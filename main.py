@@ -267,5 +267,29 @@ def mock_server(register_map_file: str, host: str, port: int, interval: float) -
     run_mock_server_sync(register_map, host=host, port=port, update_interval=interval)
 
 
+@cli.command("demo-server")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address")
+@click.option("--port", "-p", type=int, default=5020, show_default=True, help="TCP port")
+def demo_server(host: str, port: int) -> None:
+    """Run the standalone power-meter simulator (matches demo/power_meter.json).
+
+    Unlike mock-server's random read-only values, this drives realistic
+    3-phase electrical values, so writable registers (setpoints, relays)
+    persist and read-only ones move like a live device. Point an interface at
+    it for an end-to-end test against an agent-hosted install of this
+    extension.
+
+    \b
+    Example:
+        uv run main.py demo-server
+    """
+    from zelos_extension_modbus.demo.simulator import run_demo_server_sync
+
+    try:
+        run_demo_server_sync(host=host, port=port)
+    except (OSError, RuntimeError) as e:
+        raise click.ClickException(str(e)) from e
+
+
 if __name__ == "__main__":
     cli()
