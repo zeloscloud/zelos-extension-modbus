@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
 
       - name: Install dependencies
         run: just ci-install

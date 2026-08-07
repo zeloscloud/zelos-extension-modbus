@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
 
       - name: Get version from tag
         id: version
@@ -75,7 +75,7 @@ jobs:
           echo "✓ Package created: $(ls $PACKAGE_FILE)"
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2.5.0
+        uses: softprops/action-gh-release@v3.0.0
         with:
           files: "*-v${{ steps.version.outputs.VERSION }}.tar.gz"
           generate_release_notes: true
