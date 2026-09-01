@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import signal
 import sys
+import time
 from types import FrameType
 from typing import TYPE_CHECKING
 
@@ -41,10 +42,12 @@ from zelos_extension_modbus.constants import (
 if TYPE_CHECKING:
     from zelos_extension_modbus.client import ModbusClient
 
-# Configure logging - INFO level prevents debug noise
+# UTC ISO 8601 with ms, matching the SDK's Rust tracing lines in the same log stream
+logging.Formatter.converter = time.gmtime
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s.%(msecs)03dZ %(levelname)5s %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
