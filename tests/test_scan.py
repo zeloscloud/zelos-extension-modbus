@@ -1,0 +1,179 @@
+"""Scan and verify-map: the FC allowlist, and runs against the scan-target simulator."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import time
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+from conftest import await_listening, free_port
+from pymodbus.client import AsyncModbusTcpClient
+from pymodbus.client.mixin import ModbusClientMixin
+
+from zelos_extension_modbus.demo.simulator import (
+    SCAN_TARGET_COUNTER,
+    SCAN_TARGET_FLOATS,
+    SCAN_TARGET_RANGES,
+    SCAN_TARGET_STRING,
+    run_demo_server,
+)
+from zelos_extension_modbus.register_map import RegisterMap
+from zelos_extension_modbus.scan import (
+    ALLOWED,
+    RangeFinder,
+    ScanLink,
+    classify_words,
+    scan,
+    verify_map,
+)
+
+
+def _run(coro: Any) -> Any:
+    """Run on a private loop; the rest of the suite relies on the default one."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+async def _with_sim(fn: Any, **sim: Any) -> Any:
+    """Run ``fn(endpoint)`` against a scan-target simulator on a free port."""
+    port = free_port()
+    server = asyncio.create_task(run_demo_server(port=port, scan_target=True, **sim))
+    await await_listening(port)
+    try:
+        return await fn({"transport": "tcp", "host": "127.0.0.1", "port": port})
+    finally:
+        server.cancel()
+        await asyncio.gather(server, return_exceptions=True)
+
+
+class TestAllowlist:
+    def test_only_read_and_identify_codes(self):
+        assert set(ALLOWED.values()) == {0x01, 0x02, 0x03, 0x04, 0x11, 0x2B}
+
+    def test_every_other_client_request_is_refused_before_the_wire(self):
+        link = ScanLink({"transport": "tcp", "host": "127.0.0.1", "port": 1})
+        link.conn = AsyncMock()
+        methods = [
+            name
+            for name, fn in inspect.getmembers(ModbusClientMixin, inspect.isfunction)
+            if not name.startswith("_") and name not in ALLOWED
+        ]
+        assert "write_register" in methods and "diag_restart_communication" in methods
+        for name in methods:
+            with pytest.raises(PermissionError):
+                _run(link.request(name, 1))
+        link.conn.request.assert_not_called()
+        assert link.requests == 0
+
+    def test_allowed_methods_send_their_function_code(self):
+        """Pin the method -> PDU mapping, including MEI type 14 for FC 43."""
+        sent = []
+
+        async def execute(no_response_expected: bool, pdu: Any) -> None:
+            sent.append(pdu)
+
+        async def send_all() -> None:
+            client = AsyncModbusTcpClient("127.0.0.1")
+            client.execute = execute
+            for name in ALLOWED:
+                kwargs = {"address": 0, "count": 1} if name.startswith("read_") else {}
+                if name == "read_device_information":
+                    kwargs = {"read_code": 1}
+                await getattr(client, name)(**kwargs)
+
+        _run(send_all())
+        assert [pdu.function_code for pdu in sent] == list(ALLOWED.values())
+        assert sent[-1].sub_function_code == 0x0E
+
+
+class TestInference:
+    def test_run_start_learns_the_read_limit(self):
+        """A run found past a long hole, before any read hit the size limit, keeps its start."""
+
+        class Device(RangeFinder):
+            async def _ok(self, table: str, address: int, count: int) -> bool:
+                return address >= 1005 and address + count <= 2000 and count <= 60
+
+        finder, runs = Device(None, 1), []
+        _run(finder.window("holding", 0, 2000, runs))
+        assert (runs, finder.learned_block) == ([(1005, 2000)], 60)
+
+    def test_constant_words(self):
+        """One sample: float32 words that print as text stay floats; real text is a string."""
+        floats = [0x4366, 0x4142, 0x4148, 0x4344]  # 'CfABAHCD' = float32 230.3, 12.5
+        raw = b"ZELOS SCAN TARGET\0"
+        text = [int.from_bytes(raw[i : i + 2]) for i in range(0, len(raw), 2)]
+
+        def kinds(words: list[int]) -> list[tuple[str, int | None]]:
+            regs, _ = classify_words("holding", 0, [[w] for w in words])
+            return [(r["datatype"], r.get("length")) for r in regs]
+
+        assert kinds(floats) == [("float32", None), ("float32", None)]
+        assert kinds(text) == [("string", 9)]
+
+
+class TestScanTarget:
+    def test_scan_recovers_the_seeded_device(self):
+        result = _run(
+            _with_sim(lambda ep: scan(ep, windows=[(0, 1999)], samples=4, period=1.5, delay_ms=0))
+        )
+        device = result["report"]["devices"][0]
+        assert device["max_block_size"] == 60
+        assert device["identity"]["device_id"]["ProductCode"] == "ZSCAN-1"
+        # Report and draft are 1-based; the sim's constants are wire addresses.
+        assert {t: [tuple(r) for r in v["ranges"]] for t, v in device["tables"].items()} == {
+            t: [(lo + 1, hi + 1) for lo, hi in runs] for t, runs in SCAN_TARGET_RANGES.items()
+        }
+
+        draft = result["maps"][1]
+        loaded = RegisterMap.from_dict(draft)
+        assert loaded.device == {"max_block_size": 60}
+        regs = {r.address: r for r in loaded.registers if r.type == "holding"}
+        assert not any(r.writable for r in loaded.registers)
+        for base, seeded in SCAN_TARGET_FLOATS.items():
+            for k in range(10):
+                reg = regs[base + 2 * k]
+                assert (reg.datatype, reg.byte_order) == ("float32", seeded)
+        assert regs[SCAN_TARGET_COUNTER].datatype == "uint32"
+        start, text = SCAN_TARGET_STRING
+        assert (regs[start].datatype, regs[start].length, regs[start].rate) == ("string", 9, 60)
+        assert (regs[start].name, regs[start].map_address) == (f"hr{start + 1}", start + 1)
+        assert regs[SCAN_TARGET_COUNTER].rate is None
+        assert text in regs[start].description
+
+    def test_verify_map_flags_only_the_broken_registers(self):
+        reg_map = RegisterMap.from_dict(
+            {
+                "events": {
+                    "e": [
+                        {"name": "ok", "address": 1, "datatype": "float32"},
+                        {"name": "counter", "address": 21, "datatype": "float32"},
+                        {"name": "zero", "address": 101},
+                        {"name": "hole", "address": 171},
+                    ]
+                }
+            }
+        )
+        report = _run(_with_sim(lambda ep: verify_map(ep, reg_map, samples=1, delay_ms=0)))
+        assert (report["ok"], report["unchecked"]) == (1, 0)
+        issues = {p["path"]: p["issues"] for p in report["problems"]}
+        assert {p["path"]: p["address"] for p in report["problems"]}["e/hole"] == 171
+        assert set(issues) == {"e/counter", "e/zero", "e/hole"}
+        assert issues["e/hole"] == ["exception 02"]
+        assert issues["e/counter"][0].startswith("implausible float32")  # a uint32 read as float
+
+    def test_budget_abort_is_bounded(self):
+        async def timed(ep):
+            started = time.monotonic()
+            result = await scan(ep, max_seconds=1.0)
+            return result, time.monotonic() - started
+
+        result, elapsed = _run(_with_sim(timed))
+        assert elapsed < 3.0  # abort is bounded (~3 s convention), sim startup excluded
+        assert any(c["reason"] == "max_seconds reached" for c in result["report"]["cutoffs"])

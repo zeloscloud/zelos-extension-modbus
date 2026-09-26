@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from zelos_extension_modbus.constants import MODBUS_MAX_READ_COUNT
+from zelos_extension_modbus.constants import (
+    BIT_REGISTER_TYPES,
+    MODBUS_MAX_BIT_READ_COUNT,
+    MODBUS_MAX_READ_COUNT,
+)
 from zelos_extension_modbus.register_map import Register
 
 
@@ -28,6 +32,7 @@ def plan_blocks(
     registers: list[Register],
     max_block_size: int = MODBUS_MAX_READ_COUNT,
     max_read_gap: int = 0,
+    max_bit_block_size: int = MODBUS_MAX_BIT_READ_COUNT,
 ) -> list[ReadBlock]:
     """Group registers into range-read blocks per register type.
 
@@ -41,9 +46,11 @@ def plan_blocks(
 
     Args:
         registers: Registers to coalesce (any mix of types).
-        max_block_size: Maximum addresses per block (Modbus caps word reads at 125).
+        max_block_size: Maximum addresses per register block (Modbus caps at 125).
         max_read_gap: Maximum uncovered addresses to bridge within a block
             (0 = strictly contiguous).
+        max_bit_block_size: Maximum addresses per coil/discrete-input block
+            (Modbus caps at 2000).
 
     Returns:
         List of ReadBlock, ordered by type then address.
@@ -55,13 +62,14 @@ def plan_blocks(
     blocks: list[ReadBlock] = []
     for reg_type in sorted(by_type):
         regs = sorted(by_type[reg_type], key=lambda r: (r.address, r.count, r.name))
+        size = max_bit_block_size if reg_type in BIT_REGISTER_TYPES else max_block_size
         # Seed the run with the first register; block start is always cur[0].address.
         cur: list[Register] = [regs[0]]
         end = regs[0].address + regs[0].address_span  # exclusive block end
         for reg in regs[1:]:
             reg_end = reg.address + reg.address_span
             new_end = max(end, reg_end)
-            if reg.address - end > max_read_gap or (new_end - cur[0].address) > max_block_size:
+            if reg.address - end > max_read_gap or (new_end - cur[0].address) > size:
                 blocks.append(ReadBlock(reg_type, cur[0].address, end - cur[0].address, tuple(cur)))
                 cur = [reg]
                 end = reg_end

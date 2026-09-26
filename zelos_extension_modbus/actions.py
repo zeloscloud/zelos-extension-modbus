@@ -1,39 +1,49 @@
 """Free-standing Modbus action functions for the Zelos SDK.
 
-Every action takes an ``interface`` parameter as its first argument, which
-selects the target client from the global registry.  Actions appear as
-modbus/get_status, modbus/read_register, etc.
+Every per-device action takes a ``device`` parameter first
+(``<connection>/<device>``), which selects the target from the global registry.
+Actions appear as Modbus/get_status, Modbus/read_register, etc.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
-import math
 import time
 from typing import Any
 
 import zelos_sdk
 
-from zelos_extension_modbus.constants import MODBUS_MAX_READ_COUNT, RegisterType
+from zelos_extension_modbus.client import (
+    NO_RESPONSE,
+    OUTCOME_UNKNOWN,
+    RequestFailed,
+    encode_register,
+    json_safe,
+)
+from zelos_extension_modbus.constants import (
+    BIT_REGISTER_TYPES,
+    MODBUS_MAX_READ_COUNT,
+    MODBUS_MAX_WRITE_COUNT,
+    RegisterType,
+    Transport,
+)
 from zelos_extension_modbus.registry import (
-    all_interfaces,
-    get_client,
-    interface_registers,
-    interface_writable_registers,
+    all_devices,
+    device_registers,
+    device_writable_registers,
+    get_device,
 )
 
 logger = logging.getLogger(__name__)
 
 
-ALL_ACTIONS = []  # populated at module bottom after function definitions
-
-
 def register_all() -> None:
     """Register all action functions.
 
-    The namespace comes from zelos_sdk.init(name="modbus"), so actions
-    appear as modbus/get_status, modbus/read_register, etc.
+    The namespace comes from zelos_sdk.init(name=ACTION_PREFIX), so actions
+    appear as Modbus/get_status, Modbus/read_register, etc.
     """
     for fn in ALL_ACTIONS:
         zelos_sdk.actions_registry.register(fn)
@@ -44,100 +54,150 @@ def register_all() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_coro(coro: Any, client: Any) -> Any:
-    """Run an async coroutine from a sync action handler.
+#: Action result when the device did not answer in time; a write may have landed.
+TIMED_OUT = {"error": NO_RESPONSE + OUTCOME_UNKNOWN, "success": False}
+#: Action result when the extension stops mid-request.
+STOPPING = {"error": "extension stopping", "success": False}
 
-    Bridges the SDK's sync action thread to the client's async event loop.
+
+def _run_coro(coro: Any, dev: Any) -> tuple[Any, dict | None]:
+    """Run an async coroutine from a sync action handler: (result, None) or (None, error dict).
+
+    Bridges the SDK's sync action thread to the connection's async event loop.
     """
-    if client._loop and client._loop.is_running():
-        future = asyncio.run_coroutine_threadsafe(coro, client._loop)
-        return future.result(timeout=client.timeout + 5)
-    return asyncio.run(coro)
+    conn = dev.connection
+    # Worst case per request: every attempt times out, after the pacing gap.
+    # The link is serialized, so wait out the request ahead of ours too, plus
+    # one reconnect (connect timeout and connect_delay_ms).
+    per_request = conn.timeout * (1 + conn.retries) + conn.request_delay_ms / 1000
+    reconnect = conn.timeout + conn.connect_delay_ms / 1000
+    try:
+        if not (conn._loop and conn._loop.is_running()):
+            return asyncio.run(coro), None
+        future = asyncio.run_coroutine_threadsafe(coro, conn._loop)
+        try:
+            return future.result(timeout=2 * per_request + reconnect + 5), None
+        except TimeoutError:
+            future.cancel()
+            return None, TIMED_OUT
+    except RequestFailed as e:
+        return None, {"error": str(e), "success": False}
+    except concurrent.futures.CancelledError:  # the poll loop was cancelled at shutdown
+        return None, STOPPING
 
 
-def _json_safe(value: Any) -> Any:
-    """Make one decoded value safe to put in an action payload.
-
-    The SDK converts action results to JSON in Rust, which rejects non-finite
-    floats outright ("Invalid float value") and fails the whole action. A single
-    poisoned register (a float32 read back as 0xFFFF,0xFFFF decodes to NaN) would
-    otherwise take down every aggregate payload, permanently. Non-finite floats
-    become null on the wire; the client's cache keeps what the device reported.
-    """
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    return value
+def _word(value: Any) -> int:
+    """A raw register value: an integer 0-65535, or -32768..-1 as two's complement."""
+    number = float(value)
+    if isinstance(value, bool) or not number.is_integer():
+        raise ValueError(f"{value} is not an integer")
+    word = int(number)
+    if not -0x8000 <= word <= 0xFFFF:
+        raise ValueError(f"{word} is outside 0-65535 (or -32768..-1 as two's complement)")
+    return word & 0xFFFF
 
 
-def _resolve_register(client: Any, path: str) -> tuple[str | None, Any, str | None]:
-    """Resolve an 'event/field' path to a Register on a specific client.
+def _resolve_register(dev: Any, path: str) -> tuple[str | None, Any, str | None]:
+    """Resolve an 'event/field' path to a Register on a specific device.
 
-    Returns (error_message, register, event) — ``error_message`` and ``register``
+    Returns (error_message, register, event): ``error_message`` and ``register``
     are mutually exclusive. ``event`` is the owning event when the path carried
     one, else None (the bare-name compat path leaves it to the register map).
     """
-    if not client.register_map:
+    if not dev.register_map:
         return ("No register map loaded", None, None)
 
     parts = path.split("/", 1)
     if len(parts) == 2:
         event_name, reg_name = parts
-        for reg in client.register_map.get_event(event_name):
+        for reg in dev.register_map.get_event(event_name):
             if reg.name == reg_name:
                 return (None, reg, event_name)
         return (f"Register '{path}' not found", None, None)
 
     # Fallback: bare name lookup (backwards compat)
-    reg = client.register_map.get_by_name(path)
+    reg = dev.register_map.get_by_name(path)
     if not reg:
         return (f"Register '{path}' not found", None, None)
     return (None, reg, None)
 
 
-def _get_client_or_error(interface: str) -> tuple[Any | None, dict | None]:
-    """Look up a client by interface name, returning an error dict on failure."""
-    client = get_client(interface)
-    if not client:
-        return None, {"error": f"Interface '{interface}' not found", "success": False}
-    return client, None
+#: Raw-action address fields: in the device map's base, converted at the wire.
+ADDRESS_HELP = (
+    "In the device map's address base: 1-based by default (holding 40001 is wire "
+    "address 40000), 0-based if the map sets address_base 0. No map: 1-based."
+)
 
 
-def _status_row(interface: str, client: Any) -> dict[str, Any]:
-    """The identity/connection/counter keys get_status and get_snapshot share.
+def _address_field(title: str = "Address") -> Any:
+    return zelos_sdk.action.number(
+        "address", minimum=0, maximum=65536, title=title, description=ADDRESS_HELP
+    )
 
-    ``connection`` is the prefix-free wire endpoint; get_status overrides it with
-    the log-formatted string to keep its pre-existing surface.
-    """
+
+def _wire(dev: Any, address: float, count: int = 1) -> tuple[int | None, dict | None]:
+    """Wire address for a user ``address`` in the device's base, or an error dict."""
+    base = dev.address_base
+    wire = int(address) - base
+    if wire < 0 or wire + count > 0x10000:
+        return None, {
+            "error": f"Address {int(address)} (count {count}) is outside {base}-{0xFFFF + base} "
+            f"(address base {base})",
+            "success": False,
+        }
+    return wire, None
+
+
+def _get_device_or_error(device: str) -> tuple[Any | None, dict | None]:
+    """Look up a device by path, returning an error dict on failure."""
+    dev = get_device(device)
+    if not dev:
+        return None, {"error": f"Device '{device}' not found", "success": False}
+    return dev, None
+
+
+def _status_row(dev: Any) -> dict[str, Any]:
+    """The identity/connection/counter keys get_status and get_snapshot share."""
     return {
-        "interface": interface,
-        "connected": client._connected,
-        "transport": client.transport,
-        "connection": client.endpoint,
-        "unit_id": client.unit_id,
-        "poll_count": client._poll_count,
-        "error_count": client._error_count,
+        "device": dev.path,
+        "connection": dev.connection.name,
+        "connected": dev.connected,
+        "transport": dev.connection.transport,
+        "endpoint": dev.connection.endpoint,
+        "unit_id": dev.unit_id,
+        "address_base": dev.address_base,
+        "poll_count": dev._poll_count,
+        "successful_reads": dev.successful_reads,
+        "failed_reads": dev.failed_reads,
+        "error": dev.last_error,
+        **dev.rate_status(),
     }
 
 
-def _register_row(event: str, reg: Any) -> dict[str, Any]:
+def _datatype(reg: Any) -> str:
+    """``bool`` for a coil or discrete input, whatever the map's datatype says."""
+    return "bool" if reg.type in BIT_REGISTER_TYPES else reg.datatype
+
+
+def _register_row(dev: Any, event: str, reg: Any) -> dict[str, Any]:
     """One catalog row for a register, including its named-action ``path``.
 
-    ``poll_interval`` is the register's raw configured value: None (interface
-    default), 0 (polling disabled), or its own rate in seconds.
+    ``address`` is in the map's base. ``rate`` is the effective requested poll
+    rate in seconds (register, else device, floored by min_rate); 0 = not polled.
     """
     return {
         "name": reg.name,
         "event": event,
         "path": f"{event}/{reg.name}",
-        "address": reg.address,
+        "address": reg.map_address,
         "type": reg.type,
-        "datatype": reg.datatype,
+        "datatype": _datatype(reg),
         "unit": reg.unit,
         "scale": reg.scale,
         "description": reg.description,
         "writable": reg.writable,
         "byte_order": reg.byte_order,
-        "poll_interval": reg.poll_interval,
+        "rate": dev.rate_of(reg),
     }
 
 
@@ -147,89 +207,96 @@ def _register_row(event: str, reg: Any) -> dict[str, Any]:
 
 
 @zelos_sdk.action(
-    "List Interfaces",
-    "List every configured Modbus interface — the names the other actions accept",
+    "List Devices",
+    "List every configured Modbus device: the names the other actions accept",
 )
-def list_interfaces() -> dict[str, Any]:
-    """List all registered interfaces with their transport and register-map summary."""
-    interfaces = []
-    for name in all_interfaces():
-        client = get_client(name)
-        interfaces.append(
+def list_devices() -> dict[str, Any]:
+    """List all registered devices with their connection and register-map summary."""
+    devices = []
+    for path in all_devices():
+        dev = get_device(path)
+        devices.append(
             {
-                "name": name,
-                "transport": client.transport,
-                "connected": client._connected,
-                "connection": client.endpoint,
-                "unit_id": client.unit_id,
-                "source": client.source_name,
-                "map_name": client.register_map.name if client.register_map else None,
-                "register_count": len(client.register_map.registers) if client.register_map else 0,
-                "poll_interval": client.poll_interval,
-                "write_mode": client.write_mode,
+                "name": path,
+                "connection": dev.connection.name,
+                "device": dev.name,
+                "unit_id": dev.unit_id,
+                "address_base": dev.address_base,
+                "transport": dev.connection.transport,
+                "endpoint": dev.connection.endpoint,
+                "connected": dev.connected,
+                "successful_reads": dev.successful_reads,
+                "failed_reads": dev.failed_reads,
+                "trace_path": dev.trace_path,
+                "map_name": dev.register_map.name if dev.register_map else None,
+                "register_count": len(dev.register_map.registers) if dev.register_map else 0,
+                "rate": dev.rate,
+                "write_mode": dev.write_mode,
+                **dev.rate_status(),
             }
         )
-    return {"interfaces": interfaces, "count": len(interfaces), "success": True}
+    return {"devices": devices, "count": len(devices), "success": True}
 
 
 @zelos_sdk.action("Get Status", "Get connection and polling status")
-@zelos_sdk.action.select("interface", choices=all_interfaces, title="Interface")
-def get_status(interface: str) -> dict[str, Any]:
-    """Get current client status."""
-    client, err = _get_client_or_error(interface)
+@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+def get_status(device: str) -> dict[str, Any]:
+    """Get current device status."""
+    dev, err = _get_device_or_error(device)
     if err:
         return err
     return {
-        **_status_row(interface, client),
-        # Pre-existing surface: this action reports the log-formatted connection
-        # string (interface-prefixed), unlike list_interfaces / get_snapshot.
-        "connection": client._connection_str,
-        "poll_interval": client.poll_interval,
-        "write_mode": client.write_mode,
-        "block_reads": client.block_reads,
-        "max_block_size": client.max_block_size,
-        "max_read_gap": client.max_read_gap,
-        "registers": len(client.register_map.registers) if client.register_map else 0,
+        **_status_row(dev),
+        "rate": dev.rate,
+        "min_rate": dev.min_rate,
+        "write_mode": dev.write_mode,
+        "block_reads": dev.block_reads,
+        "max_block_size": dev.max_block_size,
+        "max_bit_block_size": dev.max_bit_block_size,
+        "max_read_gap": dev.max_read_gap,
+        "registers": len(dev.register_map.registers) if dev.register_map else 0,
         "success": True,
     }
 
 
 @zelos_sdk.action(
     "Get Snapshot",
-    "Cached status and last register values for one interface — no device I/O",
+    "Cached status and last register values for one device, no device I/O",
 )
-@zelos_sdk.action.select("interface", choices=all_interfaces, title="Interface")
-def get_snapshot(interface: str) -> dict[str, Any]:
-    """Snapshot of one interface's status and last-seen values, straight from cache.
+@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+def get_snapshot(device: str) -> dict[str, Any]:
+    """Snapshot of one device's status and last-seen values, straight from cache.
 
     Reads nothing from the bus: values come from the poll sweep's cache (and any
     on-demand named reads), so registers with polling disabled are absent until
     read once via read_named_register.
     """
-    client, err = _get_client_or_error(interface)
+    dev, err = _get_device_or_error(device)
     if err:
         return err
     # Copy the cache first, stamp second: every ts_ms in the payload is then a
     # value that existed before captured_at_unix_ms, by construction.
-    cached = client.last_values
+    cached = dev.last_values
     captured_at_unix_ms = int(time.time() * 1000)
-    # Extension id/version/state intentionally NOT included — that info is
+    # Extension id/version/state intentionally NOT included: that info is
     # canonical at the `extensions.list` bridge surface and the webapp consumes
     # it from there, not from this 1 Hz polled action.
     return {
-        **_status_row(interface, client),
+        **_status_row(dev),
         "captured_at_unix_ms": captured_at_unix_ms,
         "values": {
-            path: {"value": _json_safe(value), "ts_ms": ts_ms}
+            path: {"value": json_safe(value), "ts_ms": ts_ms}
             for path, (value, ts_ms) in cached.items()
         },
         "success": True,
     }
 
 
-@zelos_sdk.action("Read Register", "Read a single register by address")
-@zelos_sdk.action.select("interface", choices=all_interfaces, title="Interface")
-@zelos_sdk.action.number("address", minimum=0, maximum=65535, title="Address")
+@zelos_sdk.action(
+    "Read Register", "Read registers by address, in the device map's base (default 1-based)"
+)
+@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@_address_field()
 @zelos_sdk.action.select(
     "reg_type",
     choices=list(RegisterType),
@@ -239,142 +306,140 @@ def get_snapshot(interface: str) -> dict[str, Any]:
 @zelos_sdk.action.number(
     "count", minimum=1, maximum=MODBUS_MAX_READ_COUNT, default=1, title="Count"
 )
-def read_register(interface: str, address: int, reg_type: str, count: int) -> dict[str, Any]:
+def read_register(device: str, address: int, reg_type: str, count: int) -> dict[str, Any]:
     """Read register(s) by address."""
-    client, err = _get_client_or_error(interface)
+    dev, err = _get_device_or_error(device)
+    if err:
+        return err
+    wire, err = _wire(dev, address, int(count))
     if err:
         return err
 
-    async def _read() -> list | None:
-        if not client._connected:
-            await client.connect()
-        if reg_type == RegisterType.HOLDING:
-            return await client.read_holding_registers(int(address), int(count))
-        elif reg_type == RegisterType.INPUT:
-            return await client.read_input_registers(int(address), int(count))
-        elif reg_type == RegisterType.COIL:
-            return await client.read_coils(int(address), int(count))
-        else:  # discrete_input
-            return await client.read_discrete_inputs(int(address), int(count))
-
-    result = _run_coro(_read(), client)
+    result, err = _run_coro(dev._read_range(reg_type, wire, int(count)), dev)
+    if err:
+        return err
     return {
         "address": address,
         "type": reg_type,
         "count": count,
         "values": result,
-        "success": result is not None,
+        "success": True,
     }
 
 
 @zelos_sdk.action(
-    "Write Single Register (FC 6)", "Write one holding register using function code 6"
+    "Write Single Register (FC 6)",
+    "Write one holding register using function code 6; address in the device map's base",
 )
-@zelos_sdk.action.select("interface", choices=all_interfaces, title="Interface")
-@zelos_sdk.action.number("address", minimum=0, maximum=65535, title="Address")
+@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@_address_field()
 @zelos_sdk.action.number("value", title="Value")
-def write_single_register(interface: str, address: int, value: int) -> dict[str, Any]:
+def write_single_register(device: str, address: int, value: int) -> dict[str, Any]:
     """Write a single register using FC 6."""
-    client, err = _get_client_or_error(interface)
+    dev, err = _get_device_or_error(device)
     if err:
         return err
-
-    async def _write() -> bool:
-        if not client._connected:
-            await client.connect()
-        return await client.write_register(int(address), int(value))
-
-    success = _run_coro(_write(), client)
-    return {
-        "address": address,
-        "value": value,
-        "function_code": 6,
-        "success": success,
-    }
-
-
-@zelos_sdk.action(
-    "Write Registers (FC 16)", "Write one or more holding registers using function code 16"
-)
-@zelos_sdk.action.select("interface", choices=all_interfaces, title="Interface")
-@zelos_sdk.action.number("address", minimum=0, maximum=65535, title="Start Address")
-@zelos_sdk.action.text("values", title="Values (comma-separated)")
-def write_registers(interface: str, address: int, values: str) -> dict[str, Any]:
-    """Write registers using FC 16."""
-    client, err = _get_client_or_error(interface)
+    wire, err = _wire(dev, address)
     if err:
         return err
     try:
-        int_values = [int(v.strip()) for v in values.split(",")]
-    except ValueError:
-        return {"error": "Values must be comma-separated integers", "success": False}
+        word = _word(value)
+    except ValueError as e:
+        return {"error": str(e), "success": False}
 
-    async def _write() -> bool:
-        if not client._connected:
-            await client.connect()
-        return await client.write_registers(int(address), int_values)
+    _, err = _run_coro(dev.write_register(wire, word), dev)
+    if err:
+        return err
+    return {
+        "address": address,
+        "value": word,
+        "function_code": 6,
+        "success": True,
+    }
 
-    success = _run_coro(_write(), client)
+
+@zelos_sdk.action(
+    "Write Registers (FC 16)",
+    "Write one or more holding registers using function code 16; address in the device map's base",
+)
+@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@_address_field("Start Address")
+@zelos_sdk.action.text("values", title="Values (comma-separated)")
+def write_registers(device: str, address: int, values: str) -> dict[str, Any]:
+    """Write registers using FC 16."""
+    dev, err = _get_device_or_error(device)
+    if err:
+        return err
+    try:
+        int_values = [_word(v.strip()) for v in values.split(",")]
+    except ValueError as e:
+        return {"error": f"Values must be comma-separated integers: {e}", "success": False}
+    if len(int_values) > MODBUS_MAX_WRITE_COUNT:
+        return {
+            "error": f"{len(int_values)} values; FC 16 writes at most {MODBUS_MAX_WRITE_COUNT}",
+            "success": False,
+        }
+    wire, err = _wire(dev, address, len(int_values))
+    if err:
+        return err
+
+    _, err = _run_coro(dev.write_registers(wire, int_values), dev)
+    if err:
+        return err
     return {
         "address": address,
         "values": int_values,
         "count": len(int_values),
         "function_code": 16,
-        "success": success,
+        "success": True,
     }
 
 
 @zelos_sdk.action("Read Named Register", "Read a register by event/name (e.g. voltage/L1)")
-@zelos_sdk.action.select("interface", choices=all_interfaces, title="Interface")
-@zelos_sdk.action.select(
-    "name", choices=interface_registers, depends_on="interface", title="Register"
-)
-def read_named_register(interface: str, name: str) -> dict[str, Any]:
+@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@zelos_sdk.action.select("name", choices=device_registers, depends_on="device", title="Register")
+def read_named_register(device: str, name: str) -> dict[str, Any]:
     """Read a register by event/name path from the register map."""
-    client, err = _get_client_or_error(interface)
+    dev, err = _get_device_or_error(device)
     if err:
         return err
 
-    error, reg, event = _resolve_register(client, name)
+    error, reg, event = _resolve_register(dev, name)
     if error:
         return {"error": error, "success": False}
 
-    async def _read() -> Any:
-        if not client._connected:
-            await client.connect()
-        return await client.read_register_value(reg)
-
-    value = _run_coro(_read(), client)
+    value, err = _run_coro(dev.read_register_value(reg), dev)
+    if err:
+        return err
     if value is not None:
         # Refresh the snapshot cache so an unpolled register shows a value too.
-        client.record_value(reg, value, event=event)
+        dev.record_value(reg, value, event=event)
     return {
         "name": name,
-        "address": reg.address,
+        "address": reg.map_address,
         "type": reg.type,
-        "datatype": reg.datatype,
-        # ``success`` tracks the read, not JSON-representability: a NaN reading is
-        # a successful read of a value that cannot be serialized, so it reports
-        # success with a null value.
-        "value": _json_safe(value),
+        "datatype": _datatype(reg),
+        # ``success`` tracks the read: a NaN or an ``invalid`` sentinel is a
+        # successful read of a value with no JSON number, so it reports null.
+        "value": json_safe(value),
         "unit": reg.unit,
-        "success": value is not None,
+        "success": True,
     }
 
 
 @zelos_sdk.action("Write Named Register", "Write a value to a register by event/name")
-@zelos_sdk.action.select("interface", choices=all_interfaces, title="Interface")
+@zelos_sdk.action.select("device", choices=all_devices, title="Device")
 @zelos_sdk.action.select(
-    "name", choices=interface_writable_registers, depends_on="interface", title="Register"
+    "name", choices=device_writable_registers, depends_on="device", title="Register"
 )
 @zelos_sdk.action.number("value", title="Value")
-def write_named_register(interface: str, name: str, value: float) -> dict[str, Any]:
+def write_named_register(device: str, name: str, value: float) -> dict[str, Any]:
     """Write a value to a register by event/name path from the register map."""
-    client, err = _get_client_or_error(interface)
+    dev, err = _get_device_or_error(device)
     if err:
         return err
 
-    error, reg, event = _resolve_register(client, name)
+    error, reg, event = _resolve_register(dev, name)
     if error:
         return {"error": error, "success": False}
 
@@ -384,101 +449,413 @@ def write_named_register(interface: str, name: str, value: float) -> dict[str, A
             "success": False,
         }
 
-    async def _write() -> bool:
-        if not client._connected:
-            await client.connect()
-        return await client.write_register_value(reg, value)
-
-    success = _run_coro(_write(), client)
-    if success:
-        # A written setpoint is the freshest thing we know about it; without this
-        # an unpolled register would read stale in snapshots forever.
-        client.record_value(reg, value, event=event)
+    try:
+        _, written = encode_register(reg, value)  # refuse before any I/O
+    except ValueError as e:  # out of range, or not a whole step
+        return {"error": str(e), "success": False}
+    _, err = _run_coro(dev.write_register_value(reg, value), dev)
+    if err:
+        return err
+    # A written setpoint is the freshest thing we know about it; without this
+    # an unpolled register would read stale in snapshots forever.
+    dev.record_value(reg, written, event=event)
     return {
         "name": name,
-        "address": reg.address,
+        "address": reg.map_address,
         "type": reg.type,
-        "datatype": reg.datatype,
-        "value": value,
+        "datatype": _datatype(reg),
+        "value": written,
         "unit": reg.unit,
-        "success": success,
+        "success": True,
     }
 
 
-@zelos_sdk.action("Write Coil", "Write a boolean value to a coil")
-@zelos_sdk.action.select("interface", choices=all_interfaces, title="Interface")
-@zelos_sdk.action.number("address", minimum=0, maximum=65535, title="Address")
+@zelos_sdk.action("Write Coil", "Write a boolean value to a coil; address in the device map's base")
+@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@_address_field()
 @zelos_sdk.action.select("value", choices=["ON", "OFF"], default="OFF", title="Value")
-def write_coil(interface: str, address: int, value: str) -> dict[str, Any]:
+def write_coil(device: str, address: int, value: str) -> dict[str, Any]:
     """Write a coil by address."""
-    client, err = _get_client_or_error(interface)
+    dev, err = _get_device_or_error(device)
     if err:
         return err
     bool_value = value == "ON"
+    wire, err = _wire(dev, address)
+    if err:
+        return err
 
-    async def _write() -> bool:
-        if not client._connected:
-            await client.connect()
-        return await client.write_coil(int(address), bool_value)
-
-    success = _run_coro(_write(), client)
+    _, err = _run_coro(dev.write_coil(wire, bool_value), dev)
+    if err:
+        return err
     return {
         "address": address,
         "value": bool_value,
-        "success": success,
+        "success": True,
+    }
+
+
+def _register_list(device: str, writable_only: bool) -> dict[str, Any]:
+    dev, err = _get_device_or_error(device)
+    if err:
+        return err
+    if not dev.register_map:
+        return {"registers": [], "count": 0, "map_name": None, "success": True}
+    regs = [
+        _register_row(dev, event, r)
+        for event, event_regs in dev.register_map.events.items()
+        for r in event_regs
+        if r.writable or not writable_only
+    ]
+    return {
+        "registers": regs,
+        "count": len(regs),
+        "map_name": dev.register_map.name,
+        "success": True,
     }
 
 
 @zelos_sdk.action("List Registers", "List all registers in the map")
-@zelos_sdk.action.select("interface", choices=all_interfaces, title="Interface")
-def list_registers(interface: str) -> dict[str, Any]:
+@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+def list_registers(device: str) -> dict[str, Any]:
     """List all registers in the register map."""
-    client, err = _get_client_or_error(interface)
-    if err:
-        return err
-    if not client.register_map:
-        return {"registers": [], "count": 0, "map_name": None, "success": True}
-
-    regs = [
-        _register_row(event, r)
-        for event, event_regs in client.register_map.events.items()
-        for r in event_regs
-    ]
-    return {
-        "registers": regs,
-        "count": len(regs),
-        "map_name": client.register_map.name,
-        "success": True,
-    }
+    return _register_list(device, writable_only=False)
 
 
 @zelos_sdk.action("List Writable Registers", "List all writable registers")
-@zelos_sdk.action.select("interface", choices=all_interfaces, title="Interface")
-def list_writable_registers(interface: str) -> dict[str, Any]:
+@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+def list_writable_registers(device: str) -> dict[str, Any]:
     """List all writable registers in the register map."""
-    client, err = _get_client_or_error(interface)
-    if err:
-        return err
-    if not client.register_map:
-        return {"registers": [], "count": 0, "map_name": None, "success": True}
+    return _register_list(device, writable_only=True)
 
-    regs = [
-        _register_row(event, r)
-        for event, event_regs in client.register_map.events.items()
-        for r in event_regs
-        if r.writable
+
+# ---------------------------------------------------------------------------
+# Standalone: run with the extension stopped (config form hooks, scan, verify)
+# ---------------------------------------------------------------------------
+#
+# These never touch the registry's live links. A scan must not share a link
+# with polling (RS485 is half-duplex, TCP devices cap connections), so they
+# refuse while devices are registered, i.e. while the extension runs.
+
+#: Default scan wall clock for the actions, under the AI tool bridge's 5 min clamp.
+SCAN_ACTION_SECONDS = 240
+#: Scan Device's action timeout; its time limit stays a minute under it.
+SCAN_TIMEOUT = 1800.0
+VERIFY_TIMEOUT = 900.0
+#: Auto-configure's shared deadline across connections, under the app's 30 s.
+AUTO_CONFIG_SECONDS = 25.0
+
+
+def _refuse_if_running() -> None:
+    if all_devices():
+        raise RuntimeError("Stop the extension first: a scan must not share a link with polling.")
+
+
+def _configured_connections() -> list[dict[str, Any]]:
+    """Connections from the saved config (at-rest state), or [] when there is none."""
+    try:
+        from zelos_sdk.extensions.config import load_config
+
+        return [c for c in (load_config() or {}).get("connections") or [] if isinstance(c, dict)]
+    except Exception:  # no config yet, or it does not validate
+        return []
+
+
+def _endpoint(
+    target: str, transport: str, port: float, baudrate: float, parity: str, stopbits: float
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """(link kwargs, configured connection or {}) for an action's target.
+
+    An empty target means the first configured connection.
+    """
+    from zelos_extension_modbus.cli.app import link_kwargs
+    from zelos_extension_modbus.scan import endpoint
+
+    if target.strip():
+        return endpoint(target.strip(), transport, port, baudrate, parity, stopbits), {}
+    connections = _configured_connections()
+    if not connections:
+        raise ValueError("No target given and no connection configured.")
+    return link_kwargs(connections[0]), connections[0]
+
+
+def _link_fields(fn: Any) -> Any:
+    """Target fields shared by Scan Device and Verify Map."""
+    fields = [
+        zelos_sdk.action.text(
+            "target",
+            title="Host or serial port",
+            description="Empty: the first configured connection",
+            required=False,
+            default="",
+        ),
+        zelos_sdk.action.select(
+            "transport",
+            choices=list(Transport),
+            default=Transport.TCP,
+            title="Transport",
+            required=False,
+        ),
+        zelos_sdk.action.number(
+            "port", minimum=1, maximum=65535, default=502, title="TCP port", required=False
+        ),
+        zelos_sdk.action.number(
+            "baudrate", minimum=300, default=9600, title="Baudrate", required=False
+        ),
+        zelos_sdk.action.select(
+            "parity", choices=["N", "E", "O"], default="N", title="Parity", required=False
+        ),
+        zelos_sdk.action.number(
+            "stopbits", minimum=1, maximum=2, default=1, title="Stop bits", required=False
+        ),
     ]
+    for field in reversed(fields):
+        fn = field(fn)
+    return fn
+
+
+@zelos_sdk.action(
+    "Scan Device",
+    "Comprehensive, slow (tens of seconds to minutes): discover an unknown device with "
+    "reads only (FC 01-04, 43/14, 17) and return its units, identity, valid address ranges "
+    "and a draft register map (every register read-only) inline, for review before use. "
+    "For just finding devices use Auto-configure; to check an existing map use Verify Map. "
+    "Run with the extension stopped; writes nothing.",
+    timeout=SCAN_TIMEOUT,
+    standalone=True,
+)
+@_link_fields
+@zelos_sdk.action.boolean(
+    "autodetect",
+    title="Autodetect serial settings",
+    description="RTU: try the given settings, then 9600-115200 baud, 8N1/8E1",
+    required=False,
+    default=False,
+    widget="toggle",
+)
+@zelos_sdk.action.text(
+    "units",
+    title="Unit IDs",
+    description="e.g. 1,2,10-20. Empty: TCP the first of 1, 0, 255 to answer, else (a "
+    "gateway, or no answer) a 1-247 sweep; RTU sweeps 1-247 (minutes at low baud; list "
+    "units to go faster)",
+    required=False,
+    default="",
+)
+@zelos_sdk.action.text(
+    "ranges",
+    title="Address windows",
+    description="1-based, e.g. 1-10000,40001-41000. Empty: TCP 1-65536; RTU 1-10000 and "
+    "the 30001/40001/50001 blocks",
+    required=False,
+    default="",
+)
+@zelos_sdk.action.number(
+    "max_seconds",
+    title="Time limit (s)",
+    description="Stops and reports what was found so far",
+    minimum=5,
+    maximum=SCAN_TIMEOUT - 60,
+    default=SCAN_ACTION_SECONDS,
+    required=False,
+)
+def scan_device(
+    target: str = "",
+    transport: str = Transport.TCP,
+    port: float = 502,
+    baudrate: float = 9600,
+    parity: str = "N",
+    stopbits: float = 1,
+    autodetect: bool = False,
+    units: str = "",
+    ranges: str = "",
+    max_seconds: float = SCAN_ACTION_SECONDS,
+) -> dict[str, Any]:
+    """Scan one endpoint; the report and ``maps`` (unit id -> draft map) inline."""
+    from zelos_extension_modbus.scan import parse_units, parse_windows, quiet_pymodbus, scan
+
+    _refuse_if_running()
+    endpoint, conn = _endpoint(target, transport, port, baudrate, parity, stopbits)
+    devices = conn.get("devices") or [{}]
+    quiet_pymodbus()
+    return asyncio.run(
+        scan(
+            endpoint,
+            units=parse_units(units) or None,
+            windows=parse_windows(ranges) or None,
+            max_seconds=min(float(max_seconds), SCAN_TIMEOUT - 60),
+            autodetect=autodetect,
+            configured_unit=devices[0].get("unit_id"),
+        )
+    )
+
+
+@zelos_sdk.action(
+    "Verify Map",
+    "Check an existing register map against the device: read every register once or "
+    "twice and report exceptions, always-zero registers, implausible floats and "
+    "sentinels. Reads only; run with the extension stopped.",
+    timeout=VERIFY_TIMEOUT,
+    standalone=True,
+)
+@_link_fields
+@zelos_sdk.action.number(
+    "unit_id", minimum=0, maximum=255, default=1, title="Unit ID", required=False
+)
+@zelos_sdk.action.text(
+    "map_file",
+    title="Register map",
+    description="Empty: the map configured for this unit on the first connection",
+    required=False,
+    default="",
+    widget="file_path_picker",
+)
+@zelos_sdk.action.number(
+    "max_seconds",
+    title="Time limit (s)",
+    description="Stops and reports what was checked so far",
+    minimum=5,
+    maximum=VERIFY_TIMEOUT - 60,
+    default=SCAN_ACTION_SECONDS,
+    required=False,
+)
+def verify_map(
+    target: str = "",
+    transport: str = Transport.TCP,
+    port: float = 502,
+    baudrate: float = 9600,
+    parity: str = "N",
+    stopbits: float = 1,
+    unit_id: float = 1,
+    map_file: str = "",
+    max_seconds: float = SCAN_ACTION_SECONDS,
+) -> dict[str, Any]:
+    """Verify a register map against a device; the report inline."""
+    from zelos_extension_modbus.register_map import RegisterMap
+    from zelos_extension_modbus.scan import quiet_pymodbus
+    from zelos_extension_modbus.scan import verify_map as run_verify
+
+    _refuse_if_running()
+    endpoint, conn = _endpoint(target, transport, port, baudrate, parity, stopbits)
+    unit = int(unit_id)
+    if not map_file.strip():
+        configured = [d for d in conn.get("devices") or [] if d.get("unit_id", 1) == unit]
+        map_file = (configured or [{}])[0].get("register_map_file") or ""
+    if not map_file:
+        raise ValueError(f"No register map given and none configured for unit {unit}.")
+    quiet_pymodbus()
+    register_map = RegisterMap.from_file(map_file.strip())
+    max_seconds = min(float(max_seconds), VERIFY_TIMEOUT - 60)
+    return asyncio.run(run_verify(endpoint, register_map, unit, max_seconds=max_seconds))
+
+
+@zelos_sdk.action(
+    "Auto-configure",
+    "Quick device discovery for the config form (seconds): on each configured connection, "
+    "find the units that answer among the configured unit, 1-10 and 247 (RTU: also serial "
+    "settings), read their identity, and add a device per new unit. Where the SunSpec "
+    "marker is found, register_map is set to sunspec (new or existing units; an existing "
+    "unit with a register_map_file keeps it). Existing devices are kept. Returns the "
+    "config; review, then save and start. Sweeps the SAVED config's connections (save "
+    "the form first), all within 25 s; what did not fit is reported. For a register "
+    "map use Scan Device.",
+    timeout=900.0,
+    standalone=True,
+)
+def auto_config() -> dict[str, Any]:
+    """The app's auto-configure contract: ``config.connections`` replaces the form's."""
+    from zelos_extension_modbus.cli.app import link_kwargs
+    from zelos_extension_modbus.scan import ScanLink, quiet_pymodbus, sweep
+
+    _refuse_if_running()
+    connections = _configured_connections()
+    if not connections:
+        return {
+            "status": "error",
+            "message": "Add a connection (host, or serial port) first; Auto-configure sweeps "
+            "it for unit IDs.",
+        }
+    quiet_pymodbus()
+    deadline = time.monotonic() + AUTO_CONFIG_SECONDS
+    out, found, swept, seen, cut = [], 0, [], [], []
+    for conn in connections:
+        devices = [dict(d) for d in conn.get("devices") or [] if isinstance(d, dict)]
+        known = {d.get("unit_id", 1) for d in devices}
+        left = deadline - time.monotonic()
+        if left <= 0:
+            cut.append(ScanLink(link_kwargs(conn)).label)
+            out.append(conn)
+            continue
+        result = asyncio.run(
+            sweep(
+                link_kwargs(conn),
+                autodetect=conn.get("transport") == Transport.RTU,
+                configured_unit=devices[0].get("unit_id", 1) if devices else None,
+                max_seconds=left,
+            )
+        )
+        swept.append(result["endpoint"])
+        if result["cutoffs"]:
+            cut.append(result["endpoint"])
+        conn = dict(conn)
+        if serial := result.get("serial"):
+            conn |= {k: serial[k] for k in ("baudrate", "parity", "stopbits")}
+        for unit in result.get("units", {}).get("present", []):
+            found += 1
+            ids = result["identity"].get(unit, {}).get("device_id", {})
+            who = " ".join(ids.get(k, "") for k in ("VendorName", "ProductCode")).strip()
+            label = f"{result['endpoint']} unit {unit}" + (f" ({who})" if who else "")
+            if unit not in known:
+                devices.append({"unit_id": unit})
+            device = next(d for d in devices if d.get("unit_id", 1) == unit)
+            if unit in result["sunspec"] and device.get("register_map") != "sunspec":
+                if device.get("register_map_file"):
+                    label += ", SunSpec detected (register_map_file kept)"
+                else:
+                    device["register_map"] = "sunspec"
+                    label += ", register_map set to sunspec"
+            seen.append(label)
+        conn["devices"] = devices
+        out.append(conn)
+    partial = f" Not fully swept in {AUTO_CONFIG_SECONDS:g} s: {', '.join(cut)}." if cut else ""
+    if not found:
+        return {
+            "status": "error",
+            "message": f"No unit answered on {', '.join(swept) or 'any connection'}.{partial}",
+        }
     return {
-        "registers": regs,
-        "count": len(regs),
-        "map_name": client.register_map.name,
-        "success": True,
+        "status": "success",
+        "message": f"Found {'; '.join(seen)}.{partial}",
+        "config": {"connections": out},
     }
 
 
-# Populate ALL_ACTIONS after all functions are defined
+@zelos_sdk.action(
+    "List Serial Ports",
+    "Serial ports on the machine running the agent, as choices for an RTU connection's "
+    "Serial Port field, which also accepts a path typed by hand.",
+    standalone=True,
+)
+def list_serial_ports() -> dict[str, Any]:
+    """The app's `action-choices` contract: `choices` in the order to show."""
+    from serial.tools import list_ports
+
+    ports = sorted(list_ports.comports(), key=lambda p: p.device)
+    cu = {p.device for p in ports if p.device.startswith("/dev/cu.")}
+    return {
+        "status": "success",
+        "choices": [
+            {"value": p.device, "detail": p.description if p.description != "n/a" else ""}
+            for p in ports
+            # macOS pseudo ports, and tty.* twins of cu.* (cu doesn't wait on carrier).
+            if "Bluetooth" not in p.device
+            and "debug-console" not in p.device
+            and "/dev/cu." + p.device.removeprefix("/dev/tty.") not in cu
+        ],
+    }
+
+
 ALL_ACTIONS = [
-    list_interfaces,
+    list_devices,
     get_status,
     get_snapshot,
     read_register,
@@ -489,4 +866,8 @@ ALL_ACTIONS = [
     write_coil,
     list_registers,
     list_writable_registers,
+    scan_device,
+    verify_map,
+    auto_config,
+    list_serial_ports,
 ]

@@ -21,6 +21,8 @@ uv run main.py trace /dev/ttyUSB0 registers.json -t rtu -b 9600 --parity N --sto
 uv run main.py trace 192.168.1.100
 ```
 
+Traces under `Modbus/<name>/<device-name>/<event>`, e.g. `Modbus/192_168_1_100/unit1/voltage`.
+
 ### Options
 
 | Option | Short | Default | Description |
@@ -32,8 +34,12 @@ uv run main.py trace 192.168.1.100
 | `--stopbits` | | `1` | Stop bits: `1` or `2` |
 | `--bytesize` | | `8` | Data bits: `7` or `8` |
 | `--unit-id` | `-u` | `1` | Modbus slave/unit ID |
-| `--interval` | `-i` | `1.0` | Poll interval in seconds |
+| `--name` | | endpoint | Connection name in the trace (default: sanitized host or serial port) |
+| `--device-name` | | `unit<ID>` | Device name in the trace |
+| `--rate` | `-r` | `1.0` | Poll rate (s) for registers without their own `rate` |
 | `--timeout` | | `3.0` | Request timeout in seconds |
+| `--retries` | | `1` | Extra attempts per request (0-5) |
+| `--request-delay-ms` | | `0` | Minimum gap between requests (0-5000) |
 | `--block-reads` / `--no-block-reads` | | on | Coalesce contiguous registers into range reads |
 | `--max-block-size` | | `125` | Max registers per range read (1–125) |
 | `--max-read-gap` | | `0` | Max uncovered registers to bridge within a block |

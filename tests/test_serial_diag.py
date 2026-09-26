@@ -15,7 +15,7 @@ import sys
 import pytest
 
 from zelos_extension_modbus import client as client_module
-from zelos_extension_modbus.client import ModbusClient
+from zelos_extension_modbus.client import ModbusConnection
 from zelos_extension_modbus.serial_diag import diagnose_serial_port
 
 
@@ -173,7 +173,7 @@ class TestConnectDiagnosticsThrottle:
 
         monkeypatch.setattr(client_module, "diagnose_serial_port", fake_diag)
 
-        client = ModbusClient(transport="rtu", serial_port="/dev/ttyUSB0")
+        client = ModbusConnection(transport="rtu", serial_port="/dev/ttyUSB0")
 
         async def scenario():
             client._create_client = lambda: _FakeClient(connected=False)
@@ -198,7 +198,7 @@ class TestConnectDiagnosticsThrottle:
             client_module, "diagnose_serial_port", lambda port, **_k: calls.append(port) or []
         )
 
-        client = ModbusClient(transport="tcp")
+        client = ModbusConnection(transport="tcp")
 
         async def scenario():
             client._create_client = lambda: _FakeClient(connected=False)

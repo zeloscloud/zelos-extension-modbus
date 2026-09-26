@@ -19,20 +19,32 @@ import subprocess
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import zelos_sdk
+from conftest import free_port, poll_once, wait_listening
+from pymodbus.exceptions import ModbusIOException
+from pymodbus.pdu import ExceptionResponse
 
 from zelos_extension_modbus import actions, registry
 from zelos_extension_modbus.blocks import ReadBlock, plan_blocks
 from zelos_extension_modbus.client import (
-    ModbusClient,
+    REFUSED_RETRY,
+    ModbusConnection,
+    ModbusDevice,
+    RequestFailed,
+    _is_connection_error,
     _reorder_registers,
     decode_block,
     decode_value,
+    encode_register,
     encode_value,
 )
+from zelos_extension_modbus.constants import trace_layout
 from zelos_extension_modbus.demo.simulator import (
     PowerMeterSimulator,
     create_demo_context,
@@ -41,6 +53,37 @@ from zelos_extension_modbus.demo.simulator import (
     uint32_to_registers,
 )
 from zelos_extension_modbus.register_map import Register, RegisterMap
+
+_RATE_STATUS = (
+    "requested_rate",
+    "achieved_rate",
+    "overload_pct",
+    "demoted",
+    "retry_in_s",
+    "tiers",
+    "refused",
+)
+
+_CONNECTION_KEYS = {
+    "transport",
+    "host",
+    "port",
+    "serial_port",
+    "baudrate",
+    "parity",
+    "stopbits",
+    "bytesize",
+    "timeout",
+    "retries",
+    "request_delay_ms",
+}
+
+
+def _device(**kwargs) -> ModbusDevice:
+    """A device on its own connection named "c"; kwargs split between the two."""
+    link = {k: kwargs.pop(k) for k in list(kwargs) if k in _CONNECTION_KEYS}
+    return ModbusDevice(ModbusConnection(name="c", **link), **kwargs)
+
 
 # =============================================================================
 # Register Map Tests
@@ -63,129 +106,53 @@ class TestRegister:
         assert Register(address=0, name="t", datatype="float32").count == 2
         assert Register(address=0, name="t", datatype="float64").count == 4
 
-    def test_invalid_type_raises(self):
-        """Invalid register type raises ValueError."""
-        with pytest.raises(ValueError, match="Invalid register type"):
-            Register(address=0, name="test", type="invalid")
+    @pytest.mark.parametrize(
+        ("field", "message"),
+        [
+            ("type", "Invalid register type"),
+            ("datatype", "Invalid datatype"),
+            ("byte_order", "Invalid byte_order"),
+        ],
+    )
+    def test_invalid_field_raises(self, field, message):
+        with pytest.raises(ValueError, match=message):
+            Register(address=0, name="test", **{field: "invalid"})
 
-    def test_invalid_datatype_raises(self):
-        """Invalid datatype raises ValueError."""
-        with pytest.raises(ValueError, match="Invalid datatype"):
-            Register(address=0, name="test", datatype="invalid")
-
-    def test_invalid_byte_order_raises(self):
-        """Invalid byte_order raises ValueError."""
-        with pytest.raises(ValueError, match="Invalid byte_order"):
-            Register(address=0, name="test", byte_order="invalid")
-
-    def test_byte_order_defaults_to_big(self):
-        """Default byte order is big endian."""
-        reg = Register(address=0, name="test")
-        assert reg.byte_order == "big"
-
-    def test_valid_byte_orders(self):
-        """All valid byte orders are accepted."""
+    def test_byte_orders(self):
+        """Default big; every ByteOrder is accepted."""
+        assert Register(address=0, name="test").byte_order == "big"
         for order in ["big", "little", "big_swap", "little_swap"]:
-            reg = Register(address=0, name="test", byte_order=order)
-            assert reg.byte_order == order
+            assert Register(address=0, name="test", byte_order=order).byte_order == order
 
-    def test_writable_defaults_true(self):
-        """Holding registers and coils are writable by default."""
-        assert Register(address=0, name="t", type="holding").writable is True
-        assert Register(address=0, name="t", type="coil").writable is True
-
-    def test_input_registers_not_writable(self):
-        """Input registers and discrete inputs are read-only."""
-        assert Register(address=0, name="t", type="input").writable is False
-        assert Register(address=0, name="t", type="discrete_input").writable is False
+    @pytest.mark.parametrize(
+        ("type_", "writable"),
+        [("holding", True), ("coil", True), ("input", False), ("discrete_input", False)],
+    )
+    def test_writable_by_type(self, type_, writable):
+        """Holding and coil default writable; input and discrete input are read-only."""
+        assert Register(address=0, name="t", type=type_).writable is writable
 
     def test_name_defaults_to_r_address(self):
-        """Omitting name defaults it to r<address>."""
-        assert Register(address=42).name == "r42"
-        assert Register(address=7, name="").name == "r7"
+        """Omitting name defaults it to r<address> in the map's base (default 1)."""
+        assert Register(address=6, name="").name == "r7"  # wire 6
+        assert Register(address=6, base=0).name == "r6"
 
-    def test_poll_interval_defaults_none(self):
-        """poll_interval defaults to None (use interface interval)."""
-        assert Register(address=0, name="t").poll_interval is None
-
-    def test_poll_interval_positive_ok(self):
-        """A positive poll_interval is accepted."""
-        assert Register(address=0, name="t", poll_interval=5.0).poll_interval == 5.0
-
-    def test_poll_interval_zero_disables(self):
-        """A poll_interval of 0 is accepted and disables polling."""
-        reg = Register(address=0, name="t", poll_interval=0)
-        assert reg.poll_interval == 0
-        assert reg.polled is False
-
-    def test_polled_property(self):
-        """polled is True unless poll_interval is exactly 0."""
-        assert Register(address=0, name="t").polled is True  # None -> interface rate
-        assert Register(address=0, name="t", poll_interval=5.0).polled is True
-        assert Register(address=0, name="t", poll_interval=0).polled is False
-
-    def test_poll_interval_negative_raises(self):
-        """A negative poll_interval raises ValueError."""
-        with pytest.raises(ValueError, match="poll_interval must be >= 0"):
-            Register(address=0, name="t", poll_interval=-1.0)
-        with pytest.raises(ValueError, match="poll_interval must be >= 0"):
-            Register(address=0, name="t", poll_interval=-0.5)
-
-    def test_poll_interval_below_min_raises(self):
-        """A positive poll_interval below MIN_POLL_INTERVAL is rejected."""
-        with pytest.raises(ValueError, match="poll_interval must be 0"):
-            Register(address=0, name="t", poll_interval=0.005)
-
-    def test_poll_interval_at_min_ok(self):
-        """poll_interval exactly at MIN_POLL_INTERVAL (0.01) is accepted."""
-        assert Register(address=0, name="t", poll_interval=0.01).poll_interval == 0.01
-
-    def test_poll_interval_zero_still_disables_below_min(self):
-        """0 stays the disable sentinel — the sub-minimum rule never catches it."""
-        reg = Register(address=0, name="t", poll_interval=0)
-        assert reg.poll_interval == 0
-        assert reg.polled is False
-
-
-class TestPollIntervalTypeRejection:
-    """poll_interval must be a real number — not a string, and not a bool."""
-
-    def test_string_rejected_at_register(self):
-        """A string poll_interval raises ValueError, not TypeError."""
-        with pytest.raises(ValueError, match="poll_interval must be a number"):
-            Register(address=0, name="t", poll_interval="2")
-
-    def test_true_rejected_at_register(self):
-        """bool True must not sneak through as 1 (bool is an int subclass)."""
-        with pytest.raises(ValueError, match="poll_interval must be a number"):
-            Register(address=0, name="t", poll_interval=True)
-
-    def test_false_rejected_at_register(self):
-        """bool False must not sneak through as 0 (which would disable polling)."""
-        with pytest.raises(ValueError, match="poll_interval must be a number"):
-            Register(address=0, name="t", poll_interval=False)
-
-    def test_bad_type_rejected_from_dict(self):
-        """A non-numeric poll_interval in JSON raises at load (from_dict passthrough).
-
-        Register-level tests above pin the string/bool cases; this one representative
-        case confirms from_dict routes them through the same validation.
-        """
-        with pytest.raises(ValueError, match="poll_interval must be a number"):
-            RegisterMap.from_dict(
-                {"events": {"e": [{"name": "x", "address": 0, "poll_interval": "2"}]}}
-            )
+    @pytest.mark.parametrize("rate", [-1.0, 0.005, "2", True, False])
+    def test_bad_rate_raises(self, rate):
+        """rate is 0 (not polled) or a number >= MIN_RATE; strings and bools are rejected."""
+        with pytest.raises(ValueError, match="rate must be"):
+            Register(address=0, name="t", rate=rate)
 
 
 class TestRegisterMap:
     """Test RegisterMap parsing."""
 
     def test_from_dict_creates_events(self):
-        """Events are correctly parsed from dict."""
+        """Events parse; the same field name in distinct events is fine."""
         data = {
             "events": {
-                "voltage": [{"name": "L1", "address": 0}],
-                "current": [{"name": "L1", "address": 6}],
+                "voltage": [{"name": "L1", "address": 1}],
+                "current": [{"name": "L1", "address": 7}],
             }
         }
         reg_map = RegisterMap.from_dict(data)
@@ -197,8 +164,8 @@ class TestRegisterMap:
         data = {
             "events": {
                 "status": [
-                    {"name": "temp", "address": 0, "type": "holding"},
-                    {"name": "alarm", "address": 0, "type": "coil"},
+                    {"name": "temp", "address": 1, "type": "holding"},
+                    {"name": "alarm", "address": 1, "type": "coil"},
                 ]
             }
         }
@@ -209,7 +176,7 @@ class TestRegisterMap:
 
     def test_from_file(self):
         """Register map loads from JSON file."""
-        data = {"events": {"test": [{"name": "reg", "address": 0}]}}
+        data = {"events": {"test": [{"name": "reg", "address": 1}]}}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(data, f)
             f.flush()
@@ -221,8 +188,8 @@ class TestRegisterMap:
         """Find register by name across events."""
         data = {
             "events": {
-                "a": [{"name": "voltage", "address": 0}],
-                "b": [{"name": "current", "address": 1}],
+                "a": [{"name": "voltage", "address": 1}],
+                "b": [{"name": "current", "address": 2}],
             }
         }
         reg_map = RegisterMap.from_dict(data)
@@ -235,12 +202,12 @@ class TestRegisterMap:
         data = {
             "events": {
                 "sensors": [
-                    {"name": "temp", "address": 0, "type": "holding"},
-                    {"name": "sensor", "address": 1, "type": "input"},
+                    {"name": "temp", "address": 1, "type": "holding"},
+                    {"name": "sensor", "address": 2, "type": "input"},
                 ],
                 "controls": [
-                    {"name": "relay", "address": 0, "type": "coil"},
-                    {"name": "status", "address": 0, "type": "discrete_input"},
+                    {"name": "relay", "address": 1, "type": "coil"},
+                    {"name": "status", "address": 1, "type": "discrete_input"},
                 ],
             }
         }
@@ -249,92 +216,79 @@ class TestRegisterMap:
         assert len(writable) == 2
         assert {r.name for r in writable} == {"temp", "relay"}
 
-    def test_byte_order_parsed_from_dict(self):
-        """byte_order is correctly parsed from JSON."""
-        data = {
-            "events": {
-                "test": [
-                    {"name": "big_val", "address": 0, "byte_order": "big"},
-                    {"name": "swapped", "address": 2, "byte_order": "big_swap"},
-                ]
-            }
-        }
-        reg_map = RegisterMap.from_dict(data)
-        assert reg_map.get_by_name("big_val").byte_order == "big"
-        assert reg_map.get_by_name("swapped").byte_order == "big_swap"
-
     def test_from_dict_name_optional(self):
         """A register with no name defaults to r<address>."""
-        data = {"events": {"e": [{"address": 5}, {"address": 6}]}}
+        data = {"events": {"e": [{"address": 6}, {"address": 7}]}}
         reg_map = RegisterMap.from_dict(data)
         names = [r.name for r in reg_map.get_event("e")]
-        assert names == ["r5", "r6"]
+        assert names == ["r6", "r7"]  # the map's (1-based) address
 
-    def test_poll_interval_parsed_from_dict(self):
-        """poll_interval is parsed from JSON when present."""
+    def test_rate_from_dict(self):
+        """Absent rate inherits (None); a number is kept; JSON null means not polled (0)."""
         data = {
             "events": {
                 "e": [
-                    {"name": "fast", "address": 0},
-                    {"name": "slow", "address": 1, "poll_interval": 5.0},
+                    {"name": "a", "address": 1},
+                    {"name": "b", "address": 2, "rate": 5.0},
+                    {"name": "c", "address": 3, "rate": None},
                 ]
             }
         }
         reg_map = RegisterMap.from_dict(data)
-        assert reg_map.get_by_name("fast").poll_interval is None
-        assert reg_map.get_by_name("slow").poll_interval == 5.0
+        assert [r.rate for r in reg_map.registers] == [None, 5.0, 0.0]
 
-    def test_poll_interval_zero_from_dict_disables(self):
-        """poll_interval: 0 in JSON parses as disabled."""
-        data = {"events": {"e": [{"name": "x", "address": 0, "poll_interval": 0}]}}
-        reg = RegisterMap.from_dict(data).get_by_name("x")
-        assert reg.poll_interval == 0
-        assert reg.polled is False
-
-    def test_poll_interval_null_from_dict_disables(self):
-        """Explicit poll_interval: null in JSON is translated to 0 (disabled)."""
-        data = {"events": {"e": [{"name": "x", "address": 0, "poll_interval": None}]}}
-        reg = RegisterMap.from_dict(data).get_by_name("x")
-        assert reg.poll_interval == 0.0
-        assert reg.polled is False
-
-    def test_poll_interval_absent_defaults_none(self):
-        """An absent poll_interval key keeps the interface-default rate (None)."""
-        data = {"events": {"e": [{"name": "x", "address": 0}]}}
-        reg = RegisterMap.from_dict(data).get_by_name("x")
-        assert reg.poll_interval is None
-        assert reg.polled is True
-
-    def test_poll_interval_negative_from_dict_raises(self):
-        """A negative poll_interval in JSON raises ValueError at load."""
-        for bad in (-1, -0.5):
-            with pytest.raises(ValueError, match="poll_interval must be >= 0"):
-                RegisterMap.from_dict(
-                    {"events": {"e": [{"name": "x", "address": 0, "poll_interval": bad}]}}
-                )
-
-    def test_duplicate_field_names_raise(self):
-        """Raw duplicate field names within an event raise ValueError."""
-        data = {"events": {"e": [{"name": "v", "address": 0}, {"name": "v", "address": 1}]}}
-        with pytest.raises(ValueError, match="Duplicate field name 'v' in event 'e'"):
+    @pytest.mark.parametrize(("a", "b", "field"), [("v", "v", "v"), ("a.b", "a_b", "a_b")])
+    def test_duplicate_field_names_raise(self, a, b, field):
+        """Names that collide raw or after sanitization (a.b vs a_b) fail the load."""
+        data = {"events": {"e": [{"name": a, "address": 1}, {"name": b, "address": 2}]}}
+        with pytest.raises(ValueError, match=f"Duplicate field name '{field}' in event 'e'"):
             RegisterMap.from_dict(data)
 
-    def test_sanitized_field_name_collision_raises(self):
-        """Names that collide after sanitization (a.b vs a_b) raise ValueError."""
-        data = {"events": {"e": [{"name": "a.b", "address": 0}, {"name": "a_b", "address": 1}]}}
-        with pytest.raises(ValueError, match="Duplicate field name 'a_b' in event 'e'"):
-            RegisterMap.from_dict(data)
+    @pytest.mark.parametrize(
+        "device",
+        [
+            {"bogus": 1},
+            {"max_block_size": 0},
+            {"max_block_size": 126},
+            {"max_block_size": True},
+            {"max_read_gap": -1},
+            {"write_mode": "fc6"},
+            {"byte_order": "middle"},
+            {"max_bit_block_size": 2001},
+            {"min_rate": -1},
+            {"close_after_sweep": 1},
+            {"address_base": 2},
+            [],
+        ],
+    )
+    def test_device_block_invalid_raises(self, device):
+        """An unknown key or bad value in the map "device" block fails the load."""
+        with pytest.raises(ValueError):
+            RegisterMap.from_dict({"device": device, "events": {}})
 
-    def test_distinct_events_same_field_name_ok(self):
-        """The same field name in distinct events loads fine."""
-        data = {
-            "events": {
-                "a": [{"name": "value", "address": 0}],
-                "b": [{"name": "value", "address": 1}],
-            }
+    def test_device_block_defaults(self):
+        """device.byte_order defaults registers without their own; addresses are 1-based
+        by default (map 1 = wire 0) and wire addresses with address_base 0."""
+        device = {"byte_order": "big_swap", "max_block_size": 60}
+        events = {
+            "e": [
+                {"name": "a", "address": 1},
+                {"name": "b", "address": 3, "byte_order": "big"},
+                {"name": "c", "type": "coil", "address": 1},
+            ]
         }
-        reg_map = RegisterMap.from_dict(data)
-        assert len(reg_map.registers) == 2
+        reg_map = RegisterMap.from_dict({"device": device, "events": events})
+        assert reg_map.device == device
+        assert [r.address for r in reg_map.registers] == [0, 2, 0]
+        assert [r.map_address for r in reg_map.registers] == [1, 3, 1]
+        assert reg_map.get_by_name("a").byte_order == "big_swap"
+        assert reg_map.get_by_name("b").byte_order == "big"
+        with pytest.raises(ValueError, match="address_base 1"):
+            RegisterMap.from_dict({"device": device, "events": {"e": [{"address": 0}]}})
+        wire = RegisterMap.from_dict(
+            {"device": {"address_base": 0}, "events": {"e": [{"address": 0}]}}
+        )
+        assert (wire.registers[0].address, wire.registers[0].name) == (0, "r0")
 
 
 # =============================================================================
@@ -346,78 +300,61 @@ class TestValueCodec:
     """Test value encoding and decoding."""
 
     @pytest.mark.parametrize(
-        "datatype,raw,expected",
+        ("datatype", "raw", "scale", "expected"),
         [
-            ("uint16", [1000], 1000),
-            ("int16", [65535], -1),
-            ("int16", [32768], -32768),
-            ("bool", [1], True),
-            ("bool", [0], False),
+            ("uint16", [1000], 1, 1000),
+            ("int16", [65535], 1, -1),
+            ("int16", [32768], 1, -32768),
+            ("bool", [1], 1, True),
+            ("bool", [0], 1, False),
+            ("uint32", [0x0001, 0x0000], 1, 65536),
+            ("float32", [0x4048, 0xF5C3], 1, pytest.approx(3.14, abs=0.01)),
+            ("uint16", [1000], 0.1, 100),
+            # Unscaled 64-bit stays exact past 2**53 (a float multiply would round).
+            ("uint64", [0xFFFF] * 4, 1, 2**64 - 1),
+            ("uint64", [0x0020, 0x0000, 0x0000, 0x0001], 1, 2**53 + 1),
+            ("int64", [0x7FFF, 0xFFFF, 0xFFFF, 0xFFFF], 1, 2**63 - 1),
+            ("int64", [0x8000, 0x0000, 0x0000, 0x0000], 1, -(2**63)),
+            ("int64", [0xFFFF] * 4, 1, -1),
         ],
     )
-    def test_decode_basic(self, datatype, raw, expected):
-        """Basic decoding for single-register types."""
-        assert decode_value(raw, datatype) == expected
-
-    def test_decode_uint32(self):
-        """32-bit values span two registers."""
-        # 0x00010000 = 65536
-        assert decode_value([0x0001, 0x0000], "uint32") == 65536
-
-    def test_decode_float32(self):
-        """IEEE 754 float32 decoding."""
-        # 3.14 ≈ 0x4048F5C3
-        result = decode_value([0x4048, 0xF5C3], "float32")
-        assert abs(result - 3.14) < 0.01
-
-    def test_decode_with_scale(self):
-        """Scale factor is applied after decoding."""
-        assert decode_value([1000], "uint16", scale=0.1) == 100
-
-    def test_decode_uint64_exact_at_scale_one(self):
-        """An unscaled uint64 decodes exactly, past the 2**53 float mantissa limit."""
-        # int(0xFFFF_FFFF_FFFF_FFFF * 1.0) would round up to 2**64.
-        assert decode_value([0xFFFF] * 4, "uint64") == 2**64 - 1
-        assert decode_value([0x0020, 0x0000, 0x0000, 0x0001], "uint64") == 2**53 + 1
-
-    def test_decode_int64_exact_at_scale_one(self):
-        """The same exactness holds for the signed 64-bit extremes."""
-        assert decode_value([0x7FFF, 0xFFFF, 0xFFFF, 0xFFFF], "int64") == 2**63 - 1
-        assert decode_value([0x8000, 0x0000, 0x0000, 0x0000], "int64") == -(2**63)
-        assert decode_value([0xFFFF] * 4, "int64") == -1
-
-    def test_decode_scaled_integer_still_truncates(self):
-        """A scaled integer read keeps its existing int() truncation semantics."""
-        assert decode_value([3], "uint16", scale=0.5) == 1  # int(1.5)
-        assert decode_value([0x0000, 0x03E8], "uint32", scale=2.0) == 2000
+    def test_decode(self, datatype, raw, scale, expected):
+        assert decode_value(raw, datatype, scale=scale) == expected
 
     @pytest.mark.parametrize(
-        "datatype,value,expected",
+        ("datatype", "value", "scale", "expected"),
         [
-            ("uint16", 1000, [1000]),
-            ("int16", -1, [65535]),
-            ("bool", True, [1]),
-            ("bool", False, [0]),
+            ("uint16", 1000, 1, [1000]),
+            ("int16", -1, 1, [65535]),
+            ("bool", True, 1, [1]),
+            ("bool", False, 1, [0]),
+            ("uint32", 65536, 1, [0x0001, 0x0000]),
+            ("uint16", 100, 0.1, [1000]),
         ],
     )
-    def test_encode_basic(self, datatype, value, expected):
-        """Basic encoding for single-register types."""
-        assert encode_value(value, datatype) == expected
+    def test_encode(self, datatype, value, scale, expected):
+        assert encode_value(value, datatype, scale=scale) == expected
 
-    def test_encode_uint32(self):
-        """32-bit values encode to two registers."""
-        assert encode_value(65536, "uint32") == [0x0001, 0x0000]
+    def test_encode_out_of_range(self):
+        with pytest.raises(ValueError, match="out of range"):
+            encode_value(6553.6, "uint16", scale=0.1)
 
-    def test_encode_with_scale(self):
-        """Scale factor is applied before encoding."""
-        assert encode_value(100, "uint16", scale=0.1) == [1000]
-
-    def test_roundtrip(self):
-        """Encode then decode returns original value."""
-        for value, datatype in [(1234, "uint16"), (-100, "int16"), (100000, "uint32")]:
-            encoded = encode_value(value, datatype)
-            decoded = decode_value(encoded, datatype)
-            assert decoded == value
+    @pytest.mark.parametrize(
+        ("datatype", "scale", "value", "nearest"),
+        [("uint16", 1.0, 2.5, "3"), ("int16", 1.0, -1.9, "-2"), ("uint16", 0.1, 230.57, "230.6")],
+    )
+    def test_write_must_round_trip(self, datatype, scale, value, nearest):
+        """A value the register cannot hold exactly is refused, naming the nearest one."""
+        reg = Register(address=0, datatype=datatype, scale=scale)
+        with pytest.raises(ValueError, match=f"nearest writable value is {nearest}$"):
+            encode_register(reg, value)
+        assert encode_register(reg, float(nearest)) == (
+            encode_value(float(nearest), datatype, scale),
+            float(nearest),
+        )
+        assert encode_register(Register(address=0, datatype="float32"), 0.1)[1] == pytest.approx(
+            0.1
+        )
 
 
 class TestByteOrder:
@@ -429,51 +366,53 @@ class TestByteOrder:
         for order in ["big", "little", "big_swap", "little_swap"]:
             assert _reorder_registers(regs, order) == [0x1234]
 
-    def test_reorder_big_endian(self):
-        """Big endian keeps registers in original order."""
-        regs = [0xABCD, 0xEF01]
-        assert _reorder_registers(regs, "big") == [0xABCD, 0xEF01]
-
-    def test_reorder_little_endian(self):
-        """Little endian reverses register order."""
-        regs = [0xABCD, 0xEF01]
-        assert _reorder_registers(regs, "little") == [0xEF01, 0xABCD]
-
-    def test_reorder_big_swap(self):
-        """Big swap swaps word pairs."""
-        regs = [0xABCD, 0xEF01]
-        assert _reorder_registers(regs, "big_swap") == [0xEF01, 0xABCD]
-
-    def test_reorder_little_swap_32bit(self):
-        """Little swap on 32-bit: BA DC."""
-        regs = [0xABCD, 0xEF01]
-        assert _reorder_registers(regs, "little_swap") == [0xEF01, 0xABCD]
-
-    def test_reorder_64bit_little(self):
-        """Little endian on 64-bit reverses all four registers."""
-        regs = [0x0001, 0x0002, 0x0003, 0x0004]
-        assert _reorder_registers(regs, "little") == [0x0004, 0x0003, 0x0002, 0x0001]
-
-    def test_decode_float32_big_swap(self):
-        """Decode float32 with word-swapped byte order."""
-        # 3.14 in big endian is [0x4048, 0xF5C3]
-        # Word swapped would be [0xF5C3, 0x4048]
-        result = decode_value([0xF5C3, 0x4048], "float32", byte_order="big_swap")
-        assert abs(result - 3.14) < 0.01
-
-    def test_encode_uint32_big_swap(self):
-        """Encode uint32 with word-swapped byte order."""
-        # 65536 (0x00010000) in big endian is [0x0001, 0x0000]
-        # Word swapped would be [0x0000, 0x0001]
-        result = encode_value(65536, "uint32", byte_order="big_swap")
-        assert result == [0x0000, 0x0001]
-
-    def test_roundtrip_all_byte_orders(self):
-        """Encode then decode with same byte order returns original."""
-        for order in ["big", "little", "big_swap", "little_swap"]:
-            encoded = encode_value(123456, "uint32", byte_order=order)
-            decoded = decode_value(encoded, "uint32", byte_order=order)
-            assert decoded == 123456, f"Failed for byte_order={order}"
+    @pytest.mark.parametrize(
+        "datatype,value,scale,words",
+        [
+            (
+                "float32",
+                1.0,
+                1,
+                {
+                    "big": [0x3F80, 0x0000],
+                    "little": [0x0000, 0x803F],
+                    "big_swap": [0x0000, 0x3F80],
+                    "little_swap": [0x803F, 0x0000],
+                },
+            ),
+            (
+                "uint32",
+                0x11223344,
+                1,
+                {
+                    "big": [0x1122, 0x3344],
+                    "little": [0x4433, 0x2211],
+                    "big_swap": [0x3344, 0x1122],
+                    "little_swap": [0x2211, 0x4433],
+                },
+            ),
+            (
+                "uint64",
+                0x1122334455667788,
+                1,
+                {
+                    "big": [0x1122, 0x3344, 0x5566, 0x7788],
+                    "little": [0x8877, 0x6655, 0x4433, 0x2211],
+                    "big_swap": [0x7788, 0x5566, 0x3344, 0x1122],
+                    "little_swap": [0x2211, 0x4433, 0x6655, 0x8877],
+                },
+            ),
+            # A scaled integer decodes to a float, and encodes rounded to nearest.
+            ("int32", -123.4, 0.1, {"big": [0xFFFF, 0xFB2E], "little": [0x2EFB, 0xFFFF]}),
+            ("uint16", 123.4, 0.1, {"big": [1234], "little": [1234]}),
+        ],
+    )
+    def test_known_vectors(self, datatype, value, scale, words):
+        """Standard orders (A = MSB): big ABCD, little DCBA, big_swap CDAB, little_swap BADC."""
+        for order, raw in words.items():
+            assert encode_value(value, datatype, scale, order) == raw
+            decoded = decode_value(raw, datatype, scale, order)
+            assert decoded == pytest.approx(value) and type(decoded) is type(value)
 
 
 # =============================================================================
@@ -489,74 +428,64 @@ def _block_tuples(blocks):
 class TestBlockPlanner:
     """Test the pure block-read planner."""
 
-    def test_contiguous_coalescing(self):
-        """Adjacent same-type registers merge into one block."""
-        regs = [
-            Register(address=0, name="a", datatype="float32"),
-            Register(address=2, name="b", datatype="float32"),
-            Register(address=4, name="c", datatype="float32"),
-        ]
-        assert _block_tuples(plan_blocks(regs)) == [("holding", 0, 6)]
-
-    def test_span_never_split_float32(self):
-        """A float32 (2 registers) is always kept whole within its block."""
-        regs = [Register(address=0, name="a", datatype="float32")]
-        blocks = plan_blocks(regs)
-        assert _block_tuples(blocks) == [("holding", 0, 2)]
-
-    def test_oversized_span_single_block(self):
-        """A span wider than max_block_size yields one oversized block, not a failure."""
-        regs = [Register(address=0, name="a", datatype="float32")]
-        blocks = plan_blocks(regs, max_block_size=1)
-        assert _block_tuples(blocks) == [("holding", 0, 2)]
-
-    def test_max_block_size_splitting(self):
-        """Blocks split when they would exceed max_block_size."""
-        regs = [Register(address=a, name=f"r{a}") for a in range(4)]
-        blocks = plan_blocks(regs, max_block_size=2)
-        assert _block_tuples(blocks) == [("holding", 0, 2), ("holding", 2, 2)]
-
-    def test_gap_zero_splits(self):
-        """With max_read_gap=0 a one-address hole starts a new block."""
-        regs = [Register(address=0, name="a"), Register(address=2, name="b")]
-        blocks = plan_blocks(regs, max_read_gap=0)
-        assert _block_tuples(blocks) == [("holding", 0, 1), ("holding", 2, 1)]
-
-    def test_gap_bridged(self):
-        """A gap within max_read_gap is bridged into one block."""
-        regs = [Register(address=0, name="a"), Register(address=2, name="b")]
-        blocks = plan_blocks(regs, max_read_gap=1)
-        assert _block_tuples(blocks) == [("holding", 0, 3)]
-
-    def test_duplicate_addresses_share_block(self):
-        """Duplicate/overlapping addresses merge into a single block."""
-        regs = [Register(address=5, name="a"), Register(address=5, name="b")]
-        blocks = plan_blocks(regs)
-        assert _block_tuples(blocks) == [("holding", 5, 1)]
-        assert len(blocks[0].registers) == 2
-
-    def test_type_separation(self):
-        """Different register types never share a block."""
-        regs = [
-            Register(address=0, name="h", type="holding"),
-            Register(address=0, name="c", type="coil"),
-            Register(address=0, name="i", type="input"),
-            Register(address=0, name="d", type="discrete_input"),
-        ]
-        blocks = plan_blocks(regs)
-        # Deterministic, sorted by type string then address.
-        assert _block_tuples(blocks) == [
-            ("coil", 0, 1),
-            ("discrete_input", 0, 1),
-            ("holding", 0, 1),
-            ("input", 0, 1),
-        ]
-
-    def test_coils_coalesce(self):
-        """Consecutive coils merge (each bit spans one address)."""
-        regs = [Register(address=a, name=f"c{a}", type="coil") for a in range(3)]
-        blocks = plan_blocks(regs)
-        assert _block_tuples(blocks) == [("coil", 0, 3)]
+    @pytest.mark.parametrize(
+        ("regs", "kwargs", "expected"),
+        [
+            pytest.param(
+                [Register(address=a, name=f"r{a}", datatype="float32") for a in (0, 2, 4)],
+                {},
+                [("holding", 0, 6)],
+                id="contiguous",
+            ),
+            pytest.param(
+                [Register(address=0, name="a", datatype="float32")],
+                {"max_block_size": 1},
+                [("holding", 0, 2)],
+                id="oversized-span-one-block",
+            ),
+            pytest.param(
+                [Register(address=a, name=f"r{a}") for a in range(4)],
+                {"max_block_size": 2},
+                [("holding", 0, 2), ("holding", 2, 2)],
+                id="max-block-size",
+            ),
+            pytest.param(
+                [Register(address=0, name="a"), Register(address=2, name="b")],
+                {"max_read_gap": 0},
+                [("holding", 0, 1), ("holding", 2, 1)],
+                id="gap-zero-splits",
+            ),
+            pytest.param(
+                [Register(address=0, name="a"), Register(address=2, name="b")],
+                {"max_read_gap": 1},
+                [("holding", 0, 3)],
+                id="gap-bridged",
+            ),
+            pytest.param(
+                [Register(address=5, name="a"), Register(address=5, name="b")],
+                {},
+                [("holding", 5, 1)],
+                id="duplicate-address",
+            ),
+            pytest.param(
+                [Register(address=0, name=t, type=t) for t in ("holding", "coil", "input")]
+                + [Register(address=0, name="d", type="discrete_input")],
+                {},
+                [("coil", 0, 1), ("discrete_input", 0, 1), ("holding", 0, 1), ("input", 0, 1)],
+                id="types-separate-sorted",
+            ),
+            pytest.param(
+                [Register(address=a, name=f"c{a}", type="coil") for a in range(3)],
+                {},
+                [("coil", 0, 3)],
+                id="coils-coalesce",
+            ),
+        ],
+    )
+    def test_plan(self, regs, kwargs, expected):
+        blocks = plan_blocks(regs, **kwargs)
+        assert _block_tuples(blocks) == expected
+        assert sum(len(b.registers) for b in blocks) == len(regs)
 
     def test_demo_map_coalescing(self, register_map):
         """The bundled demo map coalesces into the expected transactions."""
@@ -619,34 +548,19 @@ class TestDecodeBlock:
 # =============================================================================
 
 
-class TestSimulatorHelpers:
-    """Test simulator helper functions."""
-
-    def test_float32_to_registers(self):
-        """Float32 converts to two big-endian registers."""
-        r1, r2 = float32_to_registers(3.14)
-        # Reconstruct and verify
-        packed = struct.pack(">HH", r1, r2)
-        result = struct.unpack(">f", packed)[0]
-        assert abs(result - 3.14) < 0.01
-
-    def test_uint32_to_registers(self):
-        """Uint32 converts to two big-endian registers."""
-        r1, r2 = uint32_to_registers(65536)
-        assert r1 == 0x0001
-        assert r2 == 0x0000
-
-
 class TestPowerMeterSimulator:
-    """Test simulator physics logic."""
+    """Simulator helpers and physics."""
 
-    def test_update_returns_all_fields(self):
-        """Update returns complete value dictionary."""
-        sim = PowerMeterSimulator()
-        values = sim.update(dt=0.1)
+    def test_register_helpers(self):
+        """float32/uint32 split into two big-endian registers."""
+        packed = struct.pack(">HH", *float32_to_registers(3.14))
+        assert struct.unpack(">f", packed)[0] == pytest.approx(3.14, abs=0.01)
+        assert uint32_to_registers(65536) == (0x0001, 0x0000)
 
-        # Check all expected fields exist
-        expected = {
+    def test_update_values_in_range(self):
+        """Every field is produced; voltage, frequency and power factor near nominal."""
+        values = PowerMeterSimulator().update(dt=0.1)
+        assert set(values) == {
             "voltage_l1",
             "voltage_l2",
             "voltage_l3",
@@ -662,37 +576,17 @@ class TestPowerMeterSimulator:
             "relay2",
             "alarm",
         }
-        assert set(values.keys()) == expected
-
-    def test_voltage_near_nominal(self):
-        """Voltage stays within ±5% of nominal."""
-        sim = PowerMeterSimulator()
-        values = sim.update(dt=0.1)
-
         for phase in ["voltage_l1", "voltage_l2", "voltage_l3"]:
-            v = values[phase]
-            assert 218 < v < 242  # 230V ±5%
-
-    def test_frequency_near_nominal(self):
-        """Frequency stays near 50Hz."""
-        sim = PowerMeterSimulator()
-        values = sim.update(dt=0.1)
+            assert 218 < values[phase] < 242  # 230V +-5%
         assert 49.9 < values["frequency"] < 50.1
+        assert 0.7 < values["power_factor"] < 1.0
 
     def test_energy_accumulates(self):
-        """Energy increases over time."""
         sim = PowerMeterSimulator()
         sim.update(dt=1.0)
         e1 = sim.energy_total
         sim.update(dt=1.0)
-        e2 = sim.energy_total
-        assert e2 > e1
-
-    def test_power_factor_in_range(self):
-        """Power factor stays in valid range."""
-        sim = PowerMeterSimulator()
-        values = sim.update(dt=0.1)
-        assert 0.7 < values["power_factor"] < 1.0
+        assert sim.energy_total > e1
 
 
 class TestDemoServerSyncWrapper:
@@ -746,9 +640,10 @@ class TestDemoServerSyncWrapper:
 class DemoServer:
     """Helper to run demo server in background thread."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 15020):
-        self.host = host
-        self.port = port
+    def __init__(self, port: int | None = None, unit_ids=()):
+        self.host = "127.0.0.1"
+        self.port = port or free_port()
+        self.unit_ids = unit_ids
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server = None
@@ -757,8 +652,7 @@ class DemoServer:
         """Start server in background thread."""
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-        # Wait for server to be ready
-        time.sleep(0.5)
+        wait_listening(self.port)
 
     def _run(self):
         """Run server event loop."""
@@ -769,10 +663,13 @@ class DemoServer:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
-        context = create_demo_context()
-        simulator = PowerMeterSimulator()
-        self._updater = SimulatorUpdater(simulator, context, interval=0.05)
-        self._updater.start()
+        context = create_demo_context(self.unit_ids)
+        self._updaters = [
+            SimulatorUpdater(PowerMeterSimulator(), context, interval=0.05, unit_id=uid)
+            for uid in self.unit_ids or [0]
+        ]
+        for updater in self._updaters:
+            updater.start()
 
         async def run_server():
             self._server = ModbusTcpServer(context, address=(self.host, self.port))
@@ -783,7 +680,8 @@ class DemoServer:
         except Exception:
             pass
         finally:
-            self._updater.stop()
+            for updater in self._updaters:
+                updater.stop()
 
     def stop(self):
         """Stop the server and release the port."""
@@ -802,7 +700,7 @@ class DemoServer:
 @pytest.fixture(scope="module")
 def demo_server():
     """Fixture that starts demo server for integration tests."""
-    server = DemoServer(port=15020)
+    server = DemoServer()
     server.start()
     yield server
     server.stop()
@@ -817,28 +715,28 @@ def register_map():
 
 @pytest.fixture
 def client(demo_server, register_map):
-    """Create a connected ModbusClient."""
-    client = ModbusClient(
+    """Create a connected device."""
+    client = _device(
         host=demo_server.host,
         port=demo_server.port,
         register_map=register_map,
     )
 
     async def connect():
-        await client.connect()
+        await client.connection.connect()
 
     asyncio.get_event_loop().run_until_complete(connect())
     yield client
 
     async def disconnect():
-        await client.disconnect()
+        await client.connection.disconnect()
 
     asyncio.get_event_loop().run_until_complete(disconnect())
 
 
 def _demo_client(demo_server, register_map, **kwargs):
-    """A ModbusClient pointed at the demo server with the given register map."""
-    return ModbusClient(
+    """A device pointed at the demo server with the given register map."""
+    return _device(
         host=demo_server.host,
         port=demo_server.port,
         register_map=register_map,
@@ -850,261 +748,120 @@ def _connected_poll(client):
     """Connect, run one poll cycle, disconnect; return the poll results."""
 
     async def run():
-        await client.connect()
+        await client.connection.connect()
         try:
-            return await client._poll_registers()
+            return await poll_once(client)
         finally:
-            await client.disconnect()
+            await client.connection.disconnect()
 
     return asyncio.get_event_loop().run_until_complete(run())
 
 
-class TestDemoServerIntegration:
-    """Integration tests against the demo server."""
+@pytest.fixture(params=["tcp", "rtu"])
+def link_client(request, register_map):
+    """A connected device on the demo meter, over TCP or RTU (socat; skipped without it)."""
+    if request.param == "tcp":
+        server = request.getfixturevalue("demo_server")
+        dev = _device(host=server.host, port=server.port, register_map=register_map)
+    else:
+        _, client_port = request.getfixturevalue("serial_ports")
+        request.getfixturevalue("rtu_demo_server")
+        dev = _device(
+            transport="rtu", serial_port=client_port, timeout=2.0, register_map=register_map
+        )
+    run = asyncio.get_event_loop().run_until_complete
+    run(dev.connection.connect())
+    yield dev
+    run(dev.connection.disconnect())
 
-    def test_read_holding_register_float32(self, client):
-        """Read float32 holding register (voltage)."""
-        reg = client.register_map.get_by_name("L1")  # voltage L1
-        assert reg is not None
-        assert reg.type == "holding"
-        assert reg.datatype == "float32"
 
-        async def read():
-            return await client.read_register_value(reg)
+class TestLinkIntegration:
+    """Reads, writes and polls against the demo meter, over TCP and RTU."""
 
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value is not None
-        assert 200 < value < 260  # Reasonable voltage range
+    @pytest.mark.parametrize(
+        ("name", "check"),
+        [
+            ("L1", lambda v: 200 < v < 260),  # float32 holding
+            ("energy", lambda v: isinstance(v, int) and v >= 0),  # uint32 holding
+            ("temperature", lambda v: 0 < v < 100),  # int16, scale 0.1
+            ("firmware_version", lambda v: v == 0x0102),  # input
+            ("serial_number", lambda v: v == 12345678),  # uint32 input
+            ("relay1", lambda v: v in (True, False)),  # coil
+            ("grid_connected", lambda v: v is True),  # discrete input
+            ("calibration_factor", lambda v: abs(v - 1.0) < 0.01),  # float32 big_swap
+        ],
+    )
+    def test_read(self, link_client, name, check):
+        reg = link_client.register_map.get_by_name(name)
+        run = asyncio.get_event_loop().run_until_complete
+        value = run(link_client.read_register_value(reg))
+        assert value is not None and check(value)
 
-    def test_read_holding_register_uint32(self, client):
-        """Read uint32 holding register (energy)."""
-        reg = client.register_map.get_by_name("energy")
-        assert reg is not None
-        assert reg.datatype == "uint32"
+    @pytest.mark.parametrize(
+        ("name", "values"),
+        [
+            ("voltage_high_limit", [245]),  # uint16
+            ("power_limit", [-10000]),  # int32, signed
+            ("offset_value", [3.14159]),  # float32 big_swap
+            ("coil3", [True, False]),  # the simulator drives coils 0-2 only
+        ],
+    )
+    def test_write_reads_back(self, link_client, name, values):
+        if name == "coil3":
+            reg = Register(address=3, name=name, type="coil", datatype="bool")
+        else:
+            reg = link_client.register_map.get_by_name(name)
 
-        async def read():
-            return await client.read_register_value(reg)
+        async def run():
+            got = []
+            for value in values:
+                assert await link_client.write_register_value(reg, value) is True
+                got.append(await link_client.read_register_value(reg))
+            return got
 
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value is not None
-        assert isinstance(value, int)
-        assert value >= 0
+        got = asyncio.get_event_loop().run_until_complete(run())
+        assert got == [pytest.approx(v, abs=1e-3) if isinstance(v, float) else v for v in values]
 
-    def test_read_holding_register_int16_with_scale(self, client):
-        """Read int16 holding register with scale (temperature)."""
-        reg = client.register_map.get_by_name("temperature")
-        assert reg is not None
-        assert reg.datatype == "int16"
-        assert reg.scale == 0.1
-
-        async def read():
-            return await client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value is not None
-        # Temperature should be reasonable (raw value is scaled by 0.1)
-        assert 0 < value < 100
-
-    def test_read_input_register(self, client):
-        """Read input register (firmware_version)."""
-        reg = client.register_map.get_by_name("firmware_version")
-        assert reg is not None
-        assert reg.type == "input"
-        assert reg.writable is False
-
-        async def read():
-            return await client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value is not None
-        # Firmware version 0x0102 = 258
-        assert value == 0x0102
-
-    def test_read_input_register_uint32(self, client):
-        """Read uint32 input register (serial_number)."""
-        reg = client.register_map.get_by_name("serial_number")
-        assert reg is not None
-        assert reg.type == "input"
-        assert reg.datatype == "uint32"
-
-        async def read():
-            return await client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value == 12345678
-
-    def test_read_coil(self, client):
-        """Read coil register."""
-        reg = client.register_map.get_by_name("relay1")
-        assert reg is not None
-        assert reg.type == "coil"
-        assert reg.writable is True
-
-        async def read():
-            return await client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value in (True, False)
-
-    def test_read_discrete_input(self, client):
-        """Read discrete input register."""
-        reg = client.register_map.get_by_name("grid_connected")
-        assert reg is not None
-        assert reg.type == "discrete_input"
-        assert reg.writable is False
-
-        async def read():
-            return await client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        # Initial value is True (grid connected)
-        assert value is True
-
-    def test_read_swapped_float(self, client):
-        """Read float32 with big_swap byte order."""
-        reg = client.register_map.get_by_name("calibration_factor")
-        assert reg is not None
-        assert reg.datatype == "float32"
-        assert reg.byte_order == "big_swap"
-
-        async def read():
-            return await client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        # Initial value is 1.0
-        assert value is not None
-        assert abs(value - 1.0) < 0.01
-
-    def test_write_holding_register_uint16(self, client):
-        """Write uint16 holding register."""
-        reg = client.register_map.get_by_name("voltage_high_limit")
-        assert reg is not None
-        assert reg.type == "holding"
-        assert reg.datatype == "uint16"
-        assert reg.writable is True
-
-        async def write_and_read():
-            # Write new value
-            success = await client.write_register_value(reg, 245)
-            assert success is True
-
-            # Read back
-            value = await client.read_register_value(reg)
-            return value
-
-        value = asyncio.get_event_loop().run_until_complete(write_and_read())
-        assert value == 245
-
-    def test_write_holding_register_int32(self, client):
-        """Write int32 holding register."""
-        reg = client.register_map.get_by_name("power_limit")
-        assert reg is not None
-        assert reg.datatype == "int32"
-        assert reg.writable is True
-
-        async def write_and_read():
-            # Write new value (negative to test signed)
-            success = await client.write_register_value(reg, -10000)
-            assert success is True
-
-            # Read back
-            value = await client.read_register_value(reg)
-            return value
-
-        value = asyncio.get_event_loop().run_until_complete(write_and_read())
-        assert value == -10000
-
-    def test_write_coil(self, client):
-        """Write coil register at an address the simulator doesn't overwrite."""
-        # Use coil address 3 (simulator only writes 0,1,2) to avoid race conditions
-        from zelos_extension_modbus.register_map import Register
-
-        reg = Register(address=3, name="test_coil", type="coil", datatype="bool")
-
-        async def write_and_read():
-            # Write True
-            success = await client.write_register_value(reg, True)
-            assert success is True
-            value = await client.read_register_value(reg)
-            assert value is True
-
-            # Write False
-            success = await client.write_register_value(reg, False)
-            assert success is True
-            value = await client.read_register_value(reg)
-            assert value is False
-
-        asyncio.get_event_loop().run_until_complete(write_and_read())
-
-    def test_write_swapped_float(self, client):
-        """Write float32 with big_swap byte order."""
-        reg = client.register_map.get_by_name("offset_value")
-        assert reg is not None
-        assert reg.byte_order == "big_swap"
-
-        async def write_and_read():
-            # Write a specific value
-            success = await client.write_register_value(reg, 3.14159)
-            assert success is True
-
-            # Read back
-            value = await client.read_register_value(reg)
-            return value
-
-        value = asyncio.get_event_loop().run_until_complete(write_and_read())
-        assert abs(value - 3.14159) < 0.001
-
-    def test_write_input_register_fails(self, client):
-        """Writing to input register should fail."""
-        reg = client.register_map.get_by_name("firmware_version")
-        assert reg is not None
-        assert reg.type == "input"
-        assert reg.writable is False
-
-        async def try_write():
-            return await client.write_register_value(reg, 999)
-
-        success = asyncio.get_event_loop().run_until_complete(try_write())
-        assert success is False
-
-    def test_write_discrete_input_fails(self, client):
-        """Writing to discrete input should fail."""
-        reg = client.register_map.get_by_name("door_open")
-        assert reg is not None
-        assert reg.type == "discrete_input"
-        assert reg.writable is False
-
-        async def try_write():
-            return await client.write_register_value(reg, True)
-
-        success = asyncio.get_event_loop().run_until_complete(try_write())
-        assert success is False
-
-    def test_poll_all_events(self, client):
-        """Poll all registers and verify event structure."""
-
-        async def poll():
-            return await client._poll_registers()
-
-        results = asyncio.get_event_loop().run_until_complete(poll())
-
-        # Should have all events from register map
-        assert "voltage" in results
-        assert "current" in results
-        assert "power" in results
-        assert "status" in results
-        assert "inputs" in results
-        assert "digital_inputs" in results
-        assert "setpoints" in results
-        assert "swapped_floats" in results
-
-        # Voltage event should have L1, L2, L3
-        assert "L1" in results["voltage"]
-        assert "L2" in results["voltage"]
-        assert "L3" in results["voltage"]
-
-        # Check values are reasonable
+    def test_poll_all_events(self, link_client):
+        results = asyncio.get_event_loop().run_until_complete(poll_once(link_client))
+        assert set(results) >= {
+            "voltage",
+            "current",
+            "power",
+            "status",
+            "inputs",
+            "digital_inputs",
+            "setpoints",
+            "swapped_floats",
+        }
+        assert {"L1", "L2", "L3"} <= set(results["voltage"])
         assert 200 < results["voltage"]["L1"] < 260
+
+    @pytest.mark.parametrize("name", ["firmware_version", "door_open"])
+    def test_write_read_only_refused(self, register_map, name):
+        """Input and discrete input writes are refused before any I/O."""
+        dev = _device(register_map=register_map)
+        reg = register_map.get_by_name(name)
+        assert reg.writable is False
+        run = asyncio.get_event_loop().run_until_complete
+        assert run(dev.write_register_value(reg, 1)) is False
+
+    def test_request_delay_spaces_requests(self, demo_server, register_map):
+        """request_delay_ms is a minimum gap between consecutive requests."""
+        client = _demo_client(demo_server, register_map, request_delay_ms=100)
+
+        async def run():
+            await client.connection.connect()
+            try:
+                start = time.monotonic()
+                for _ in range(3):
+                    assert await client._read_range("holding", 0, 2) is not None
+                return time.monotonic() - start
+            finally:
+                await client.connection.disconnect()
+
+        # Two gaps between three requests; the first request is not delayed.
+        assert asyncio.get_event_loop().run_until_complete(run()) >= 0.2
 
 
 # =============================================================================
@@ -1113,26 +870,16 @@ class TestDemoServerIntegration:
 
 
 def _spy_reads(client):
-    """Wrap a client's typed reads to record (address, count) per read kind."""
+    """Wrap a client's reads to record (address, count) per read kind."""
     calls = {"holding": [], "input": [], "coil": [], "discrete": []}
-    originals = {
-        "holding": client.read_holding_registers,
-        "input": client.read_input_registers,
-        "coil": client.read_coils,
-        "discrete": client.read_discrete_inputs,
-    }
+    kinds = {"holding": "holding", "input": "input", "coil": "coil", "discrete_input": "discrete"}
+    fetch = client._fetch
 
-    def make(kind, fn):
-        async def wrapper(address, count=1):
-            calls[kind].append((address, count))
-            return await fn(address, count)
+    async def wrapper(reg_type, address, count):
+        calls[kinds[reg_type]].append((address, count))
+        return await fetch(reg_type, address, count)
 
-        return wrapper
-
-    client.read_holding_registers = make("holding", originals["holding"])
-    client.read_input_registers = make("input", originals["input"])
-    client.read_coils = make("coil", originals["coil"])
-    client.read_discrete_inputs = make("discrete", originals["discrete"])
+    client._fetch = wrapper
     return calls
 
 
@@ -1142,7 +889,7 @@ class TestBlockReadsIntegration:
     def test_demo_map_coalesces_transactions(self, client):
         """The demo map polls in the expected coalesced transactions."""
         calls = _spy_reads(client)
-        results = asyncio.get_event_loop().run_until_complete(client._poll_registers())
+        results = asyncio.get_event_loop().run_until_complete(poll_once(client))
 
         assert sorted(calls["holding"]) == [(0, 21), (100, 6), (110, 4)]
         assert calls["input"] == [(0, 5)]
@@ -1159,16 +906,17 @@ class TestBlockReadsIntegration:
 
         holding_regs = [r for r in register_map.registers if r.type == "holding"]
         assert len(calls["holding"]) == len(holding_regs)
-        # Same result shape as block mode.
+        # Same result shape and cache as block mode.
         assert 200 < results["voltage"]["L1"] < 260
+        assert client.last_values["power/energy"][0] == results["power"]["energy"]
 
     def test_failed_block_skips_only_its_registers(self, demo_server):
         """A block whose address is beyond the datastore skips only its registers."""
         data = {
             "name": "failskip",
             "events": {
-                "good": [{"name": "v", "address": 0, "datatype": "float32"}],
-                "bad": [{"name": "x", "address": 5000, "datatype": "uint16"}],
+                "good": [{"name": "v", "address": 1, "datatype": "float32"}],
+                "bad": [{"name": "x", "address": 5001, "datatype": "uint16"}],
             },
         }
         client = _demo_client(demo_server, RegisterMap.from_dict(data))
@@ -1190,146 +938,236 @@ class TestBlockReadsIntegration:
             assert event in results
 
 
+class TestSharedConnection:
+    """Two devices on one connection share the link, one request at a time."""
+
+    def test_two_units_poll_serialized(self, register_map):
+        """Both unit ids poll their own data and requests never overlap on the wire."""
+        server = DemoServer(unit_ids=(1, 2))
+        server.start()
+        conn = ModbusConnection(host=server.host, port=server.port)
+        devices = [ModbusDevice(conn, unit_id=u, register_map=register_map) for u in (1, 2)]
+        in_flight, max_in_flight, unit_ids = 0, 0, []
+
+        def spy(call):
+            async def wrapped(*args, device_id, **kwargs):
+                nonlocal in_flight, max_in_flight
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+                unit_ids.append(device_id)
+                try:
+                    return await call(*args, device_id=device_id, **kwargs)
+                finally:
+                    in_flight -= 1
+
+            return wrapped
+
+        async def run():
+            await conn.connect()
+            for method in ("read_holding_registers", "read_input_registers", "read_coils"):
+                setattr(conn._client, method, spy(getattr(conn._client, method)))
+            conn.start("", None)
+            poll = asyncio.create_task(conn.run_async())
+            # Action-style reads race the poll loop from both devices.
+            await asyncio.gather(*(d._read_range("holding", 0, 2) for d in devices * 5))
+            await asyncio.sleep(1.5)
+            conn.stop()
+            await poll
+
+        try:
+            asyncio.get_event_loop().run_until_complete(run())
+        finally:
+            server.stop()
+
+        assert max_in_flight == 1
+        assert set(unit_ids) == {1, 2}
+        serials = [d.last_values["inputs/serial_number"][0] for d in devices]
+        assert serials == [12345679, 12345680]  # each unit's own datastore
+        assert all(d._poll_count >= 2 for d in devices)
+
+
 # =============================================================================
 # Poll Scheduler Tests (fake clock)
 # =============================================================================
 
 
+def _fake_device(events, conn=None, latency=0.0, bad=(), dead=False, **kwargs):
+    """A device over ``events`` with a fake ``_fetch``; no network.
+
+    Returns (device, reads) where reads collects (unit, address, count, start).
+    A read covering an address in ``bad`` answers exception 02; a ``dead``
+    device never answers (raises after ``latency``).
+    """
+    conn = conn or ModbusConnection(name="c")
+    dev = ModbusDevice(
+        conn,
+        register_map=RegisterMap.from_dict({"name": "sched", "events": events}),
+        **kwargs,
+    )
+    reads: list[tuple[int, int, int, float]] = []
+
+    async def fetch(reg_type, address, count):
+        reads.append((dev.unit_id, address, count, time.monotonic()))
+        if latency:
+            await asyncio.sleep(latency)
+        if dead:
+            raise ModbusIOException("no response")
+        if any(address <= a < address + count for a in bad):
+            return 2
+        return [123] * count
+
+    dev._fetch = fetch
+    return dev, reads
+
+
+async def _run_for(conn, seconds):
+    """Run ``conn``'s poll loop for ``seconds`` against fake devices (link always up)."""
+
+    async def up():
+        conn.connected = True
+        return True
+
+    conn.ensure_connected = up
+    conn._running = True
+    task = asyncio.create_task(conn.run_async())
+    await asyncio.sleep(seconds)
+    conn.stop()
+    await task
+
+
 class TestPollScheduler:
-    """Per-register poll scheduling with a fake clock."""
-
-    def _make_client(self, events=None, poll_interval=1.0):
-        """Client over ``events`` (a fast + slow-5s register by default), no network.
-
-        Fake reads record each polled register's name into the returned list.
-        """
-        if events is None:
-            events = {
-                "fast": [{"name": "f", "address": 0}],
-                "slow": [{"name": "s", "address": 1, "poll_interval": 5.0}],
-            }
-        client = ModbusClient(
-            register_map=RegisterMap.from_dict({"name": "sched", "events": events}),
-            poll_interval=poll_interval,
-            block_reads=False,
-        )
-        polled: list[str] = []
-
-        async def fake_read(reg):
-            polled.append(reg.name)
-            return 123
-
-        client.read_register_value = fake_read
-        return client, polled
+    """Per-rate block scheduling, demotion and illegal-address isolation."""
 
     def test_due_set_membership(self):
-        """Due sets follow each register's own cadence."""
-        client, polled = self._make_client()
-        run = asyncio.get_event_loop().run_until_complete
-
-        run(client._poll_registers(now=0.0))
-        assert set(polled) == {"f", "s"}
-        polled.clear()
-
-        run(client._poll_registers(now=1.0))
-        assert polled == ["f"]  # slow not due until 5.0
-        polled.clear()
-
-        run(client._poll_registers(now=5.0))
-        assert set(polled) == {"f", "s"}
-
-    def test_no_backlog_after_stall(self):
-        """A long stall polls each register once, rescheduling from now."""
-        client, polled = self._make_client()
-        run = asyncio.get_event_loop().run_until_complete
-
-        run(client._poll_registers(now=0.0))  # f -> 1.0, s -> 5.0
-        polled.clear()
-
-        run(client._poll_registers(now=12.0))
-        assert sorted(polled) == ["f", "s"]  # each due once, no backlog
-        due = {it.register.name: it.next_due for it in client._poll_items}
-        assert due["f"] == 13.0
-        assert due["s"] == 17.0
-
-    def test_seconds_until_next_due(self):
-        """The sleep hint tracks the earliest-due item."""
-        client, _ = self._make_client()
-        client._build_poll_items()
-        assert client._seconds_until_next_due(now=0.0) == 0.0
-
-        asyncio.get_event_loop().run_until_complete(client._poll_registers(now=0.0))
-        assert client._seconds_until_next_due(now=0.0) == 1.0
-        assert client._seconds_until_next_due(now=0.5) == 0.5
-
-    def test_no_map_falls_back_to_poll_interval(self):
-        """Without poll items the sleep hint is the interface interval."""
-        client = ModbusClient(poll_interval=2.5)
-        assert client._seconds_until_next_due() == 2.5
-
-    def test_build_poll_items_excludes_disabled(self):
-        """A disabled register (poll_interval == 0) produces no poll item."""
-        data = {
-            "name": "sched",
-            "events": {
-                "e": [
-                    {"name": "on", "address": 0},
-                    {"name": "off", "address": 1, "poll_interval": 0},
-                ]
+        """Due blocks follow each register's own rate; a stall leaves no backlog."""
+        dev, reads = _fake_device(
+            {
+                "fast": [{"name": "f", "address": 1}],
+                "slow": [{"name": "s", "address": 2, "rate": 5.0}],
             },
-        }
-        client = ModbusClient(register_map=RegisterMap.from_dict(data), poll_interval=1.0)
-        client._build_poll_items()
-        assert [it.register.name for it in client._poll_items] == ["on"]
+            block_reads=False,
+        )
+        run = asyncio.get_event_loop().run_until_complete
 
-    def test_disabled_register_no_interface_fallback(self):
-        """Regression: poll_interval 0 must NOT fall back to the interface rate.
+        def polled(now):
+            reads.clear()
+            run(poll_once(dev, now=now))
+            return sorted(r[1] for r in reads)
 
-        The old ``reg.poll_interval or self.poll_interval`` silently turned 0
-        into the interface interval and scheduled the register anyway.
+        assert polled(0.0) == [0, 1]
+        assert polled(1.0) == [0]  # slow not due until 5.0
+        assert polled(12.0) == [0, 1]  # each once, rescheduled from now
+        assert sorted(b.next_due for b in dev._blocks) == [13.0, 17.0]
+
+    def test_unpolled_registers_never_read(self):
+        """rate 0 on a register, or on the device for registers without one, is not polled."""
+        dev, reads = _fake_device(
+            {"e": [{"name": "on", "address": 1, "rate": 1.0}, {"name": "off", "address": 2}]},
+            rate=0,
+        )
+        for now in range(5):
+            asyncio.get_event_loop().run_until_complete(poll_once(dev, now=float(now)))
+        assert {r[1] for r in reads} == {0}
+        assert list(dev.polled_events["e"]) == [dev.register_map.get_by_name("on")]
+
+    def test_slow_blocks_spread(self):
+        """Slower blocks go one per tick: the fast point never waits behind a burst.
+
+        Reading all 20 slow blocks at once would hold the fast point back
+        20 x 20 ms on top of its 0.2 s rate.
         """
-        data = {"events": {"e": [{"name": "off", "address": 0, "poll_interval": 0}]}}
-        client = ModbusClient(register_map=RegisterMap.from_dict(data), poll_interval=1.0)
-        client._build_poll_items()
-        # No item at all — not one scheduled at the 1.0s interface rate.
-        assert client._poll_items == []
+        events = {"fast": [{"name": "f", "address": 1}]}
+        events |= {f"s{k}": [{"name": "v", "address": 10 * k + 10, "rate": 1.0}] for k in range(20)}
+        dev, reads = _fake_device(events, rate=0.2, latency=0.02)
+        asyncio.get_event_loop().run_until_complete(_run_for(dev.connection, 2.6))
 
-    def test_disabled_register_never_polls(self):
-        """A disabled register never polls, even after many clock cycles."""
-        client, polled = self._make_client(
-            events={
-                "on": [{"name": "f", "address": 0}],
-                "off": [{"name": "d", "address": 1, "poll_interval": 0}],
-            }
-        )
+        # A burst puts >= 0.2 + 20 x 0.02 = 0.6 s between fast reads; spread keeps it
+        # near 0.22 s. The midpoint leaves ~0.18 s of headroom for a loaded machine.
+        fast = [r[3] for r in reads if r[1] == 0]
+        assert max(b - a for a, b in zip(fast, fast[1:], strict=False)) < 0.4
+        assert {r[1] for r in reads if r[1]} == {10 * k + 9 for k in range(20)}
+
+    def test_dead_device_demoted(self, monkeypatch):
+        """A dead unit is demoted after demote_after timeouts; then only probes cost link time."""
+        monkeypatch.setattr("zelos_extension_modbus.client.DEMOTE_BACKOFF", 0.5)
+        conn = ModbusConnection(name="c")
+        events = {"e": [{"name": "v", "address": 1}]}
+        live, live_reads = _fake_device(events, conn, unit_id=1, rate=0.1)
+        dead, dead_reads = _fake_device(events, conn, unit_id=2, rate=0.1, dead=True, latency=0.2)
+        asyncio.get_event_loop().run_until_complete(_run_for(conn, 2.0))
+
+        # 3 timeouts, then probes after 0.5 s and 1 s more (backoff doubles).
+        assert 3 <= len(dead_reads) <= 5
+        assert dead.rate_status()["demoted"] and dead.rate_status()["retry_in_s"] > 0
+        # Structural, not wall-clock: once demoted, at most one probe between live reads.
+        demoted_at = dead_reads[2][3]
+        merged = sorted(live_reads + dead_reads, key=lambda r: r[3])
+        after = [r[0] for r in merged if r[3] > demoted_at]
+        live_at = [i for i, u in enumerate(after) if u == 1]
+        assert len(live_at) >= 3
+        assert max(b - a - 1 for a, b in zip(live_at, live_at[1:], strict=False)) <= 1
+        assert live.rate_status()["demoted"] is False
+
+    def test_headline_is_the_worst_tier(self):
+        """Top-level rates are the most overloaded tier's; tiers keep the detail."""
+        events = {"e": [{"name": "f", "address": 1}, {"name": "s", "address": 2, "rate": 5.0}]}
+        dev, _ = _fake_device(events)
+        dev._schedule(0.0)
+        dev._tiers[1.0].interval, dev._tiers[5.0].interval = 1.1, 15.0
+        status = dev.rate_status()
+        assert (status["requested_rate"], status["overload_pct"]) == (5.0, 200.0)
+        assert [t["requested_rate"] for t in status["tiers"]] == [1.0, 5.0]
+
+    def test_link_down_misses_reads(self):
+        """While the link is down, every read that falls due fails; no rate is achieved."""
+        events = {"e": [{"name": "f", "address": 1}, {"name": "s", "address": 2, "rate": 5.0}]}
+        dev, _ = _fake_device(events)
+        dev._schedule(0.0)
+        dev._tiers[1.0].interval = 1.0
+        dev._missed(2.5)  # 1 s block due at 0, 1, 2; 5 s block at 0
+        dev._missed(2.9)
+        assert dev.failed_reads == 4 and dev.rate_status()["achieved_rate"] is None
+
+    def test_refused_block_deactivated(self, caplog):
+        """Exception 02 deactivates its whole block (static size, Kepware): one warning in
+        the map's base, its fields unlogged, the rest keep polling, retried every 10 min."""
+        events = {"e": [{"name": f"v{a}", "address": a} for a in range(1, 9)]}
+        dev, reads = _fake_device(events, bad={3}, max_block_size=4)  # wire 3 = map 4
         run = asyncio.get_event_loop().run_until_complete
 
-        for now in range(0, 100, 1):  # 100 cycles across the clock
-            run(client._poll_registers(now=float(now)))
+        with caplog.at_level(logging.WARNING):
+            values = run(poll_once(dev, now=0.0))["e"]
+            run(poll_once(dev, now=1.0))
+            run(poll_once(dev, now=REFUSED_RETRY))  # retried, still refused
+        assert sorted(values) == ["v5", "v6", "v7", "v8"]
+        assert caplog.text.count("Device refuses holding 1-4") == 1
+        assert "verify" in caplog.text
+        assert [(r[1], r[2]) for r in reads] == [(0, 4), (4, 4), (4, 4), (0, 4), (4, 4)]
+        assert (dev.successful_reads, dev.failed_reads) == (3, 2)
+        (row,) = dev.rate_status()["refused"]
+        assert (row["range"], row["code"]) == ("holding 1-4", 2)
+        # Recovering from demotion keeps the refused block's 10 min backoff.
+        refused = next(b for b in dev._blocks if b.refused)
+        due = refused.next_due
+        for _ in range(dev.demote_after):
+            dev._timed_out(REFUSED_RETRY, "no response")
+        dev._responded(REFUSED_RETRY + 1)
+        assert refused.next_due == due
 
-        assert "d" not in polled  # disabled register never polled
-        assert "f" in polled
-
-    def test_real_clock_fast_polls_more_than_slow(self):
-        """Smoke test with the real clock: the fast register polls more often."""
-        client, polled = self._make_client(
-            events={
-                "fast": [{"name": "f", "address": 0}],
-                "slow": [{"name": "s", "address": 1, "poll_interval": 0.5}],
-            },
-            poll_interval=0.05,
-        )
-
-        async def run():
-            client._build_poll_items()
-            start = time.monotonic()
-            while time.monotonic() - start < 1.0:
-                await client._poll_registers()
-                await asyncio.sleep(0.02)
-
-        asyncio.get_event_loop().run_until_complete(run())
-        assert polled.count("f") > polled.count("s")
-        assert polled.count("s") >= 1
+    @pytest.mark.parametrize(("code", "demoted", "warnings"), [(0x0B, True, 0), (0x04, False, 1)])
+    def test_exception_answers(self, caplog, code, demoted, warnings):
+        """A gateway's 0A/0B is no response (demotion); other codes warn once, keep polling."""
+        dev, _ = _fake_device({"e": [{"name": "v", "address": 1}]}, demote_after=3)
+        del dev._fetch  # the real one, over a fake link
+        dev.connection.request = AsyncMock(return_value=ExceptionResponse(3, code))
+        run = asyncio.get_event_loop().run_until_complete
+        with caplog.at_level(logging.WARNING):
+            for now in range(3):
+                run(poll_once(dev, now=float(now)))
+        assert dev.demoted is demoted
+        assert caplog.text.count(f"fails with exception {code:02X}") == warnings
+        run(poll_once(dev, now=100.0))
+        assert dev.connection.request.await_args.args[2] is demoted  # a probe: one attempt
 
 
 # =============================================================================
@@ -1340,29 +1178,29 @@ class TestPollScheduler:
 class TestFieldSanitization:
     """Trace-safe field naming."""
 
-    def test_field_name_sanitizes_reserved_chars(self):
-        """Dots and slashes/spaces collapse to underscores."""
-        assert Register(address=1, name="pcb.temp").field_name == "pcb_temp"
-        assert Register(address=2, name="amps/phase a").field_name == "amps_phase_a"
-
-    def test_field_name_all_junk_falls_back(self):
-        """A name with nothing usable falls back to r<address>."""
-        assert Register(address=7, name="...").field_name == "r7"
+    @pytest.mark.parametrize(
+        ("name", "field"),
+        [("pcb.temp", "pcb_temp"), ("amps/phase a", "amps_phase_a"), ("...", "r7")],
+    )
+    def test_field_name(self, name, field):
+        """Reserved characters collapse to '_'; nothing usable falls back to r<address>."""
+        assert Register(address=6, name=name).field_name == field
 
     def test_dotted_name_roundtrips(self, demo_server):
-        """A dotted register name flows through init + poll as a sanitized field."""
+        """A dotted name is a sanitized trace field; the cache keeps the raw name."""
         data = {
             "name": "dotted_rt",
             "events": {
                 "temps": [
-                    {"name": "pcb.temp", "address": 20, "datatype": "int16", "scale": 0.1},
+                    {"name": "pcb.temp", "address": 21, "datatype": "int16", "scale": 0.1},
                 ]
             },
         }
         client = _demo_client(demo_server, RegisterMap.from_dict(data))
-        client._init_trace_source()  # schema uses the sanitized field name
+        assert _traced(client) == {"temps": {"pcb_temp"}}  # schema uses the sanitized name
         results = _connected_poll(client)
         assert "pcb_temp" in results.get("temps", {})
+        assert "temps/pcb.temp" in client.last_values
 
 
 # =============================================================================
@@ -1373,24 +1211,52 @@ class TestFieldSanitization:
 class TestReconnection:
     """Tests for connection error detection."""
 
-    def test_is_connection_error_timeout(self):
-        """Timeout errors are detected as connection errors."""
-        client = ModbusClient()
-        assert client._is_connection_error(Exception("Connection timeout")) is True
-        assert client._is_connection_error(Exception("No response received")) is True
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (ConnectionError("anything"), True),
+            (TimeoutError("read timed out"), True),
+            (OSError("serial port not available"), True),
+            (Exception("Connection timeout"), True),
+            (Exception("No response received"), True),
+            (Exception("Connection refused"), True),
+            (Exception("connection reset by peer"), True),
+            (Exception("device disconnected"), True),
+            (Exception("Invalid address"), False),
+            (Exception("Value out of range"), False),
+            (ValueError("bad value"), False),
+            (KeyError("missing_field"), False),
+        ],
+    )
+    def test_is_connection_error(self, error, expected):
+        assert _is_connection_error(error) is expected
 
-    def test_is_connection_error_refused(self):
-        """Connection refused errors are detected."""
-        client = ModbusClient()
-        assert client._is_connection_error(Exception("Connection refused")) is True
-        assert client._is_connection_error(Exception("connection reset by peer")) is True
+    def test_cancel_mid_request_stops_the_loop(self):
+        """pymodbus turns a cancel into ModbusIOException; the poll loop must still exit."""
 
-    def test_is_connection_error_false_for_other(self):
-        """Non-connection errors return False."""
-        client = ModbusClient()
-        assert client._is_connection_error(Exception("Invalid address")) is False
-        assert client._is_connection_error(Exception("Value out of range")) is False
-        assert client._is_connection_error(ValueError("bad value")) is False
+        async def main():
+            server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)  # never answers
+            port = server.sockets[0].getsockname()[1]
+            conn = ModbusConnection(host="127.0.0.1", port=port, timeout=10.0, name="c")
+            ModbusDevice(
+                conn, register_map=RegisterMap.from_dict({"events": {"e": [{"address": 1}]}})
+            )
+            conn._running = True
+            task = asyncio.create_task(conn.run_async())
+            await asyncio.sleep(0.5)  # connected, first read in flight
+            started = time.monotonic()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 3.0)
+            server.close()
+            return time.monotonic() - started, conn.connected
+
+        loop = asyncio.new_event_loop()
+        try:
+            elapsed, connected = loop.run_until_complete(main())
+        finally:
+            loop.close()
+        assert elapsed < 3.0 and not connected
 
 
 # =============================================================================
@@ -1401,28 +1267,20 @@ class TestReconnection:
 class TestConstructorClamps:
     """The constructor is the backstop for out-of-range block-read / poll knobs."""
 
-    def test_max_block_size_floor(self):
-        """max_block_size below 1 is clamped up to 1."""
-        assert ModbusClient(max_block_size=0).max_block_size == 1
+    @pytest.mark.parametrize(
+        ("knob", "value", "clamped"),
+        [("max_block_size", 0, 1), ("max_block_size", 200, 125), ("max_read_gap", -1, 0)],
+    )
+    def test_clamped(self, knob, value, clamped):
+        assert getattr(_device(**{knob: value}), knob) == clamped
 
-    def test_max_block_size_ceiling(self):
-        """max_block_size above 125 is clamped down to 125."""
-        assert ModbusClient(max_block_size=200).max_block_size == 125
-
-    def test_max_read_gap_floor(self):
-        """A negative max_read_gap is clamped up to 0."""
-        assert ModbusClient(max_read_gap=-1).max_read_gap == 0
-
-    def test_poll_interval_floor(self, caplog):
-        """poll_interval below 0.01s is floored to 0.01s with a warning."""
+    def test_rate_floor(self, caplog):
+        """A rate below 0.01s (other than 0, not polled) is floored with a warning."""
         with caplog.at_level(logging.WARNING):
-            client = ModbusClient(poll_interval=0)
-        assert client.poll_interval == 0.01
-        assert "poll_interval" in caplog.text
-
-    def test_poll_interval_normal_unchanged(self):
-        """A poll_interval at or above the floor is left untouched."""
-        assert ModbusClient(poll_interval=1.0).poll_interval == 1.0
+            client = _device(rate=0.001)
+        assert client.rate == 0.01
+        assert "rate" in caplog.text
+        assert _device(rate=0).rate == 0
 
 
 # =============================================================================
@@ -1430,46 +1288,33 @@ class TestConstructorClamps:
 # =============================================================================
 
 
+def _traced(client, prefix="Modbus"):
+    """Declare ``client``'s trace events on a fresh source; return {event: fields}."""
+    client.connection.start(prefix, zelos_sdk.TraceSource(prefix) if prefix else None)
+    return {name: {f.name for f in ev.schema} for name, ev in client._events.items()}
+
+
 class TestInitTraceSource:
-    """Tests for _init_trace_source."""
+    """Device trace events and the one trace_layout rule."""
 
-    def test_init_trace_source_no_register_map(self):
-        """Without a register map, a generic 'raw' event is created."""
-        client = ModbusClient()
-        client._init_trace_source()
-        assert client._source is not None
+    @pytest.mark.parametrize(
+        ("prefix", "source", "event_prefix"),
+        [("Modbus", "Modbus", "10_0_0_5/unit1"), ("", "10_0_0_5", "unit1")],
+        ids=["prefix", "cleared"],
+    )
+    def test_trace_layout(self, prefix, source, event_prefix):
+        """A prefix nests connection/device under one source; cleared, the connection owns it."""
+        assert trace_layout(prefix, "10_0_0_5", "unit1") == (source, event_prefix)
+        client = ModbusDevice(ModbusConnection(host="10.0.0.5"))
+        _traced(client, prefix)
+        assert client.trace_path == f"{source}/{event_prefix}"
 
-    def test_init_trace_source_with_register_map(self):
-        """With a register map, events match the map."""
-        data = {
-            "name": "device",
-            "events": {
-                "sensors": [
-                    {"name": "temp", "address": 0, "datatype": "uint16"},
-                ],
-            },
-        }
-        reg_map = RegisterMap.from_dict(data)
-        client = ModbusClient(register_map=reg_map)
-        client._init_trace_source()
-        assert client._source is not None
-
-    def test_disabled_field_absent_from_event(self):
-        """A disabled register is not advertised as a field on its event."""
-        data = {
-            "name": "d",
-            "events": {
-                "e": [
-                    {"name": "on", "address": 0, "datatype": "uint16"},
-                    {"name": "off", "address": 1, "datatype": "uint16", "poll_interval": 0},
-                ]
-            },
-        }
-        client = ModbusClient(register_map=RegisterMap.from_dict(data))
-        client._init_trace_source()
-        event = getattr(client._source, "e", None)
-        assert event is not None
-        assert set(event.fields) == {"on"}
+    def test_event_names_nest_under_the_device(self):
+        """Map events live at <connection>/<device>/<event> on the shared source."""
+        data = {"events": {"sensors": [{"name": "temp", "address": 1}]}}
+        client = _device(register_map=RegisterMap.from_dict(data))
+        _traced(client)
+        assert client._events["sensors"].name == "c/unit1/sensors"
 
     def test_all_disabled_event_not_added(self):
         """An event whose registers are all disabled is never added to the source."""
@@ -1477,14 +1322,13 @@ class TestInitTraceSource:
             "name": "d",
             "events": {
                 "e": [
-                    {"name": "off1", "address": 0, "poll_interval": 0},
-                    {"name": "off2", "address": 1, "poll_interval": 0},
+                    {"name": "off1", "address": 1, "rate": 0},
+                    {"name": "off2", "address": 2, "rate": 0},
                 ]
             },
         }
-        client = ModbusClient(register_map=RegisterMap.from_dict(data))
-        client._init_trace_source()
-        assert getattr(client._source, "e", None) is None
+        client = _device(register_map=RegisterMap.from_dict(data))
+        assert _traced(client) == {}
 
     def test_mixed_event_keeps_only_polled_fields(self):
         """A mixed event advertises only its polled registers as fields."""
@@ -1492,17 +1336,14 @@ class TestInitTraceSource:
             "name": "d",
             "events": {
                 "e": [
-                    {"name": "a", "address": 0, "datatype": "uint16"},
-                    {"name": "b", "address": 1, "datatype": "uint16", "poll_interval": 0},
-                    {"name": "c", "address": 2, "datatype": "uint16", "poll_interval": 5.0},
+                    {"name": "a", "address": 1, "datatype": "uint16"},
+                    {"name": "b", "address": 2, "datatype": "uint16", "rate": 0},
+                    {"name": "c", "address": 3, "datatype": "uint16", "rate": 5.0},
                 ]
             },
         }
-        client = ModbusClient(register_map=RegisterMap.from_dict(data))
-        client._init_trace_source()
-        event = getattr(client._source, "e", None)
-        assert event is not None
-        assert set(event.fields) == {"a", "c"}
+        client = _device(register_map=RegisterMap.from_dict(data))
+        assert _traced(client) == {"e": {"a", "c"}}
 
 
 # =============================================================================
@@ -1519,52 +1360,28 @@ class TestDisabledRegisterActions:
             "name": "disabled_rw",
             "events": {
                 "cfg": [
-                    {"name": "limit", "address": 100, "datatype": "uint16", "poll_interval": 0},
+                    {"name": "limit", "address": 101, "datatype": "uint16", "rate": 0},
                 ]
             },
         }
-        client = ModbusClient(
+        client = _device(
             host=demo_server.host,
             port=demo_server.port,
             register_map=RegisterMap.from_dict(data),
         )
         reg = client.register_map.get_by_name("limit")
-        assert reg.polled is False  # disabled, but still read/writable
+        assert client.rate_of(reg) == 0  # not polled, but still read/writable
 
         async def run():
-            await client.connect()
+            await client.connection.connect()
             ok = await client.write_register_value(reg, 231)
             value = await client.read_register_value(reg)
-            await client.disconnect()
+            await client.connection.disconnect()
             return ok, value
 
         ok, value = asyncio.get_event_loop().run_until_complete(run())
         assert ok is True
         assert value == 231
-
-    def test_disabled_register_listed_and_resolvable(self):
-        """A disabled register stays in the map for list/named actions."""
-        data = {
-            "name": "disabled_list",
-            "events": {
-                "cfg": [
-                    {"name": "limit", "address": 100, "datatype": "uint16", "poll_interval": 0},
-                ]
-            },
-        }
-        client = ModbusClient(register_map=RegisterMap.from_dict(data), interface_name="dis")
-        registry.register("dis", client)
-        try:
-            result = actions.list_registers(interface="dis")
-            names = [r["name"] for r in result["registers"]]
-            assert "limit" in names
-            # Named actions still resolve the disabled register.
-            error, reg, event = actions._resolve_register(client, "cfg/limit")
-            assert error is None
-            assert reg.name == "limit"
-            assert event == "cfg"
-        finally:
-            registry.clear()
 
 
 # =============================================================================
@@ -1577,7 +1394,7 @@ class TestWriteMode:
 
     def test_fc16_mode_uses_write_registers(self, demo_server, register_map):
         """With write_mode='fc16', even single-register writes use FC 16."""
-        client = ModbusClient(
+        client = _device(
             host=demo_server.host,
             port=demo_server.port,
             register_map=register_map,
@@ -1585,14 +1402,14 @@ class TestWriteMode:
         )
 
         async def run():
-            await client.connect()
+            await client.connection.connect()
             reg = register_map.get_by_name("voltage_high_limit")
             # This is a uint16 (single register) but fc16 mode should still work
             success = await client.write_register_value(reg, 240)
             assert success is True
             value = await client.read_register_value(reg)
             assert value == 240
-            await client.disconnect()
+            await client.connection.disconnect()
 
         asyncio.get_event_loop().run_until_complete(run())
 
@@ -1607,13 +1424,11 @@ class TestTcpReconnection:
 
     def test_tcp_reconnect_after_server_restart(self, register_map):
         """Server goes offline, reads fail, server comes back, reads succeed again."""
-        port = 15021  # dedicated port to avoid collision with module-scoped demo_server
-
-        # Start server
-        server = DemoServer(port=port)
+        server = DemoServer()
+        port = server.port
         server.start()
 
-        client = ModbusClient(
+        client = _device(
             host="127.0.0.1",
             port=port,
             register_map=register_map,
@@ -1622,8 +1437,8 @@ class TestTcpReconnection:
 
         async def run():
             # Phase 1: connect and read successfully
-            await client.connect()
-            assert client._connected
+            await client.connection.connect()
+            assert client.connected
             reg = register_map.get_by_name("voltage_high_limit")
             val = await client.read_register_value(reg)
             assert val is not None
@@ -1632,60 +1447,60 @@ class TestTcpReconnection:
             server.stop()
             await asyncio.sleep(0.5)
 
-            val = await client.read_register_value(reg)
-            assert val is None  # read fails
+            with pytest.raises(RequestFailed):
+                await client.read_register_value(reg)
 
             # Phase 3: mark disconnected (as _run_async would) then restart
-            client._connected = False
-            await asyncio.sleep(1)  # allow socket cleanup after server.stop()
+            client.connection.connected = False
 
             server2 = DemoServer(port=port)
             server2.start()
 
             # Phase 4: reconnect succeeds and reads work again
-            connected = await client._ensure_connected()
+            connected = await client.connection.ensure_connected()
             assert connected
-            assert client._connected
+            assert client.connected
 
             val = await client.read_register_value(reg)
             assert val is not None
 
-            await client.disconnect()
+            await client.connection.disconnect()
             server2.stop()
 
         asyncio.get_event_loop().run_until_complete(run())
 
     def test_tcp_poll_loop_survives_server_restart(self, register_map):
         """The _run_async polling loop reconnects automatically after server outage."""
-        port = 15022
-        server = DemoServer(port=port)
+        server = DemoServer()
+        port = server.port
         server.start()
 
-        client = ModbusClient(
+        client = _device(
             host="127.0.0.1",
             port=port,
             register_map=register_map,
             timeout=1.0,
-            poll_interval=0.5,
+            rate=0.5,
         )
 
         poll_results: list[dict] = []
-        original_poll = client._poll_registers
+        original_flush = client._flush
 
-        async def tracking_poll():
-            result = await original_poll()
-            poll_results.append(result)
+        def tracking_flush():
+            result = original_flush()
+            if result:
+                poll_results.append(result)
             return result
 
-        client._poll_registers = tracking_poll
+        client._flush = tracking_flush
 
         async def run():
             loop = asyncio.get_event_loop()
-            client._loop = loop
-            client._running = True
+            client.connection._loop = loop
+            client.connection._running = True
 
             # Start polling in background
-            poll_task = asyncio.create_task(client._run_async())
+            poll_task = asyncio.create_task(client.connection.run_async())
 
             # Wait for a few successful polls
             for _ in range(40):
@@ -1694,18 +1509,21 @@ class TestTcpReconnection:
                 await asyncio.sleep(0.1)
             assert len(poll_results) >= 2, "Should have polled at least twice"
 
+            # Kill server; let the loop see the outage and fail a reconnect
+            server.stop()
+            for _ in range(100):
+                if not client.connected and client.connection._connect_failures:
+                    break
+                await asyncio.sleep(0.1)
+            assert client.connection._connect_failures, "Should have failed a reconnect"
             good_count = len(poll_results)
 
-            # Kill server
-            server.stop()
-            await asyncio.sleep(4.0)  # let reconnect attempts happen + TIME_WAIT clear
-
-            # Restart server
+            # Restart server on the same port
             server2 = DemoServer(port=port)
             server2.start()
 
-            # Wait for recovery — new successful polls should appear
-            for _ in range(60):
+            # Wait for recovery (next reconnect is within RECONNECT_INTERVAL)
+            for _ in range(100):
                 if len(poll_results) > good_count:
                     break
                 await asyncio.sleep(0.1)
@@ -1713,10 +1531,10 @@ class TestTcpReconnection:
             assert len(poll_results) > good_count, (
                 "Should have resumed polling after server restart"
             )
-            assert client._connected
+            assert client.connected
 
             # Shutdown
-            client._running = False
+            client.connection._running = False
             poll_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await poll_task
@@ -1726,17 +1544,17 @@ class TestTcpReconnection:
 
     def test_tcp_connect_to_nonexistent_server(self, register_map):
         """Connecting to a server that doesn't exist returns False, doesn't hang."""
-        client = ModbusClient(
+        client = _device(
             host="127.0.0.1",
-            port=19999,  # nothing listening here
+            port=free_port(),  # nothing listening here
             register_map=register_map,
             timeout=1.0,
         )
 
         async def run():
-            result = await client.connect()
-            assert result is False or not client._connected
-            await client.disconnect()
+            result = await client.connection.connect()
+            assert result is False or not client.connected
+            await client.connection.disconnect()
 
         asyncio.get_event_loop().run_until_complete(run())
 
@@ -1797,29 +1615,12 @@ class RtuDemoServer:
             self._loop.call_soon_threadsafe(self._loop.stop)
 
 
-@pytest.fixture(scope="module")
-def serial_ports(tmp_path_factory):
-    """Create a virtual serial port pair using socat.
-
-    Yields (server_port, client_port) paths.
-    """
-    if shutil.which("socat") is None:
-        pytest.skip("socat not installed")
-
-    tmpdir = tmp_path_factory.mktemp("socat")
-    server_link = str(tmpdir / "server")
-    client_link = str(tmpdir / "client")
-
+def _socat_pair(server_link: str, client_link: str) -> subprocess.Popen:
+    """A virtual serial pair at the two links, once both exist."""
     proc = subprocess.Popen(
-        [
-            "socat",
-            f"PTY,raw,echo=0,link={server_link}",
-            f"PTY,raw,echo=0,link={client_link}",
-        ],
+        ["socat", f"PTY,raw,echo=0,link={server_link}", f"PTY,raw,echo=0,link={client_link}"],
         stderr=subprocess.PIPE,
     )
-
-    # Wait for symlinks to appear
     for link in (server_link, client_link):
         for _ in range(40):
             if Path(link).exists():
@@ -1828,9 +1629,18 @@ def serial_ports(tmp_path_factory):
         else:
             proc.terminate()
             pytest.fail(f"socat PTY link {link} did not appear")
+    return proc
 
-    yield server_link, client_link
 
+@pytest.fixture(scope="module")
+def serial_ports(tmp_path_factory):
+    """(server_port, client_port) of a socat virtual serial pair."""
+    if shutil.which("socat") is None:
+        pytest.skip("socat not installed")
+    tmpdir = tmp_path_factory.mktemp("socat")
+    links = str(tmpdir / "server"), str(tmpdir / "client")
+    proc = _socat_pair(*links)
+    yield links
     proc.terminate()
     proc.wait(timeout=5)
 
@@ -1845,218 +1655,6 @@ def rtu_demo_server(serial_ports):
     server.stop()
 
 
-@pytest.fixture
-def rtu_client(serial_ports, rtu_demo_server, register_map):
-    """Create a connected ModbusClient in RTU mode on the other end."""
-    _, client_port = serial_ports
-    rtu = ModbusClient(
-        transport="rtu",
-        serial_port=client_port,
-        baudrate=9600,
-        unit_id=1,
-        timeout=2.0,
-        register_map=register_map,
-    )
-
-    async def connect():
-        await rtu.connect()
-
-    asyncio.get_event_loop().run_until_complete(connect())
-    yield rtu
-
-    async def disconnect():
-        await rtu.disconnect()
-
-    asyncio.get_event_loop().run_until_complete(disconnect())
-
-
-@requires_socat
-class TestRtuIntegration:
-    """Integration tests over virtual serial RTU — mirrors TestDemoServerIntegration."""
-
-    def test_rtu_read_holding_float32(self, rtu_client):
-        """Read float32 holding register (voltage) over RTU."""
-        reg = rtu_client.register_map.get_by_name("L1")
-        assert reg is not None
-
-        async def read():
-            return await rtu_client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value is not None
-        assert 200 < value < 260
-
-    def test_rtu_read_holding_uint32(self, rtu_client):
-        """Read uint32 holding register (energy) over RTU."""
-        reg = rtu_client.register_map.get_by_name("energy")
-        assert reg is not None
-
-        async def read():
-            return await rtu_client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value is not None
-        assert isinstance(value, int)
-        assert value >= 0
-
-    def test_rtu_read_holding_int16_scaled(self, rtu_client):
-        """Read int16 holding register with scale (temperature) over RTU."""
-        reg = rtu_client.register_map.get_by_name("temperature")
-        assert reg is not None
-
-        async def read():
-            return await rtu_client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value is not None
-        assert 0 < value < 100
-
-    def test_rtu_read_input_register(self, rtu_client):
-        """Read input register (firmware_version) over RTU."""
-        reg = rtu_client.register_map.get_by_name("firmware_version")
-        assert reg is not None
-        assert reg.type == "input"
-
-        async def read():
-            return await rtu_client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value == 0x0102
-
-    def test_rtu_read_input_uint32(self, rtu_client):
-        """Read uint32 input register (serial_number) over RTU."""
-        reg = rtu_client.register_map.get_by_name("serial_number")
-        assert reg is not None
-
-        async def read():
-            return await rtu_client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value == 12345678
-
-    def test_rtu_read_coil(self, rtu_client):
-        """Read coil register over RTU."""
-        reg = rtu_client.register_map.get_by_name("relay1")
-        assert reg is not None
-        assert reg.type == "coil"
-
-        async def read():
-            return await rtu_client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value in (True, False)
-
-    def test_rtu_read_discrete_input(self, rtu_client):
-        """Read discrete input over RTU."""
-        reg = rtu_client.register_map.get_by_name("grid_connected")
-        assert reg is not None
-        assert reg.type == "discrete_input"
-
-        async def read():
-            return await rtu_client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value is True
-
-    def test_rtu_write_holding_and_readback(self, rtu_client):
-        """Write uint16 holding register and read back over RTU."""
-        reg = rtu_client.register_map.get_by_name("voltage_high_limit")
-        assert reg is not None
-
-        async def write_and_read():
-            success = await rtu_client.write_register_value(reg, 242)
-            assert success is True
-            return await rtu_client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(write_and_read())
-        assert value == 242
-
-    def test_rtu_write_coil_and_readback(self, rtu_client):
-        """Write coil and read back over RTU."""
-        reg = rtu_client.register_map.get_by_name("relay1")
-        assert reg is not None
-
-        async def write_and_read():
-            success = await rtu_client.write_register_value(reg, True)
-            assert success is True
-            val = await rtu_client.read_register_value(reg)
-            assert val is True
-
-            success = await rtu_client.write_register_value(reg, False)
-            assert success is True
-            val = await rtu_client.read_register_value(reg)
-            assert val is False
-
-        asyncio.get_event_loop().run_until_complete(write_and_read())
-
-    def test_rtu_read_swapped_float(self, rtu_client):
-        """Read float32 with big_swap byte order over RTU."""
-        reg = rtu_client.register_map.get_by_name("calibration_factor")
-        assert reg is not None
-        assert reg.byte_order == "big_swap"
-
-        async def read():
-            return await rtu_client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
-        assert value is not None
-        assert abs(value - 1.0) < 0.01
-
-    def test_rtu_write_int32(self, rtu_client):
-        """Write int32 holding register over RTU."""
-        reg = rtu_client.register_map.get_by_name("power_limit")
-        assert reg is not None
-
-        async def write_and_read():
-            success = await rtu_client.write_register_value(reg, -5000)
-            assert success is True
-            return await rtu_client.read_register_value(reg)
-
-        value = asyncio.get_event_loop().run_until_complete(write_and_read())
-        assert value == -5000
-
-    def test_rtu_values_change_over_time(self, rtu_client):
-        """Two consecutive polls return different simulator values."""
-        reg = rtu_client.register_map.get_by_name("L1")
-        assert reg is not None
-
-        async def two_reads():
-            v1 = await rtu_client.read_register_value(reg)
-            await asyncio.sleep(0.3)
-            v2 = await rtu_client.read_register_value(reg)
-            return v1, v2
-
-        v1, v2 = asyncio.get_event_loop().run_until_complete(two_reads())
-        # Both should be valid voltages
-        assert 200 < v1 < 260
-        assert 200 < v2 < 260
-
-    def test_rtu_poll_all_events(self, rtu_client):
-        """Poll all registers via register map over RTU."""
-
-        async def poll():
-            return await rtu_client._poll_registers()
-
-        results = asyncio.get_event_loop().run_until_complete(poll())
-
-        assert "voltage" in results
-        assert "current" in results
-        assert "power" in results
-        assert "status" in results
-        assert "inputs" in results
-        assert "digital_inputs" in results
-        assert "setpoints" in results
-        assert "swapped_floats" in results
-
-        assert "L1" in results["voltage"]
-        assert 200 < results["voltage"]["L1"] < 260
-
-    def test_rtu_transport_is_rtu(self, rtu_client):
-        """Client transport reflects RTU mode."""
-        assert rtu_client._connected is True
-        assert rtu_client.transport == "rtu"
-
-
 # =============================================================================
 # RTU Reconnection Tests
 # =============================================================================
@@ -2064,151 +1662,44 @@ class TestRtuIntegration:
 
 @requires_socat
 class TestRtuReconnection:
-    """Test RTU reconnection when serial link is interrupted."""
+    """RTU reads fail while the serial link is down and recover once it is back."""
 
-    def test_rtu_read_fails_when_server_stops(self, register_map):
-        """Reads return None after RTU server stops."""
-        tmpdir = tempfile.mkdtemp(prefix="socat_recon_")
-        server_link = f"{tmpdir}/server"
-        client_link = f"{tmpdir}/client"
-
-        # Create PTY pair
-        socat_proc = subprocess.Popen(
-            [
-                "socat",
-                f"PTY,raw,echo=0,link={server_link}",
-                f"PTY,raw,echo=0,link={client_link}",
-            ],
-            stderr=subprocess.PIPE,
-        )
-        time.sleep(0.5)
-
-        # Start RTU server
+    def test_rtu_reconnect_after_link_restored(self, register_map, tmp_path):
+        server_link, client_link = str(tmp_path / "server"), str(tmp_path / "client")
+        socat = _socat_pair(server_link, client_link)
         rtu_server = RtuDemoServer(serial_port=server_link)
         rtu_server.start()
-
-        client = ModbusClient(
-            transport="rtu",
-            serial_port=client_link,
-            baudrate=9600,
-            unit_id=1,
-            timeout=2.0,
-            register_map=register_map,
+        client = _device(
+            transport="rtu", serial_port=client_link, timeout=2.0, register_map=register_map
         )
+        reg = register_map.get_by_name("voltage_high_limit")
 
         async def run():
-            await client.connect()
-            assert client._connected
+            await client.connection.connect()
+            assert await client.read_register_value(reg) is not None
 
-            reg = register_map.get_by_name("voltage_high_limit")
-
-            # Phase 1: reads work
-            val = await client.read_register_value(reg)
-            assert val is not None
-
-            # Phase 2: kill server — reads should fail
+            # Link down: the read fails, it does not hang.
             rtu_server.stop()
-            socat_proc.terminate()
-            socat_proc.wait(timeout=5)
+            socat.terminate()
+            socat.wait(timeout=5)
             await asyncio.sleep(0.5)
+            with pytest.raises(RequestFailed):
+                await client.read_register_value(reg)
+            client.connection.connected = False
 
-            val = await client.read_register_value(reg)
-            # After socat dies, read should return None (not hang)
-            assert val is None
-
-            await client.disconnect()
-
-        asyncio.get_event_loop().run_until_complete(run())
-
-    def test_rtu_reconnect_after_link_restored(self, register_map):
-        """Client reconnects when serial link is re-established."""
-        tmpdir = tempfile.mkdtemp(prefix="socat_recon2_")
-        server_link = f"{tmpdir}/server"
-        client_link = f"{tmpdir}/client"
-
-        # Create PTY pair
-        socat_proc = subprocess.Popen(
-            [
-                "socat",
-                f"PTY,raw,echo=0,link={server_link}",
-                f"PTY,raw,echo=0,link={client_link}",
-            ],
-            stderr=subprocess.PIPE,
-        )
-        time.sleep(0.5)
-
-        rtu_server = RtuDemoServer(serial_port=server_link)
-        rtu_server.start()
-
-        client = ModbusClient(
-            transport="rtu",
-            serial_port=client_link,
-            baudrate=9600,
-            unit_id=1,
-            timeout=2.0,
-            register_map=register_map,
-        )
-
-        async def run():
-            await client.connect()
-            reg = register_map.get_by_name("voltage_high_limit")
-
-            # Phase 1: reads work
-            val = await client.read_register_value(reg)
-            assert val is not None
-
-            # Phase 2: kill everything
-            rtu_server.stop()
-            socat_proc.terminate()
-            socat_proc.wait(timeout=5)
-            await asyncio.sleep(0.5)
-            client._connected = False
-
-            # Phase 3: re-establish link + server
-            socat_proc2 = subprocess.Popen(
-                [
-                    "socat",
-                    f"PTY,raw,echo=0,link={server_link}",
-                    f"PTY,raw,echo=0,link={client_link}",
-                ],
-                stderr=subprocess.PIPE,
-            )
-            time.sleep(0.5)
-
+            socat2 = _socat_pair(server_link, client_link)
             rtu_server2 = RtuDemoServer(serial_port=server_link)
             rtu_server2.start()
-
-            # Phase 4: reconnect and read
-            connected = await client._ensure_connected()
-            assert connected
-
-            val = await client.read_register_value(reg)
-            assert val is not None
-
-            await client.disconnect()
-            rtu_server2.stop()
-            socat_proc2.terminate()
-            socat_proc2.wait(timeout=5)
+            try:
+                assert await client.connection.ensure_connected()
+                assert await client.read_register_value(reg) is not None
+            finally:
+                await client.connection.disconnect()
+                rtu_server2.stop()
+                socat2.terminate()
+                socat2.wait(timeout=5)
 
         asyncio.get_event_loop().run_until_complete(run())
-
-    def test_rtu_is_connection_error_detection(self):
-        """Verify _is_connection_error catches serial-related exceptions."""
-        client = ModbusClient(transport="rtu", serial_port="/dev/null", unit_id=1)
-
-        # By exception type (isinstance check)
-        assert client._is_connection_error(ConnectionError("anything"))
-        assert client._is_connection_error(TimeoutError("read timed out"))
-        assert client._is_connection_error(OSError("serial port not available"))
-
-        # By error message string matching
-        assert client._is_connection_error(Exception("device disconnected"))
-        assert client._is_connection_error(Exception("connection refused"))
-        assert client._is_connection_error(Exception("No response received after 3 retries"))
-
-        # Non-connection errors
-        assert not client._is_connection_error(ValueError("bad register value"))
-        assert not client._is_connection_error(KeyError("missing_field"))
 
 
 # =============================================================================
@@ -2221,15 +1712,20 @@ class TestActionEdgeCases:
 
     def test_write_registers_action_invalid_values(self):
         """Write Registers action with non-integer values returns error."""
-        # Register a dummy client so the interface lookup succeeds
-        client = ModbusClient(interface_name="edge_test")
-        registry.register("edge_test", client)
+        # Register a dummy device so the lookup succeeds
+        client = _device(name="edge_test")
+        registry.register(client)
         try:
-            result = actions.write_registers(interface="edge_test", address=0, values="abc,def")
-            assert result["success"] is False
-            assert "error" in result
+            for values in ("abc,def", "1.5", "65536", "-32769", ",".join(["1"] * 124)):
+                result = actions.write_registers(device="c/edge_test", address=1, values=values)
+                assert result["success"] is False and "error" in result, values
         finally:
             registry.clear()
+
+    @pytest.mark.parametrize(("value", "word"), [(0, 0), (65535, 65535), (-1, 65535), ("7", 7)])
+    def test_raw_word(self, value, word):
+        """Raw writes take 0-65535, or -32768..-1 as two's complement."""
+        assert actions._word(value) == word
 
 
 class TestActionsUnit:
@@ -2242,210 +1738,148 @@ class TestActionsUnit:
             "name": "test_device",
             "events": {
                 "sensors": [
-                    {"name": "temp", "address": 0, "type": "holding", "datatype": "uint16"},
-                    {"name": "humidity", "address": 1, "type": "input", "datatype": "uint16"},
+                    {"name": "temp", "address": 1, "type": "holding", "datatype": "uint16"},
+                    {"name": "humidity", "address": 2, "type": "input", "datatype": "uint16"},
                 ],
                 "controls": [
-                    {"name": "relay", "address": 0, "type": "coil"},
-                    {"name": "setpoint", "address": 10, "type": "holding", "datatype": "float32"},
+                    {"name": "relay", "address": 1, "type": "coil"},
+                    {"name": "setpoint", "address": 11, "type": "holding", "datatype": "float32"},
                 ],
             },
         }
         reg_map = RegisterMap.from_dict(data)
-        client = ModbusClient(register_map=reg_map, interface_name="test")
-        registry.register("test", client)
+        registry.register(_device(register_map=reg_map, name="test"))
+        registry.register(_device(name="no_map"))
         yield
         registry.clear()
 
-    @pytest.fixture
-    def no_map_actions(self):
-        """Register a client with no register map."""
-        client = ModbusClient(interface_name="no_map")
-        registry.register("no_map", client)
-        yield
-        registry.clear()
+    @pytest.mark.parametrize(("base", "address", "wire"), [(1, 40001, 40000), (0, 40000, 40000)])
+    def test_raw_address_in_map_base(self, base, address, wire):
+        """Raw actions take the map's base; only the wire is 0-based. Failures carry a reason."""
+        dev = registry.get_device("c/test")
+        dev.register_map.device["address_base"] = base
+        ok = SimpleNamespace(isError=lambda: False, registers=[7])
+        dev.connection.request = AsyncMock(return_value=ok)
+
+        def read(at):
+            # Off the main thread: the action's asyncio.run would clear its loop.
+            with ThreadPoolExecutor(1) as pool:
+                kwargs = {"device": "c/test", "address": at, "reg_type": "holding", "count": 1}
+                return pool.submit(actions.read_register, **kwargs).result()
+
+        result = read(address)
+        assert (result["success"], result["address"], result["values"]) == (True, address, [7])
+        dev.connection.request.assert_awaited_once_with(
+            "read_holding_registers", 1, address=wire, count=1
+        )
+        below = read(base - 1)
+        assert below["success"] is False and "address base" in below["error"]
+        for request, error in [
+            (
+                AsyncMock(return_value=ExceptionResponse(3, 2)),
+                "device refused: exception 02 (illegal data address)",
+            ),
+            (AsyncMock(side_effect=ModbusIOException("timeout")), "no response from device"),
+        ]:
+            dev.connection.request = request
+            assert read(address) == {"error": error, "success": False}
 
     def test_get_status_returns_info(self):
         """Get Status action returns expected fields."""
-        result = actions.get_status(interface="test")
+        result = actions.get_status(device="c/test")
         assert set(result) == {
-            "interface",
+            "device",
+            "connection",
             "connected",
             "transport",
-            "connection",
+            "endpoint",
             "unit_id",
+            "address_base",
             "poll_count",
-            "error_count",
-            "poll_interval",
+            "successful_reads",
+            "failed_reads",
+            "error",
+            *_RATE_STATUS,
+            "rate",
+            "min_rate",
             "write_mode",
             "block_reads",
             "max_block_size",
+            "max_bit_block_size",
             "max_read_gap",
             "registers",
             "success",
         }
         assert result["success"] is True
         assert result["registers"] == 4
-        # Unlike list_interfaces / get_snapshot, this action keeps the
-        # interface-prefixed log string it has always reported.
-        assert result["connection"] == "[test] 127.0.0.1:502"
+        assert result["device"] == "c/test"
+        assert result["endpoint"] == "127.0.0.1:502"
         # Block-read knobs are reported (defaults).
         assert result["block_reads"] is True
         assert result["max_block_size"] == 125
         assert result["max_read_gap"] == 0
 
-    def test_list_registers_returns_all(self):
-        """List Registers action returns all registers."""
-        result = actions.list_registers(interface="test")
-        assert result["success"] is True
-        assert result["count"] == 4
-        names = [r["name"] for r in result["registers"]]
-        assert "temp" in names
-        assert "humidity" in names
-        assert "relay" in names
-        assert "setpoint" in names
-
-    def test_list_writable_registers_filters(self):
-        """List Writable Registers only returns writable ones."""
-        result = actions.list_writable_registers(interface="test")
-        assert result["success"] is True
-        # holding and coil are writable, input is not
-        assert result["count"] == 3
-        names = [r["name"] for r in result["registers"]]
-        assert "temp" in names
-        assert "relay" in names
-        assert "setpoint" in names
-        assert "humidity" not in names  # input register, not writable
-
-    def test_list_registers_no_map(self, no_map_actions):
-        """List Registers with no map returns empty."""
-        result = actions.list_registers(interface="no_map")
-        assert result["success"] is True  # empty is not a failure
-        assert result["count"] == 0
-        assert result["registers"] == []
-
-    def test_list_writable_no_map(self, no_map_actions):
-        """List Writable with no map returns empty."""
-        result = actions.list_writable_registers(interface="no_map")
-        assert result["success"] is True
-        assert result["count"] == 0
-
-    def test_read_named_no_map(self, no_map_actions):
-        """Read Named Register with no map returns error."""
-        result = actions.read_named_register(interface="no_map", name="anything")
+    @pytest.mark.parametrize(
+        ("action", "device", "name", "error"),
+        [
+            ("read_named_register", "c/no_map", "anything", "No register map"),
+            ("read_named_register", "c/test", "sensors/nonexistent", "not found"),
+            ("write_named_register", "c/no_map", "anything", "No register map"),
+            ("write_named_register", "c/test", "sensors/nonexistent", "not found"),
+            ("write_named_register", "c/test", "sensors/humidity", "not writable"),
+        ],
+    )
+    def test_named_action_errors(self, action, device, name, error):
+        kwargs = {"value": 100} if action.startswith("write") else {}
+        result = getattr(actions, action)(device=device, name=name, **kwargs)
         assert result["success"] is False
-        assert "error" in result
+        assert error in result["error"]
 
-    def test_read_named_not_found(self):
-        """Read Named Register with unknown name returns error."""
-        result = actions.read_named_register(interface="test", name="sensors/nonexistent")
-        assert result["success"] is False
+    def test_unknown_device_returns_error(self):
+        """Actions with unknown device return error."""
+        result = actions.get_status(device="c/nonexistent")
         assert "not found" in result["error"]
 
-    def test_write_named_no_map(self, no_map_actions):
-        """Write Named Register with no map returns error."""
-        result = actions.write_named_register(interface="no_map", name="anything", value=100)
-        assert result["success"] is False
-        assert "error" in result
-
-    def test_write_named_not_found(self):
-        """Write Named Register with unknown name returns error."""
-        result = actions.write_named_register(
-            interface="test", name="sensors/nonexistent", value=100
-        )
-        assert result["success"] is False
-        assert "not found" in result["error"]
-
-    def test_write_named_not_writable(self):
-        """Write Named Register to input register returns error."""
-        result = actions.write_named_register(interface="test", name="sensors/humidity", value=100)
-        assert result["success"] is False
-        assert "not writable" in result["error"]
-
-    def test_unknown_interface_returns_error(self):
-        """Actions with unknown interface return error."""
-        result = actions.get_status(interface="nonexistent")
-        assert "not found" in result["error"]
-
-    def test_multi_interface_registry(self):
-        """Multiple interfaces registered and isolated."""
+    def test_multi_device_registry(self):
+        """Multiple devices registered and isolated."""
         data2 = {
             "name": "device2",
-            "events": {"temps": [{"name": "t1", "address": 0, "type": "holding"}]},
+            "events": {"temps": [{"name": "t1", "address": 1, "type": "holding"}]},
         }
-        client2 = ModbusClient(register_map=RegisterMap.from_dict(data2), interface_name="second")
-        registry.register("second", client2)
+        client2 = _device(register_map=RegisterMap.from_dict(data2), name="second")
+        registry.register(client2)
 
-        assert set(registry.all_interfaces()) == {"test", "second"}
+        assert set(registry.all_devices()) == {"c/test", "c/no_map", "c/second"}
 
-        r1 = actions.list_registers(interface="test")
-        r2 = actions.list_registers(interface="second")
+        r1 = actions.list_registers(device="c/test")
+        r2 = actions.list_registers(device="c/second")
         assert r1["count"] == 4
         assert r2["count"] == 1
 
-    def test_interface_specific_dropdown(self):
-        """Dropdown callables return per-interface registers."""
-        names = registry.interface_registers("test")
+    def test_device_specific_dropdown(self):
+        """Dropdown callables return per-device registers."""
+        names = registry.device_registers("c/test")
         assert "sensors/temp" in names
         assert "controls/relay" in names
 
-        writable = registry.interface_writable_registers("test")
+        writable = registry.device_writable_registers("c/test")
         assert "sensors/humidity" not in writable
         assert "controls/setpoint" in writable
 
 
 class TestActionsIntegration:
-    """Integration tests for SDK actions with demo server.
-
-    Tests actions that don't require network (list actions) and validates
-    action response structure. Network read/write is tested in
-    TestDemoServerIntegration.
-    """
-
-    @pytest.fixture(autouse=True)
-    def bind_actions(self, client):
-        """Register the integration test client in the registry."""
-        registry.register("test", client)
-        yield
-        registry.clear()
-
-    def test_list_registers_action(self, client):
-        """List Registers action returns all demo registers."""
-        result = actions.list_registers(interface="test")
-        assert result["count"] > 0
-        names = [r["name"] for r in result["registers"]]
-        assert "L1" in names
-        assert "relay1" in names
-        assert "firmware_version" in names
-
-    def test_list_writable_action(self, client):
-        """List Writable action excludes input/discrete registers."""
-        result = actions.list_writable_registers(interface="test")
-        names = [r["name"] for r in result["registers"]]
-        assert "voltage_high_limit" in names
-        assert "relay1" in names
-        assert "firmware_version" not in names
-        assert "door_open" not in names
+    """Actions against the demo server."""
 
     def test_get_status_action(self, client):
-        """Get Status action returns info."""
-        result = actions.get_status(interface="test")
+        result = _call_action(client, actions.get_status)
         assert result["success"] is True
         assert result["connected"] is True
         assert result["transport"] == "tcp"
         assert result["registers"] > 0
 
-    def test_write_named_readonly_fails(self, client):
-        """Write Named to input register fails gracefully."""
-        result = actions.write_named_register(
-            interface="test", name="inputs/firmware_version", value=999
-        )
-        assert result["success"] is False
-        assert "not writable" in result["error"]
-
 
 # =============================================================================
-# Webapp Integration Layer (last-values cache, list_interfaces, get_snapshot)
+# Webapp Integration Layer (last-values cache, list_devices, get_snapshot)
 # =============================================================================
 
 
@@ -2476,21 +1910,21 @@ class _LoopThread:
         return False
 
 
-def _call_action(client, iface, action, **kwargs):
-    """Call an action against ``client``, registered under ``iface`` for the call.
+def _call_action(client, action, **kwargs):
+    """Call an action against ``client``, registered under its path for the call.
 
-    Only ``iface`` is touched on the way out: the registry is global, so clearing
+    Only that path is touched on the way out: the registry is global, so clearing
     it wholesale would evict entries a surrounding fixture owns.
     """
-    previous = registry.get_client(iface)
-    registry.register(iface, client)
+    previous = registry.get_device(client.path)
+    registry.register(client)
     try:
-        return action(interface=iface, **kwargs)
+        return action(device=client.path, **kwargs)
     finally:
         if previous is None:
-            registry._clients.pop(iface, None)
+            registry._devices.pop(client.path, None)
         else:
-            registry.register(iface, previous)
+            registry.register(previous)
 
 
 class TestLastValuesCache:
@@ -2498,62 +1932,25 @@ class TestLastValuesCache:
 
     def test_empty_before_any_poll(self, register_map):
         """A fresh client has no cached values."""
-        assert ModbusClient(register_map=register_map).last_values == {}
+        assert _device(register_map=register_map).last_values == {}
 
     def test_poll_populates_cache(self, demo_server, register_map):
-        """A poll sweep caches every decoded value under its event/name path."""
+        """A sweep caches every value under an event/name path the dropdown offers."""
         client = _demo_client(demo_server, register_map)
         results = _connected_poll(client)
         cache = client.last_values
 
-        assert cache  # sweep produced values
-        # Keys are the qualified event/name paths the named actions accept.
-        assert "voltage/L1" in cache
-        assert "status/temperature" in cache
-        assert "inputs/firmware_version" in cache
-
+        assert {"voltage/L1", "status/temperature", "inputs/firmware_version"} <= set(cache)
         value, ts_ms = cache["voltage/L1"]
         assert value == results["voltage"]["L1"]
         now_ms = int(time.time() * 1000)
         assert now_ms - 10_000 < ts_ms <= now_ms
-
-    def test_cache_keys_match_registry_paths(self, demo_server, register_map):
-        """Every cached key is a path the register dropdown offers."""
-        client = _demo_client(demo_server, register_map)
-        _connected_poll(client)
-        registry.register("cache_paths", client)
+        registry.register(client)
         try:
-            offered = set(registry.interface_registers("cache_paths"))
+            assert set(cache) <= set(registry.device_registers(client.path))
         finally:
             registry.clear()
-        assert set(client.last_values) <= offered
-
-    def test_individual_reads_populate_cache(self, demo_server, register_map):
-        """The non-block read path caches the same way as block reads."""
-        client = _demo_client(demo_server, register_map, block_reads=False)
-        results = _connected_poll(client)
-        cache = client.last_values
-        assert cache["power/energy"][0] == results["power"]["energy"]
-
-    def test_cache_keyed_by_name_not_sanitized_field(self, demo_server):
-        """A dotted register caches under its raw name, not the trace field name."""
-        data = {
-            "name": "dotted_cache",
-            "events": {
-                "temps": [{"name": "pcb.temp", "address": 20, "datatype": "int16", "scale": 0.1}]
-            },
-        }
-        client = _demo_client(demo_server, RegisterMap.from_dict(data))
-        results = _connected_poll(client)
-        assert "pcb_temp" in results["temps"]  # trace field is sanitized
-        assert "temps/pcb.temp" in client.last_values  # cache path is not
-
-    def test_last_values_returns_a_copy(self, demo_server, register_map):
-        """Mutating the returned mapping does not touch the client's cache."""
-        client = _demo_client(demo_server, register_map)
-        _connected_poll(client)
-        snapshot = client.last_values
-        snapshot.clear()
+        cache.clear()  # a copy
         assert client.last_values
 
     def test_disabled_register_absent_until_read(self, demo_server):
@@ -2562,29 +1959,27 @@ class TestLastValuesCache:
             "name": "ondemand",
             "events": {
                 "cfg": [
-                    {"name": "limit", "address": 100, "datatype": "uint16", "poll_interval": 0},
-                    {"name": "low", "address": 101, "datatype": "uint16"},
+                    {"name": "limit", "address": 101, "datatype": "uint16", "rate": 0},
+                    {"name": "low", "address": 102, "datatype": "uint16"},
                 ]
             },
         }
         client = _demo_client(demo_server, RegisterMap.from_dict(data))
         with _LoopThread() as lt:
-            client._loop = lt.loop
-            lt.run(client.connect())
+            client.connection._loop = lt.loop
+            lt.run(client.connection.connect())
             try:
-                lt.run(client._poll_registers())
+                lt.run(poll_once(client))
                 assert "cfg/low" in client.last_values
                 assert "cfg/limit" not in client.last_values  # never polled
 
-                result = _call_action(
-                    client, "ondemand", actions.read_named_register, name="cfg/limit"
-                )
+                result = _call_action(client, actions.read_named_register, name="cfg/limit")
                 assert result["success"] is True
                 value, ts_ms = client.last_values["cfg/limit"]
                 assert value == result["value"]
                 assert ts_ms <= int(time.time() * 1000)
             finally:
-                lt.run(client.disconnect())
+                lt.run(client.connection.disconnect())
 
     def test_bare_name_read_still_caches_under_its_event(self, demo_server):
         """The bare-name compat path has no event, so the map resolves it."""
@@ -2592,19 +1987,19 @@ class TestLastValuesCache:
             "name": "bare",
             "events": {
                 "cfg": [
-                    {"name": "limit", "address": 100, "datatype": "uint16", "poll_interval": 0},
+                    {"name": "limit", "address": 101, "datatype": "uint16", "rate": 0},
                 ]
             },
         }
         client = _demo_client(demo_server, RegisterMap.from_dict(data))
         with _LoopThread() as lt:
-            client._loop = lt.loop
-            lt.run(client.connect())
+            client.connection._loop = lt.loop
+            lt.run(client.connection.connect())
             try:
                 # "limit", not "cfg/limit": _resolve_register returns event=None here.
-                result = _call_action(client, "bare", actions.read_named_register, name="limit")
+                result = _call_action(client, actions.read_named_register, name="limit")
             finally:
-                lt.run(client.disconnect())
+                lt.run(client.connection.disconnect())
 
         assert result["success"] is True
         assert client.last_values["cfg/limit"][0] == result["value"]
@@ -2615,30 +2010,29 @@ class TestLastValuesCache:
             "name": "writeback",
             "events": {
                 "cfg": [
-                    {"name": "limit", "address": 100, "datatype": "uint16", "poll_interval": 0},
+                    {"name": "limit", "address": 101, "datatype": "uint16", "rate": 0},
                 ]
             },
         }
         client = _demo_client(demo_server, RegisterMap.from_dict(data))
         with _LoopThread() as lt:
-            client._loop = lt.loop
-            lt.run(client.connect())
+            client.connection._loop = lt.loop
+            lt.run(client.connection.connect())
             try:
-                lt.run(client._poll_registers())
+                lt.run(poll_once(client))
                 assert "cfg/limit" not in client.last_values  # polling disabled
 
                 before = int(time.time() * 1000)
                 result = _call_action(
                     client,
-                    "writeback",
                     actions.write_named_register,
                     name="cfg/limit",
                     value=237,
                 )
                 assert result["success"] is True
-                snapshot = _call_action(client, "writeback", actions.get_snapshot)
+                snapshot = _call_action(client, actions.get_snapshot)
             finally:
-                lt.run(client.disconnect())
+                lt.run(client.connection.disconnect())
 
         # Without the write-through, an unpolled setpoint never appears at all.
         row = snapshot["values"]["cfg/limit"]
@@ -2647,14 +2041,12 @@ class TestLastValuesCache:
 
     def test_failed_write_does_not_touch_cache(self, register_map):
         """A write that the device rejected leaves the cache alone."""
-        # Disconnected client: write_register_value returns False without I/O.
-        client = ModbusClient(register_map=register_map, interface_name="nowrite")
+        # Nothing listens on the default endpoint: connect fails, the write returns False.
+        client = _device(register_map=register_map, name="nowrite")
         with _LoopThread() as lt:
-            client._loop = lt.loop
-            client._connected = True  # skip connect(); the write still fails (no client)
+            client.connection._loop = lt.loop
             result = _call_action(
                 client,
-                "nowrite",
                 actions.write_named_register,
                 name="setpoints/voltage_high_limit",
                 value=242,
@@ -2663,8 +2055,8 @@ class TestLastValuesCache:
         assert client.last_values == {}
 
 
-class TestListInterfacesAction:
-    """modbus/list_interfaces."""
+class TestListDevicesAction:
+    """Modbus/list_devices."""
 
     @pytest.fixture(autouse=True)
     def _clean_registry(self):
@@ -2673,134 +2065,110 @@ class TestListInterfacesAction:
         registry.clear()
 
     def test_empty_registry(self):
-        """No interfaces registered yields an empty list."""
-        result = actions.list_interfaces()
-        assert result == {"interfaces": [], "count": 0, "success": True}
+        """No devices registered yields an empty list."""
+        result = actions.list_devices()
+        assert result == {"devices": [], "count": 0, "success": True}
 
     def test_shape_and_registry_keys(self, register_map):
-        """Rows carry the documented keys and the registry's own names."""
-        named = ModbusClient(register_map=register_map, interface_name="meter", unit_id=7)
-        raw = ModbusClient(transport="rtu", serial_port="/dev/ttyUSB9", interface_name="serial0")
-        registry.register("meter", named)
-        registry.register("serial0", raw)
+        """One row per device, keyed by the registry's <connection>/<device> path."""
+        conn = ModbusConnection(host="10.0.0.5")
+        meter = ModbusDevice(conn, unit_id=7, register_map=register_map)
+        raw = ModbusDevice(conn, unit_id=2, name="aux")
+        registry.register(meter)
+        registry.register(raw)
+        conn.start("Modbus", zelos_sdk.TraceSource("Modbus"))
 
-        result = actions.list_interfaces()
+        result = actions.list_devices()
         assert result["success"] is True
-        assert result["count"] == 2
-        assert [i["name"] for i in result["interfaces"]] == registry.all_interfaces()
+        assert [row["name"] for row in result["devices"]] == ["10_0_0_5/unit7", "10_0_0_5/aux"]
 
-        rows = {i["name"]: i for i in result["interfaces"]}
-        assert set(rows["meter"]) == {
-            "name",
-            "transport",
-            "connected",
-            "connection",
-            "unit_id",
-            "source",
-            "map_name",
-            "register_count",
-            "poll_interval",
-            "write_mode",
+        rows = {row["name"]: row for row in result["devices"]}
+        assert rows["10_0_0_5/unit7"] == {
+            "name": "10_0_0_5/unit7",
+            "connection": "10_0_0_5",
+            "device": "unit7",
+            "unit_id": 7,
+            "address_base": 1,
+            "transport": "tcp",
+            "endpoint": "10.0.0.5:502",
+            "connected": False,
+            "successful_reads": 0,
+            "failed_reads": 0,
+            "trace_path": "Modbus/10_0_0_5/unit7",
+            "map_name": "power_meter",
+            "register_count": len(register_map.registers),
+            "rate": 1.0,
+            "write_mode": "auto",
+            "requested_rate": None,  # planned on the first tick
+            "achieved_rate": None,
+            "overload_pct": None,
+            "demoted": False,
+            "retry_in_s": None,
+            "tiers": [],
+            "refused": [],
         }
-        assert rows["meter"]["transport"] == "tcp"
-        assert rows["meter"]["connected"] is False
-        # Prefix-free wire endpoint, not the "[meter] host:port" log string.
-        assert rows["meter"]["connection"] == "127.0.0.1:502"
-        assert rows["meter"]["connection"] == named.endpoint
-        assert "[meter]" not in rows["meter"]["connection"]
-        assert rows["meter"]["unit_id"] == 7
-        assert rows["meter"]["map_name"] == "power_meter"
-        assert rows["meter"]["register_count"] == len(register_map.registers)
-        assert rows["meter"]["poll_interval"] == 1.0
-        assert rows["meter"]["write_mode"] == "auto"
-
-        # Raw mode (no register map).
-        assert rows["serial0"]["transport"] == "rtu"
-        assert rows["serial0"]["connection"] == "/dev/ttyUSB9@9600"
-        assert rows["serial0"]["map_name"] is None
-        assert rows["serial0"]["register_count"] == 0
+        assert rows["10_0_0_5/aux"]["map_name"] is None
+        assert rows["10_0_0_5/aux"]["register_count"] == 0
 
     def test_names_are_the_keys_other_actions_accept(self, register_map):
-        """Each reported name resolves through the shared interface lookup."""
-        registry.register("iface_a", ModbusClient(register_map=register_map))
-        registry.register("iface_b", ModbusClient())
-        for row in actions.list_interfaces()["interfaces"]:
-            assert actions.get_status(interface=row["name"]).get("error") is None
-
-    def test_source_named_interface(self, register_map):
-        """A named interface logs under its sanitized name, not the map name."""
-        client = ModbusClient(register_map=register_map, interface_name="meter.one")
-        registry.register("meter_one", client)
-        row = actions.list_interfaces()["interfaces"][0]
-        assert row["source"] == "meter_one"
-        assert client.source_name == "meter_one"
-
-    def test_source_unnamed_single_interface(self, register_map):
-        """An unnamed interface logs under the register map's name."""
-        # CLI/app single-interface mode: registry key "modbus", source = map name.
-        registry.register("modbus", ModbusClient(register_map=register_map))
-        assert actions.list_interfaces()["interfaces"][0]["source"] == "power_meter"
-
-    def test_source_unnamed_no_map(self):
-        """Without a name or a map the source falls back to "modbus"."""
-        registry.register("modbus", ModbusClient())
-        assert actions.list_interfaces()["interfaces"][0]["source"] == "modbus"
-
-    def test_source_matches_trace_source(self, register_map):
-        """The reported source is the name the client's TraceSource is created with."""
-        client = ModbusClient(register_map=register_map, interface_name="probe")
-        client._init_trace_source()
-        assert client._source.source.name == client.source_name
+        """Each reported name resolves through the shared device lookup."""
+        registry.register(_device(register_map=register_map))
+        registry.register(_device(unit_id=2))
+        for row in actions.list_devices()["devices"]:
+            assert actions.get_status(device=row["name"]).get("error") is None
 
 
 class TestGetSnapshotAction:
-    """modbus/get_snapshot."""
+    """Modbus/get_snapshot."""
 
     SHAPE = {
-        "interface",
+        "device",
+        "connection",
         "connected",
         "transport",
-        "connection",
+        "endpoint",
         "unit_id",
+        "address_base",
         "poll_count",
-        "error_count",
+        "successful_reads",
+        "failed_reads",
+        "error",
+        *_RATE_STATUS,
         "captured_at_unix_ms",
         "values",
         "success",
     }
 
-    def test_unknown_interface(self):
-        """An unknown interface uses the shared error shape."""
-        result = actions.get_snapshot(interface="nope")
+    def test_unknown_device(self):
+        """An unknown device uses the shared error shape."""
+        result = actions.get_snapshot(device="c/nope")
         assert result["success"] is False
         assert "not found" in result["error"]
 
     def test_shape_and_empty_values_before_poll(self, register_map):
         """Shape is complete and values are empty until something is read."""
-        client = ModbusClient(register_map=register_map, interface_name="snap", unit_id=3)
+        client = _device(register_map=register_map, name="snap", unit_id=3)
         before = int(time.time() * 1000)
-        result = _call_action(client, "snap", actions.get_snapshot)
+        result = _call_action(client, actions.get_snapshot)
         after = int(time.time() * 1000)
 
         assert set(result) == self.SHAPE
         assert result["success"] is True
-        assert result["interface"] == "snap"
+        assert result["device"] == "c/snap"
+        assert result["connection"] == "c"
         assert result["connected"] is False
         assert result["transport"] == "tcp"
-        # Prefix-free wire endpoint, not the "[snap] host:port" log string.
-        assert result["connection"] == "127.0.0.1:502"
-        assert result["connection"] == client.endpoint
-        assert "[snap]" not in result["connection"]
+        assert result["endpoint"] == "127.0.0.1:502"
         assert result["unit_id"] == 3
         assert result["poll_count"] == 0
-        assert result["error_count"] == 0
+        assert (result["successful_reads"], result["failed_reads"]) == (0, 0)
         assert before <= result["captured_at_unix_ms"] <= after
         assert result["values"] == {}
 
     def test_values_populated_after_poll(self, client):
         """After a sweep, values mirror the cache as {value, ts_ms} rows."""
-        polled = asyncio.get_event_loop().run_until_complete(client._poll_registers())
-        result = _call_action(client, "snap", actions.get_snapshot)
+        polled = asyncio.get_event_loop().run_until_complete(poll_once(client))
+        result = _call_action(client, actions.get_snapshot)
 
         assert result["connected"] is True
         assert result["values"]
@@ -2811,22 +2179,14 @@ class TestGetSnapshotAction:
         assert row["ts_ms"] <= result["captured_at_unix_ms"]
 
     def test_no_device_io(self, demo_server, register_map):
-        """The snapshot never touches the bus."""
+        """Served from cache without touching the bus; every ts_ms predates the capture."""
         client = _demo_client(demo_server, register_map)
         _connected_poll(client)
         calls = _spy_reads(client)
-        result = _call_action(client, "snap", actions.get_snapshot)
-
-        assert result["values"]  # served from cache
-        assert all(not v for v in calls.values())
-
-    def test_timestamps_never_exceed_capture_time(self, demo_server, register_map):
-        """Every ts_ms predates captured_at_unix_ms (cache copied before stamping)."""
-        client = _demo_client(demo_server, register_map)
-        _connected_poll(client)
-        result = _call_action(client, "snap", actions.get_snapshot)
+        result = _call_action(client, actions.get_snapshot)
 
         assert result["values"]
+        assert all(not v for v in calls.values())
         assert all(
             row["ts_ms"] <= result["captured_at_unix_ms"] for row in result["values"].values()
         )
@@ -2846,7 +2206,7 @@ class TestNonFiniteValuePayloads:
 
     def _poisoned_client(self):
         """Client whose cache holds NaN, +Inf, -Inf and one healthy value."""
-        client = ModbusClient(interface_name="poison")
+        client = _device(name="poison")
         client._last_values.update(
             {
                 "float/nan": (float("nan"), self.TS),
@@ -2862,7 +2222,7 @@ class TestNonFiniteValuePayloads:
     def test_snapshot_nulls_non_finite_and_keeps_the_rest(self):
         """Only the unserializable values become null; timestamps are untouched."""
         client = self._poisoned_client()
-        values = _call_action(client, "poison", actions.get_snapshot)["values"]
+        values = _call_action(client, actions.get_snapshot)["values"]
 
         assert values["float/nan"] == {"value": None, "ts_ms": self.TS}
         assert values["float/inf"]["value"] is None
@@ -2870,27 +2230,23 @@ class TestNonFiniteValuePayloads:
         assert values["float/ok"]["value"] == 12.5
         assert values["int/count"]["value"] == 7
         assert values["bool/relay"]["value"] is True
-
-    def test_cache_stays_faithful_to_the_device(self):
-        """Sanitizing is a wire concern: the cache keeps what was reported."""
-        client = self._poisoned_client()
-        _call_action(client, "poison", actions.get_snapshot)
-
+        # The cache keeps what the device reported.
         assert math.isnan(client.last_values["float/nan"][0])
         assert client.last_values["float/inf"][0] == float("inf")
 
     def test_snapshot_executes_through_the_sdk_registry(self):
         """End-to-end: the payload survives the SDK's Rust JSON conversion."""
         client = self._poisoned_client()
-        registry.register("poison", client)
+        registry.register(client)
         try:
-            result = zelos_sdk.actions_registry.execute("get_snapshot", {"interface": "poison"})
+            result = zelos_sdk.actions_registry.execute("get_snapshot", {"device": client.path})
         finally:
-            registry._clients.pop("poison", None)
+            registry._devices.pop(client.path, None)
 
-        assert result["success"] is True
-        assert result["values"]["float/nan"]["value"] is None
-        assert result["values"]["float/ok"]["value"] == 12.5
+        payload = result.value
+        assert payload["success"] is True
+        assert payload["values"]["float/nan"]["value"] is None
+        assert payload["values"]["float/ok"]["value"] == 12.5
 
     def test_sdk_registry_rejects_a_raw_non_finite_float(self):
         """The failure mode being guarded against, pinned against SDK drift."""
@@ -2908,20 +2264,19 @@ class TestNonFiniteValuePayloads:
         """A NaN reading is a successful read of a value JSON cannot carry."""
         data = {
             "name": "nan_read",
-            "events": {"v": [{"name": "x", "address": 0, "datatype": "float32"}]},
+            "events": {"v": [{"name": "x", "address": 1, "datatype": "float32"}]},
         }
-        client = ModbusClient(register_map=RegisterMap.from_dict(data), interface_name="nan_read")
+        client = _device(register_map=RegisterMap.from_dict(data), name="nan_read")
 
         async def _nan_read(_register):
             return float("nan")
 
-        client._connected = True  # no bus: the decode step itself is stubbed
-        client.read_register_value = _nan_read
+        client.read_register_value = _nan_read  # no bus: the decode step itself is stubbed
 
         with _LoopThread() as lt:
-            client._loop = lt.loop
-            result = _call_action(client, "nan_read", actions.read_named_register, name="v/x")
-            snapshot = _call_action(client, "nan_read", actions.get_snapshot)
+            client.connection._loop = lt.loop
+            result = _call_action(client, actions.read_named_register, name="v/x")
+            snapshot = _call_action(client, actions.get_snapshot)
 
         assert result["value"] is None
         assert result["success"] is True  # the read succeeded; the value is just not JSON
@@ -2944,32 +2299,32 @@ class TestRegisterCatalogRows:
         "description",
         "writable",
         "byte_order",
-        "poll_interval",
+        "rate",
     }
 
     @pytest.fixture(autouse=True)
     def catalog(self):
-        """Client whose map covers all three poll_interval cases."""
+        """Client whose map covers all three rate cases."""
         data = {
             "name": "catalog_device",
             "events": {
                 "sensors": [
                     {
                         "name": "temp",
-                        "address": 5,
+                        "address": 6,
                         "datatype": "int16",
                         "unit": "°C",
                         "scale": 0.1,
                         "description": "PCB temperature",
                     },
-                    {"name": "rpm", "address": 6, "poll_interval": 5.0},
-                    {"name": "serial", "address": 7, "type": "input", "poll_interval": 0},
+                    {"name": "rpm", "address": 7, "rate": 5.0},
+                    {"name": "serial", "address": 8, "type": "input", "rate": 0},
                 ],
-                "controls": [{"name": "relay", "address": 0, "type": "coil"}],
+                "controls": [{"name": "relay", "address": 1, "type": "coil"}],
             },
         }
-        client = ModbusClient(register_map=RegisterMap.from_dict(data), interface_name="cat")
-        registry.register("cat", client)
+        client = _device(register_map=RegisterMap.from_dict(data), name="cat")
+        registry.register(client)
         yield client
         registry.clear()
 
@@ -2978,7 +2333,7 @@ class TestRegisterCatalogRows:
 
     def test_row_keys_and_map_name(self):
         """Every row carries the full key set; the map name is top level."""
-        result = actions.list_registers(interface="cat")
+        result = actions.list_registers(device="c/cat")
         assert set(result) == {"registers", "count", "map_name", "success"}
         assert result["success"] is True
         assert result["map_name"] == "catalog_device"
@@ -2988,7 +2343,7 @@ class TestRegisterCatalogRows:
 
     def test_event_and_path(self):
         """event/path identify the register the way the named actions expect."""
-        rows = self._rows(actions.list_registers(interface="cat"))
+        rows = self._rows(actions.list_registers(device="c/cat"))
         assert set(rows) == {
             "sensors/temp",
             "sensors/rpm",
@@ -2998,7 +2353,7 @@ class TestRegisterCatalogRows:
         assert rows["sensors/temp"]["event"] == "sensors"
         assert rows["sensors/temp"]["path"] == "sensors/temp"
         # A path from the catalog resolves through the named-action lookup.
-        client = registry.get_client("cat")
+        client = registry.get_device("c/cat")
         error, reg, event = actions._resolve_register(client, rows["controls/relay"]["path"])
         assert error is None
         assert reg.name == "relay"
@@ -3006,27 +2361,27 @@ class TestRegisterCatalogRows:
 
     def test_scale_description_and_existing_keys(self):
         """New metadata is reported and the pre-existing keys are unchanged."""
-        row = self._rows(actions.list_registers(interface="cat"))["sensors/temp"]
+        row = self._rows(actions.list_registers(device="c/cat"))["sensors/temp"]
         assert row["scale"] == 0.1
         assert row["description"] == "PCB temperature"
         assert row["name"] == "temp"
-        assert row["address"] == 5
+        assert row["address"] == 6  # the map's (1-based) address
         assert row["type"] == "holding"
         assert row["datatype"] == "int16"
         assert row["unit"] == "°C"
         assert row["writable"] is True
         assert row["byte_order"] == "big"
 
-    def test_poll_interval_cases(self):
-        """poll_interval is raw: None inherits, 0 disables, else the register rate."""
-        rows = self._rows(actions.list_registers(interface="cat"))
-        assert rows["sensors/temp"]["poll_interval"] is None
-        assert rows["sensors/rpm"]["poll_interval"] == 5.0
-        assert rows["sensors/serial"]["poll_interval"] == 0
+    def test_rate_cases(self):
+        """rate is effective: the device rate when unset, 0 = not polled, else its own."""
+        rows = self._rows(actions.list_registers(device="c/cat"))
+        assert rows["sensors/temp"]["rate"] == 1.0
+        assert rows["sensors/rpm"]["rate"] == 5.0
+        assert rows["sensors/serial"]["rate"] == 0
 
     def test_writable_rows_consistent(self):
         """Writable rows use the same shape and exclude read-only registers."""
-        result = actions.list_writable_registers(interface="cat")
+        result = actions.list_writable_registers(device="c/cat")
         assert set(result) == {"registers", "count", "map_name", "success"}
         assert result["success"] is True
         assert result["map_name"] == "catalog_device"
@@ -3040,9 +2395,9 @@ class TestRegisterCatalogRows:
 
     def test_no_map_reports_null_map_name(self):
         """Raw mode still answers with the top-level map_name key."""
-        registry.register("raw", ModbusClient(interface_name="raw"))
+        registry.register(_device(name="raw"))
         for result in (
-            actions.list_registers(interface="raw"),
-            actions.list_writable_registers(interface="raw"),
+            actions.list_registers(device="c/raw"),
+            actions.list_writable_registers(device="c/raw"),
         ):
             assert result == {"registers": [], "count": 0, "map_name": None, "success": True}

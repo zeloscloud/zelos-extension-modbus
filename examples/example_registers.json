@@ -6,7 +6,7 @@
       {
         "name": "voltage",
         "type": "holding",
-        "address": 0,
+        "address": 1,
         "datatype": "uint16",
         "unit": "V",
         "scale": 0.1,
@@ -15,7 +15,7 @@
       {
         "name": "current",
         "type": "holding",
-        "address": 1,
+        "address": 2,
         "datatype": "uint16",
         "unit": "A",
         "scale": 0.01,
@@ -24,7 +24,7 @@
       {
         "name": "power",
         "type": "holding",
-        "address": 2,
+        "address": 3,
         "datatype": "uint32",
         "unit": "W",
         "description": "Power consumption (32-bit)"
@@ -34,7 +34,7 @@
       {
         "name": "temperature",
         "type": "input",
-        "address": 4,
+        "address": 5,
         "datatype": "int16",
         "unit": "°C",
         "scale": 0.1,
@@ -43,7 +43,7 @@
       {
         "name": "humidity",
         "type": "input",
-        "address": 5,
+        "address": 6,
         "datatype": "uint16",
         "unit": "%",
         "scale": 0.1,
@@ -54,14 +54,14 @@
       {
         "name": "relay_1",
         "type": "coil",
-        "address": 0,
+        "address": 1,
         "datatype": "bool",
         "description": "Relay 1 output"
       },
       {
         "name": "relay_2",
         "type": "coil",
-        "address": 1,
+        "address": 2,
         "datatype": "bool",
         "description": "Relay 2 output"
       }
@@ -70,7 +70,7 @@
       {
         "name": "button_1",
         "type": "discrete_input",
-        "address": 0,
+        "address": 1,
         "datatype": "bool",
         "description": "Button 1 input"
       }
