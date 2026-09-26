@@ -50,6 +50,7 @@ class TestBuildRegisterMap:
         assert result["events"]["exercise_time"][0]["address"] == 0
         assert result["events"]["exercise_time_2"][0]["name"] == "exercise_time_2"
         assert result["events"]["exercise_time_2"][0]["address"] == 5
+        assert result["device"] == {"address_base": 0}  # the sheet index is the wire address
 
     def test_identical_rows_deduped(self):
         rows = [_row(0, "Frequency"), _row(0, "Frequency")]

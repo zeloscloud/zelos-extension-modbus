@@ -160,6 +160,8 @@ def build_register_map(
     return {
         "name": device_name,
         "description": description,
+        # "Register Index" is the 0-based wire address (the first row is 0).
+        "device": {"address_base": 0},
         "events": events,
     }
 

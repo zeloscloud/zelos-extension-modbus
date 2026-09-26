@@ -23,6 +23,7 @@ dist/
 pip-wheel-metadata/
 zelos_extension_modbus.egg-info/
 zelos-modbus-v*.tar.gz
+actions.json
 scripts/__pycache__/
 
 # Logs and temp files

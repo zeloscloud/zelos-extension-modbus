@@ -1,7 +1,9 @@
-"""Simulated industrial power meter for demo mode.
+"""Simulated devices for demo mode and scan testing.
 
-Uses pymodbus to run a local Modbus TCP server with realistic
-power meter data that changes over time.
+Uses pymodbus to run a local Modbus server (TCP, or RTU on a serial port)
+with either a realistic power meter or a scan target: a sparse device with
+holes, a 60-register read limit, device identification and seeded regions in
+every byte order, for exercising ``scan``.
 """
 
 from __future__ import annotations
@@ -13,17 +15,20 @@ import random
 import struct
 import threading
 import time
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
+from typing import Any
 
+from pymodbus import FramerType, ModbusDeviceIdentification
+from pymodbus.constants import ExcCodes
 from pymodbus.datastore import (
     ModbusDeviceContext,
     ModbusSequentialDataBlock,
     ModbusServerContext,
 )
-from pymodbus.server import StartAsyncTcpServer
+from pymodbus.datastore.store import BaseModbusDataBlock
+from pymodbus.server import StartAsyncSerialServer, StartAsyncTcpServer
 
-if TYPE_CHECKING:
-    pass
+from zelos_extension_modbus.client import encode_value
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +193,7 @@ class SimulatorUpdater:
         simulator: PowerMeterSimulator,
         context: ModbusServerContext,
         interval: float = 0.1,
+        unit_id: int = 0,
     ) -> None:
         """Initialize updater.
 
@@ -195,10 +201,12 @@ class SimulatorUpdater:
             simulator: PowerMeterSimulator instance
             context: Modbus server context
             interval: Update interval in seconds
+            unit_id: Unit whose datastore to drive (any id on a single context)
         """
         self.simulator = simulator
         self.context = context
         self.interval = interval
+        self.unit_id = unit_id
         self._running = False
         self._thread: threading.Thread | None = None
 
@@ -232,7 +240,7 @@ class SimulatorUpdater:
 
     def _update_datastore(self, values: dict) -> None:
         """Write simulator values to Modbus datastore."""
-        device = self.context[0]
+        device = self.context[self.unit_id]
 
         # Holding registers (float32 values as register pairs)
         hr = device.store["h"]
@@ -294,8 +302,20 @@ class SimulatorUpdater:
             di.setValues(ADDR_DI_DOOR + 1, [not current])
 
 
-def create_demo_context() -> ModbusServerContext:
-    """Create Modbus server context with demo datastore."""
+def create_demo_context(unit_ids: Sequence[int] = ()) -> ModbusServerContext:
+    """Create Modbus server context with demo datastore.
+
+    No ``unit_ids``: one meter answers every unit id. Otherwise each id gets its
+    own meter, told apart by serial number ``12345678 + unit_id``.
+    """
+    if not unit_ids:
+        return ModbusServerContext(devices=_demo_device(12345678), single=True)
+    devices = {uid: _demo_device(12345678 + uid) for uid in unit_ids}
+    return ModbusServerContext(devices=devices, single=False)
+
+
+def _demo_device(serial: int) -> ModbusDeviceContext:
+    """One meter's datastore with its initial values."""
     # Initialize data blocks
     # Holding registers: 200 registers (to cover setpoints and swapped floats)
     hr_block = ModbusSequentialDataBlock(0, [0] * 200)
@@ -317,9 +337,7 @@ def create_demo_context() -> ModbusServerContext:
     )
 
     # Set initial values for setpoints in holding registers
-    # Note: pymodbus 3.x uses 'devices' instead of 'slaves'
-    ctx = ModbusServerContext(devices=device, single=True)
-    hr = ctx[0].store["h"]
+    hr = device.store["h"]
     hr.setValues(ADDR_VOLTAGE_HIGH + 1, [250])  # 250V high limit
     hr.setValues(ADDR_VOLTAGE_LOW + 1, [210])  # 210V low limit
     r1, r2 = int32_to_registers(50000)  # 50kW power limit
@@ -333,50 +351,208 @@ def create_demo_context() -> ModbusServerContext:
     hr.setValues(ADDR_OFFSET_VAL + 1, [r1, r2])
 
     # Set initial values for input registers (read-only)
-    ir = ctx[0].store["i"]
+    ir = device.store["i"]
     ir.setValues(ADDR_IR_FIRMWARE + 1, [0x0102])  # Firmware v1.2
-    r1, r2 = uint32_to_registers(12345678)  # Serial number
+    r1, r2 = uint32_to_registers(serial)  # Serial number
     ir.setValues(ADDR_IR_SERIAL + 1, [r1, r2])
 
     # Set initial values for discrete inputs (read-only booleans)
-    di = ctx[0].store["d"]
+    di = device.store["d"]
     di.setValues(ADDR_DI_DOOR + 1, [False])  # door closed
     di.setValues(ADDR_DI_FAULT + 1, [False])  # no fault
     di.setValues(ADDR_DI_GRID + 1, [True])  # grid connected
 
-    return ctx
+    return device
+
+
+# ---------------------------------------------------------------------------
+# Scan target
+# ---------------------------------------------------------------------------
+
+#: Largest read the scan target serves; bigger reads get exception 03.
+SCAN_TARGET_MAX_BLOCK = 60
+
+#: Valid 0-based addresses per table as inclusive (first, last) ranges. Every
+#: other address answers exception 02, or 0 in zero-fill mode.
+SCAN_TARGET_RANGES = {
+    "holding": [(0, 149), (200, 219), (300, 319), (400, 419), (1000, 1009)],
+    "input": [(0, 29)],
+    "coil": [(0, 15)],
+    "discrete_input": [(0, 7)],
+}
+
+#: Holding runs of ten float32 values, by first address, in each byte order.
+SCAN_TARGET_FLOATS = {0: "big", 200: "big_swap", 300: "little", 400: "little_swap"}
+SCAN_TARGET_COUNTER = 20  # uint32 big, climbs 20000/s so the low word wraps
+SCAN_TARGET_STRING = (30, "ZELOS SCAN TARGET")  # 17 chars -> 9 registers, NUL padded
+SCAN_TARGET_IDENTITY = {
+    "VendorName": "Zelos",
+    "ProductCode": "ZSCAN-1",
+    "MajorMinorRevision": "1.0",
+    "VendorUrl": "https://zeloscloud.io",
+    "ProductName": "Scan target",
+    "ModelName": "ST-1",
+    "UserApplicationName": "demo-server",
+}
+SUNSPEC_BASE = 40000
+_SUNSPEC_WORDS = [0x5375, 0x6E53, 0xFFFF, 0x0000]  # 'SunS' + end-of-models marker
+
+_FLOAT_BASES = [230.0, 231.0, 229.0, 12.5, 13.1, 11.8, 50.0, 0.95, 1500.0, -3.2]
+
+
+class _SparseBlock(BaseModbusDataBlock):
+    """Datablock with holes and a per-read size limit, like a real device.
+
+    pymodbus' device context passes ``address + 1``; the block keys by the
+    0-based wire address.
+    """
+
+    def __init__(self, values: dict[int, Any], max_count: int, zero_fill: bool) -> None:
+        self.values = values
+        self.address = 0
+        self.default_value = 0
+        self.max_count = max_count
+        self.zero_fill = zero_fill
+
+    def getValues(self, address: int, count: int = 1) -> list[Any] | ExcCodes:  # noqa: N802
+        if count > self.max_count:
+            return ExcCodes.ILLEGAL_VALUE
+        addrs = range(address - 1, address - 1 + count)
+        if not self.zero_fill and any(a not in self.values for a in addrs):
+            return ExcCodes.ILLEGAL_ADDRESS
+        return [self.values.get(a, 0) for a in addrs]
+
+    def setValues(self, address: int, values: list[Any]) -> ExcCodes:  # noqa: N802
+        return ExcCodes.ILLEGAL_FUNCTION  # read-only device
+
+
+class ScanTarget:
+    """A sparse device seeded with what scan must recover (see SCAN_TARGET_*)."""
+
+    def __init__(self, zero_fill: bool = False, sunspec: bool = False) -> None:
+        self.start_time = time.time()
+        self.tables: dict[str, dict[int, Any]] = {}
+        for table, ranges in SCAN_TARGET_RANGES.items():
+            is_bits = table in ("coil", "discrete_input")
+            self.tables[table] = {
+                a: (False if is_bits else 0) for lo, hi in ranges for a in range(lo, hi + 1)
+            }
+        hr, ir = self.tables["holding"], self.tables["input"]
+        start, text = SCAN_TARGET_STRING
+        raw = text.encode().ljust(18, b"\0")
+        for i in range(9):
+            hr[start + i] = int.from_bytes(raw[2 * i : 2 * i + 2])
+        hr.update({24: 0x0102, 25: 7, 26: 42, 27: 1, 28: 500, 29: 3})
+        hr.update({1005 + i: v for i, v in enumerate((10, 20, 30, 40, 50))})
+        ir.update({20 + i: 100 * (i + 1) for i in range(10)})
+        if sunspec:
+            hr.update({SUNSPEC_BASE + i: w for i, w in enumerate(_SUNSPEC_WORDS)})
+        self.context = ModbusServerContext(
+            devices=ModbusDeviceContext(
+                **{
+                    key: _SparseBlock(self.tables[table], SCAN_TARGET_MAX_BLOCK, zero_fill)
+                    for table, key in (
+                        ("holding", "hr"),
+                        ("input", "ir"),
+                        ("coil", "co"),
+                        ("discrete_input", "di"),
+                    )
+                }
+            ),
+            single=True,
+        )
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self.update()
+
+    def update(self) -> None:
+        """Move the live values: floats wander, the counter climbs, bits toggle."""
+        t = time.time() - self.start_time
+        hr, ir = self.tables["holding"], self.tables["input"]
+        for base, order in SCAN_TARGET_FLOATS.items():
+            for k, nominal in enumerate(_FLOAT_BASES):
+                value = nominal * (1 + 0.02 * math.sin(0.7 * t + k + base))
+                hr[base + 2 * k], hr[base + 2 * k + 1] = encode_value(value, "float32", 1, order)
+        hr[20], hr[21] = encode_value(3_000_000 + int(20_000 * t), "uint32")
+        hr[22] = 1000 + int(50 * math.sin(t))  # analog uint16
+        hr[23] = 1 << (int(t) % 4)  # one status bit at a time
+        for k in range(5):
+            ir[2 * k], ir[2 * k + 1] = encode_value(20.0 + k + math.sin(t + k), "float32")
+        ir[10] = int(t) & 0xFFFF  # uptime seconds
+        self.tables["coil"][0] = int(t) % 2 == 0
+        self.tables["discrete_input"][1] = int(t / 2) % 2 == 0
+
+    def start(self, interval: float = 0.1) -> None:
+        """Update in a background thread."""
+        self._running = True
+
+        def run() -> None:
+            while self._running:
+                self.update()
+                time.sleep(interval)
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop the update thread."""
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=1.0)
 
 
 async def run_demo_server(
     host: str = "127.0.0.1",
     port: int = 5020,
     running_flag: asyncio.Event | None = None,
+    unit_ids: Sequence[int] = (),
+    scan_target: bool = False,
+    zero_fill: bool = False,
+    sunspec: bool = False,
+    serial: dict[str, Any] | None = None,
 ) -> None:
-    """Run the demo Modbus TCP server.
+    """Run the demo Modbus server.
 
     Args:
         host: Server bind address
         port: Server port
         running_flag: Optional event to signal shutdown
+        unit_ids: One meter per id (see create_demo_context); empty = one for all
+        scan_target: Serve the scan target instead of the power meter
+        zero_fill: Scan target answers unmapped addresses with 0, not exception 02
+        sunspec: Scan target carries the SunSpec 'SunS' marker at 40000
+        serial: RTU on a serial port instead of TCP: ``port``, ``baudrate``,
+            ``parity``, ``stopbits``
     """
-    context = create_demo_context()
-    simulator = PowerMeterSimulator()
-    updater = SimulatorUpdater(simulator, context)
-
-    updater.start()
-
-    logger.info(f"Starting demo Modbus server on {host}:{port}")
+    identity = None
+    if scan_target:
+        target = ScanTarget(zero_fill=zero_fill, sunspec=sunspec)
+        context = target.context
+        updaters: list[Any] = [target]
+        identity = ModbusDeviceIdentification(info_name=SCAN_TARGET_IDENTITY)
+    else:
+        context = create_demo_context(unit_ids)
+        updaters = [
+            SimulatorUpdater(PowerMeterSimulator(), context, unit_id=uid) for uid in unit_ids or [0]
+        ]
+    for updater in updaters:
+        updater.start()
 
     try:
-        await StartAsyncTcpServer(
-            context=context,
-            address=(host, port),
-        )
+        if serial:
+            logger.info(f"Starting demo Modbus RTU server on {serial['port']}")
+            await StartAsyncSerialServer(
+                context=context, identity=identity, framer=FramerType.RTU, **serial
+            )
+        else:
+            logger.info(f"Starting demo Modbus server on {host}:{port}")
+            await StartAsyncTcpServer(context=context, identity=identity, address=(host, port))
     finally:
-        updater.stop()
+        for updater in updaters:
+            updater.stop()
 
 
-def run_demo_server_sync(host: str = "127.0.0.1", port: int = 5020) -> None:
+def run_demo_server_sync(host: str = "127.0.0.1", port: int = 5020, **kwargs: Any) -> None:
     """Blocking wrapper around :func:`run_demo_server` for CLI use.
 
     A failed bind raises a RuntimeError naming the endpoint. pymodbus reduces the
@@ -388,7 +564,7 @@ def run_demo_server_sync(host: str = "127.0.0.1", port: int = 5020) -> None:
         RuntimeError: The server could not bind ``host:port``.
     """
     try:
-        asyncio.run(run_demo_server(host=host, port=port))
+        asyncio.run(run_demo_server(host=host, port=port, **kwargs))
     except KeyboardInterrupt:
         logger.info("Demo server stopped")
     except (OSError, RuntimeError) as e:

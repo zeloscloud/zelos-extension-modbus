@@ -29,7 +29,7 @@ test:
 dev:
     uv run python main.py
 
-# Run the power-meter simulator to point an interface at (127.0.0.1:5020)
+# Run the power-meter simulator to point a connection at (127.0.0.1:5020)
 sim:
     uv run python main.py demo-server
 

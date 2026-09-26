@@ -3,14 +3,15 @@
   "type": "object",
   "title": "Modbus Configuration",
   "description": "Connect to one or more Modbus devices over TCP or RS232/RS485 serial (RTU).",
+  "ui:options": {"autoconfig": "Modbus/auto_config"},
   "properties": {
-    "interfaces": {
+    "connections": {
       "type": "array",
-      "title": "Interfaces",
-      "description": "Configure Modbus interfaces to monitor. Click 'Add' to add a new interface.",
+      "title": "Connections",
+      "description": "Each connection is a TCP endpoint or a serial port, with the devices reached over it. Click 'Add' to add a connection.",
       "minItems": 1,
       "items": {
-        "title": "Interface",
+        "title": "Connection",
         "type": "object",
         "properties": {
           "transport": {
@@ -26,6 +27,102 @@
               "RTU (Serial RS232/RS485)"
             ],
             "default": "tcp"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Optional name for this connection in the trace (defaults to the host address or serial port)",
+            "ui:placeholder": "meter_panel"
+          },
+          "devices": {
+            "type": "array",
+            "title": "Devices",
+            "description": "Modbus devices (unit IDs) on this connection. They share the link and are polled one request at a time.",
+            "minItems": 1,
+            "items": {
+              "title": "Device",
+              "type": "object",
+              "properties": {
+                "unit_id": {
+                  "type": "integer",
+                  "title": "Unit ID",
+                  "description": "Modbus slave/unit ID of the target device",
+                  "default": 1,
+                  "minimum": 0,
+                  "maximum": 255
+                },
+                "name": {
+                  "type": "string",
+                  "title": "Name",
+                  "description": "Optional name for this device in the trace (defaults to unit<ID>, e.g. unit1)",
+                  "ui:placeholder": "unit1"
+                },
+                "register_map": {
+                  "type": "string",
+                  "title": "Register Map",
+                  "description": "Where the device's register map comes from: a JSON file, or SunSpec discovery at connect (read-only, for SunSpec inverters, meters and batteries).",
+                  "enum": [
+                    "file",
+                    "sunspec"
+                  ],
+                  "enumNames": [
+                    "Register map file",
+                    "SunSpec (auto-discover)"
+                  ],
+                  "default": "file"
+                },
+                "rate": {
+                  "type": "number",
+                  "title": "Rate (seconds)",
+                  "description": "Poll rate for registers without their own rate. Empty: the Advanced default rate. 0 = not polled (actions still read and write).",
+                  "minimum": 0,
+                  "ui:placeholder": "1.0"
+                }
+              },
+              "required": [
+                "unit_id"
+              ],
+              "dependencies": {
+                "register_map": {
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "register_map": {
+                          "enum": [
+                            "file"
+                          ]
+                        },
+                        "register_map_file": {
+                          "type": "string",
+                          "title": "Register Map File",
+                          "description": "JSON file that defines which registers to read and how to decode them",
+                          "ui:widget": "file-picker",
+                          "ui:options": {
+                            "accept": ".json"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "register_map": {
+                          "enum": [
+                            "sunspec"
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "ui:order": [
+                "unit_id",
+                "name",
+                "register_map",
+                "register_map_file",
+                "*"
+              ]
+            }
           }
         },
         "required": [
@@ -41,21 +138,6 @@
                       "tcp"
                     ]
                   },
-                  "name": {
-                    "type": "string",
-                    "title": "Name",
-                    "description": "Optional name to identify this interface (defaults to host address)",
-                    "ui:placeholder": "power_meter_1"
-                  },
-                  "register_map_file": {
-                    "type": "string",
-                    "title": "Register Map File",
-                    "description": "JSON file that defines which registers to read and how to decode them",
-                    "ui:widget": "file-picker",
-                    "ui:options": {
-                      "accept": ".json"
-                    }
-                  },
                   "host": {
                     "type": "string",
                     "title": "Host",
@@ -70,72 +152,11 @@
                     "default": 502,
                     "minimum": 1,
                     "maximum": 65535
-                  },
-                  "unit_id": {
-                    "type": "integer",
-                    "title": "Unit ID",
-                    "description": "Modbus slave/unit ID of the target device",
-                    "default": 1,
-                    "minimum": 0,
-                    "maximum": 255
-                  },
-                  "poll_interval": {
-                    "type": "number",
-                    "title": "Poll Interval (seconds)",
-                    "description": "Default poll rate for all registers (a register may override this with its own poll_interval)",
-                    "default": 1.0,
-                    "minimum": 0.01,
-                    "maximum": 60.0
-                  },
-                  "timeout": {
-                    "type": "number",
-                    "title": "Timeout (seconds)",
-                    "description": "How long to wait for a response before retrying",
-                    "default": 3.0,
-                    "minimum": 0.5,
-                    "maximum": 30.0
-                  },
-                  "block_reads": {
-                    "type": "boolean",
-                    "title": "Block Reads",
-                    "description": "Coalesce contiguous registers into range reads (far fewer transactions per sweep)",
-                    "default": true,
-                    "ui:widget": "toggle"
-                  },
-                  "max_block_size": {
-                    "type": "integer",
-                    "title": "Max Block Size",
-                    "description": "Maximum registers per range read",
-                    "default": 125,
-                    "minimum": 1,
-                    "maximum": 125
-                  },
-                  "max_read_gap": {
-                    "type": "integer",
-                    "title": "Max Read Gap",
-                    "description": "Maximum uncovered registers to bridge within a block (0 = strictly contiguous)",
-                    "default": 0,
-                    "minimum": 0
-                  },
-                  "write_mode": {
-                    "type": "string",
-                    "title": "Write Mode",
-                    "description": "Function code for single-register writes. 'auto' uses FC 6; 'fc16' always uses FC 16 (required by some devices).",
-                    "enum": [
-                      "auto",
-                      "fc16"
-                    ],
-                    "enumNames": [
-                      "Auto (FC 6 / FC 16)",
-                      "Always FC 16"
-                    ],
-                    "default": "auto"
                   }
                 },
                 "required": [
                   "host",
-                  "port",
-                  "unit_id"
+                  "port"
                 ]
               },
               {
@@ -145,26 +166,15 @@
                       "rtu"
                     ]
                   },
-                  "name": {
-                    "type": "string",
-                    "title": "Name",
-                    "description": "Optional name to identify this interface (defaults to serial port path)",
-                    "ui:placeholder": "modbus"
-                  },
-                  "register_map_file": {
-                    "type": "string",
-                    "title": "Register Map File",
-                    "description": "JSON file that defines which registers to read and how to decode them",
-                    "ui:widget": "file-picker",
-                    "ui:options": {
-                      "accept": ".json"
-                    }
-                  },
                   "serial_port": {
                     "type": "string",
                     "title": "Serial Port",
-                    "description": "Device path for the RS232/RS485 adapter (e.g. /dev/ttyUSB0 on Linux, COM3 on Windows)",
-                    "ui:placeholder": "/dev/ttyUSB0"
+                    "description": "Device path for the RS232/RS485 adapter (e.g. /dev/ttyUSB0 on Linux, COM3 on Windows). Choose from the ports on the machine running the agent, or type a path.",
+                    "ui:placeholder": "/dev/ttyUSB0",
+                    "ui:widget": "action-choices",
+                    "ui:options": {
+                      "action": "Modbus/list_serial_ports"
+                    }
                   },
                   "baudrate": {
                     "type": "integer",
@@ -217,92 +227,156 @@
                       8
                     ],
                     "default": 8
-                  },
-                  "unit_id": {
-                    "type": "integer",
-                    "title": "Unit ID",
-                    "description": "Modbus slave/unit ID of the target device",
-                    "default": 1,
-                    "minimum": 0,
-                    "maximum": 255
-                  },
-                  "poll_interval": {
-                    "type": "number",
-                    "title": "Poll Interval (seconds)",
-                    "description": "Default poll rate for all registers (a register may override this with its own poll_interval)",
-                    "default": 1.0,
-                    "minimum": 0.01,
-                    "maximum": 60.0
-                  },
-                  "timeout": {
-                    "type": "number",
-                    "title": "Timeout (seconds)",
-                    "description": "How long to wait for a response before retrying",
-                    "default": 3.0,
-                    "minimum": 0.5,
-                    "maximum": 30.0
-                  },
-                  "block_reads": {
-                    "type": "boolean",
-                    "title": "Block Reads",
-                    "description": "Coalesce contiguous registers into range reads (far fewer transactions per sweep)",
-                    "default": true,
-                    "ui:widget": "toggle"
-                  },
-                  "max_block_size": {
-                    "type": "integer",
-                    "title": "Max Block Size",
-                    "description": "Maximum registers per range read",
-                    "default": 125,
-                    "minimum": 1,
-                    "maximum": 125
-                  },
-                  "max_read_gap": {
-                    "type": "integer",
-                    "title": "Max Read Gap",
-                    "description": "Maximum uncovered registers to bridge within a block (0 = strictly contiguous)",
-                    "default": 0,
-                    "minimum": 0
-                  },
-                  "write_mode": {
-                    "type": "string",
-                    "title": "Write Mode",
-                    "description": "Function code for single-register writes. 'auto' uses FC 6; 'fc16' always uses FC 16 (required by some devices).",
-                    "enum": [
-                      "auto",
-                      "fc16"
-                    ],
-                    "enumNames": [
-                      "Auto (FC 6 / FC 16)",
-                      "Always FC 16"
-                    ],
-                    "default": "auto"
                   }
                 },
                 "required": [
-                  "serial_port",
-                  "unit_id"
+                  "serial_port"
                 ]
               }
             ]
           }
-        }
+        },
+        "ui:order": [
+          "transport",
+          "name",
+          "*",
+          "devices"
+        ]
       }
     },
-    "log_level": {
-      "type": "string",
-      "title": "Log Level",
-      "description": "Extension logging verbosity",
-      "enum": [
-        "DEBUG",
-        "INFO",
-        "WARNING",
-        "ERROR"
-      ],
-      "default": "INFO"
+    "advanced": {
+      "type": "object",
+      "title": "Advanced",
+      "description": "Settings that apply to every connection and device.",
+      "properties": {
+        "prefix": {
+          "type": "string",
+          "title": "Prefix",
+          "description": "Leading trace source every connection publishes under, so events read '<prefix>/<connection>/<device>/<event>'. Clear it to give each connection its own trace source with events '<device>/<event>'.",
+          "default": "Modbus",
+          "ui:placeholder": "Modbus",
+          "ui:emptyValue": ""
+        },
+        "default_rate": {
+          "type": "number",
+          "title": "Default Rate (seconds)",
+          "description": "Poll rate for devices and registers that set none. Slower registers are spread one read per tick so they never stall the fastest.",
+          "default": 1.0,
+          "minimum": 0.01
+        },
+        "log_level": {
+          "type": "string",
+          "title": "Log Level",
+          "description": "Extension logging verbosity",
+          "enum": [
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR"
+          ],
+          "default": "INFO"
+        },
+        "timeout": {
+          "type": "number",
+          "title": "Timeout (seconds)",
+          "description": "How long to wait for a response before retrying",
+          "default": 3.0,
+          "minimum": 0.5,
+          "maximum": 30.0
+        },
+        "retries": {
+          "type": "integer",
+          "title": "Retries",
+          "description": "Extra attempts per request before it counts as failed. Each failed request costs timeout x (1 + retries).",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 5
+        },
+        "request_delay_ms": {
+          "type": "integer",
+          "title": "Request Delay (ms)",
+          "description": "Minimum gap between consecutive requests on a connection. For RS485 gateways and slow RTU devices.",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 5000
+        },
+        "connect_delay_ms": {
+          "type": "integer",
+          "title": "Connect Delay (ms)",
+          "description": "Pause after each (re)connect before the first request, for devices that drop requests sent right after accepting a connection.",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "demote_after": {
+          "type": "integer",
+          "title": "Demote After (timeouts)",
+          "description": "Consecutive timeouts before a device is skipped, so a dead device cannot stall the others on its connection. It is probed with one request after 10 s, doubling up to Demote Max.",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 100
+        },
+        "demote_max_s": {
+          "type": "number",
+          "title": "Demote Max (seconds)",
+          "description": "Longest wait between probes of a demoted device.",
+          "default": 300,
+          "minimum": 10,
+          "maximum": 3600
+        },
+        "block_reads": {
+          "type": "boolean",
+          "title": "Block Reads",
+          "description": "Coalesce contiguous registers into range reads (far fewer transactions per sweep)",
+          "default": true,
+          "ui:widget": "toggle"
+        },
+        "max_block_size": {
+          "type": "integer",
+          "title": "Max Block Size",
+          "description": "Maximum registers per range read (a register map 'device' block overrides it)",
+          "default": 125,
+          "minimum": 1,
+          "maximum": 125
+        },
+        "max_bit_block_size": {
+          "type": "integer",
+          "title": "Max Bit Block Size",
+          "description": "Maximum coils or discrete inputs per range read (a register map 'device' block overrides it)",
+          "default": 2000,
+          "minimum": 1,
+          "maximum": 2000
+        },
+        "max_read_gap": {
+          "type": "integer",
+          "title": "Max Read Gap",
+          "description": "Maximum uncovered registers to bridge within a block (0 = strictly contiguous)",
+          "default": 0,
+          "minimum": 0
+        },
+        "write_mode": {
+          "type": "string",
+          "title": "Write Mode",
+          "description": "Function code for single-register writes. 'auto' uses FC 6; 'fc16' always uses FC 16 (required by some devices).",
+          "enum": [
+            "auto",
+            "fc16"
+          ],
+          "enumNames": [
+            "Auto (FC 6 / FC 16)",
+            "Always FC 16"
+          ],
+          "default": "auto"
+        }
+      },
+      "additionalProperties": false,
+      "default": {},
+      "ui:options": {
+        "collapsed": true
+      }
     }
   },
   "required": [
-    "interfaces"
+    "connections"
   ]
 }

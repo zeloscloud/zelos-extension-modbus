@@ -145,7 +145,7 @@ def randomize_once(context: ModbusServerContext, register_map: RegisterMap) -> N
             value = _random_raw_value(reg)
             _write_register(context, reg, value)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("failed to randomize %s@%d: %s", reg.name, reg.address, exc)
+            logger.warning("failed to randomize %s@%d: %s", reg.name, reg.map_address, exc)
 
 
 class MockUpdater:

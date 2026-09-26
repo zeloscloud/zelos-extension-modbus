@@ -1,6 +1,6 @@
-"""Global client registry and dynamic dropdown helpers for actions.
+"""Global device registry and dynamic dropdown helpers for actions.
 
-Clients are registered here after creation so that free-standing ``@action``
+Devices are registered here after creation so that free-standing ``@action``
 functions can reference them via dynamic ``choices`` callbacks.
 """
 
@@ -9,53 +9,52 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .client import ModbusClient
+    from .client import ModbusDevice
 
-# Global registry: interface_name -> ModbusClient instance
-_clients: dict[str, ModbusClient] = {}
-
-
-def register(name: str, client: ModbusClient) -> None:
-    """Register a client for use by action dynamic dropdowns."""
-    _clients[name] = client
+# Global registry: "<connection>/<device>" -> ModbusDevice
+_devices: dict[str, ModbusDevice] = {}
 
 
-def get_client(name: str) -> ModbusClient | None:
-    """Look up a registered client by name."""
-    return _clients.get(name)
+def register(device: ModbusDevice) -> None:
+    """Register a device under its ``<connection>/<device>`` path."""
+    _devices[device.path] = device
+
+
+def get_device(path: str) -> ModbusDevice | None:
+    """Look up a registered device by path."""
+    return _devices.get(path)
 
 
 def clear() -> None:
     """Clear the registry (useful for tests)."""
-    _clients.clear()
+    _devices.clear()
 
 
 # --- Dynamic dropdown callbacks (passed as choices=callable) ---
 
 
-def all_interfaces() -> list[str]:
-    """Return names of all registered interfaces."""
-    return list(_clients.keys())
+def all_devices() -> list[str]:
+    """Return paths of all registered devices."""
+    return list(_devices.keys())
 
 
-def interface_registers(interface: str) -> list[str]:
-    """Return event/field paths for all registers on a given interface."""
-    client = _clients.get(interface)
-    if not client or not client.register_map:
-        return []
-    return [
-        f"{event}/{reg.name}" for event, regs in client.register_map.events.items() for reg in regs
-    ]
-
-
-def interface_writable_registers(interface: str) -> list[str]:
-    """Return event/field paths for writable registers on a given interface."""
-    client = _clients.get(interface)
-    if not client or not client.register_map:
+def _paths(device: str, writable_only: bool) -> list[str]:
+    dev = _devices.get(device)
+    if not dev or not dev.register_map:
         return []
     return [
         f"{event}/{reg.name}"
-        for event, regs in client.register_map.events.items()
+        for event, regs in dev.register_map.events.items()
         for reg in regs
-        if reg.writable
+        if reg.writable or not writable_only
     ]
+
+
+def device_registers(device: str) -> list[str]:
+    """Event/field paths of every register on ``device``."""
+    return _paths(device, writable_only=False)
+
+
+def device_writable_registers(device: str) -> list[str]:
+    """Event/field paths of the writable registers on ``device``."""
+    return _paths(device, writable_only=True)
