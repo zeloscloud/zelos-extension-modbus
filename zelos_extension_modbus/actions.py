@@ -860,32 +860,43 @@ def verify_map(
     return asyncio.run(run_verify(endpoint, register_map, unit, max_seconds=max_seconds))
 
 
+#: Probed when there is no connection: the Modbus TCP well-known port on this host.
+DEFAULT_CONNECTION: dict[str, Any] = {"transport": Transport.TCP, "host": "127.0.0.1", "port": 502}
+
+
 @zelos_sdk.action(
     "Auto-configure",
-    "Quick device discovery for the config form (seconds): on each configured connection, "
-    "find the units that answer among the configured unit, 1-10 and 247 (RTU: also serial "
+    "Quick device discovery for the config form (seconds): on each connection, find the "
+    "units that answer among the configured unit, 1-10 and 247 (RTU: also serial "
     "settings), read their identity, and add a device per new unit. Where the SunSpec "
     "marker is found, register_map is set to sunspec (new or existing units; an existing "
     "unit with a register_map_file keeps it). Existing devices are kept. Returns the "
-    "config; review, then save and start. Sweeps the SAVED config's connections (save "
-    "the form first), all within 25 s; what did not fit is reported. For a register "
-    "map use Scan Device.",
+    "config; review, then save and start. Sweeps the form's connections (older apps: the "
+    "saved config's); with none, probes 127.0.0.1:502. All within 25 s; what did not fit "
+    "is reported. For a register map use Scan Device.",
     timeout=900.0,
     standalone=True,
 )
-def auto_config() -> dict[str, Any]:
+@zelos_sdk.action.object(
+    "config",
+    properties={},
+    title="Config",
+    description="The config form's current (possibly unsaved) data. Empty: the saved config",
+    required=False,
+)
+def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     """The app's auto-configure contract: ``config.connections`` replaces the form's."""
     from zelos_extension_modbus.cli.app import link_kwargs
     from zelos_extension_modbus.scan import ScanLink, quiet_pymodbus, sweep
 
     _refuse_if_running()
-    connections = _configured_connections()
-    if not connections:
-        return {
-            "status": "error",
-            "message": "Add a connection (host, or serial port) first; Auto-configure sweeps "
-            "it for unit IDs.",
-        }
+    if config is None:
+        connections = _configured_connections()
+    else:
+        connections = [c for c in config.get("connections") or [] if isinstance(c, dict)]
+    probe = not connections
+    if probe:
+        connections = [DEFAULT_CONNECTION]
     quiet_pymodbus()
     deadline = time.monotonic() + AUTO_CONFIG_SECONDS
     out, found, swept, seen, cut = [], 0, [], [], []
@@ -929,6 +940,13 @@ def auto_config() -> dict[str, Any]:
         conn["devices"] = devices
         out.append(conn)
     partial = f" Not fully swept in {AUTO_CONFIG_SECONDS:g} s: {', '.join(cut)}." if cut else ""
+    if not found and probe:
+        host, port = DEFAULT_CONNECTION["host"], DEFAULT_CONNECTION["port"]
+        return {
+            "status": "error",
+            "message": "No connection to scan. Add one (host and port, or a serial port) and "
+            f"press Auto-configure; nothing answered on {host}:{port}.",
+        }
     if not found:
         return {
             "status": "error",
