@@ -10,7 +10,7 @@
     "connections": {
       "type": "array",
       "title": "Connections",
-      "description": "Each connection is a TCP endpoint or a serial port, with the devices reached over it. Click 'Add' to add a connection, or use Auto-configure to discover devices on the saved connections.",
+      "description": "Each connection is a TCP endpoint or a serial port, with the devices reached over it. Click 'Add' to add a connection, or use Auto-configure to discover devices on them (none: it probes 127.0.0.1:502).",
       "items": {
         "title": "Connection",
         "type": "object",

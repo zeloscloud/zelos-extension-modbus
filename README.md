@@ -209,7 +209,7 @@ With the extension stopped, the same runs as actions. They return the report and
 
 | Action | Description |
 |--------|-------------|
-| `auto_config` | Quick, the config form's Auto-configure: sweeps each saved connection's configured unit, 1-10 and 247 (RTU: also serial settings), identifies them, keeps its devices and adds one per new unit, `register_map: sunspec` where the marker is found (also on a configured unit, unless it sets `register_map_file`). One 25 s budget across connections; what did not fit is named in the message |
+| `auto_config` | Quick, the config form's Auto-configure: sweeps each connection in the form (unsaved edits included; older apps: the saved config) for its configured unit, 1-10 and 247 (RTU: also serial settings), identifies them, keeps its devices and adds one per new unit, `register_map: sunspec` where the marker is found (also on a configured unit, unless it sets `register_map_file`). No connection: probes 127.0.0.1:502 only. One 25 s budget across connections; what did not fit is named in the message |
 | `scan_device` | Comprehensive, slow: scan a host or serial port (empty: the first configured connection); units as in the CLI unless `units` is given. Time limit up to 1740 s |
 | `verify_map` | Check a map file against the device register by register, naming each bad one (empty: the one configured for that unit). `ok` counts registers checked clean, `unchecked` those a cutoff (time limit, default 840 s; or 16 requests in a row unanswered) skipped; the CLI exits 1 on a cutoff |
 | `list_serial_ports` | Serial ports on the agent's machine, as choices |

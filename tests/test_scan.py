@@ -203,3 +203,70 @@ class TestScanTarget:
         result, elapsed = _run(_with_sim(timed))
         assert elapsed < 3.0  # abort is bounded (~3 s convention), sim startup excluded
         assert any(c["reason"] == "max_seconds reached" for c in result["report"]["cutoffs"])
+
+
+class TestAutoConfig:
+    SAVED = [{"host": "saved", "port": 1502, "devices": []}]
+    FORM = {
+        "connections": [
+            {"name": "panel", "host": "form", "port": 5020, "devices": [{"unit_id": 7}]}
+        ]
+    }
+
+    @pytest.mark.parametrize(
+        ("config", "answer", "swept", "connections"),
+        [
+            # Form data wins over the saved config; typed fields and devices kept.
+            (
+                FORM,
+                [7, 2],
+                ["form"],
+                [{**FORM["connections"][0], "devices": [{"unit_id": 7}, {"unit_id": 2}]}],
+            ),
+            # Older app hosts pass nothing: the saved config.
+            (None, [1], ["saved"], [{**SAVED[0], "devices": [{"unit_id": 1}]}]),
+            # No connection anywhere: probe 127.0.0.1:502 only.
+            (
+                {},
+                [1],
+                ["127.0.0.1"],
+                [
+                    {
+                        "transport": "tcp",
+                        "host": "127.0.0.1",
+                        "port": 502,
+                        "devices": [{"unit_id": 1}],
+                    }
+                ],
+            ),
+            ({}, [], ["127.0.0.1"], None),
+        ],
+    )
+    def test_connections_source(self, monkeypatch, config, answer, swept, connections):
+        from zelos_extension_modbus import actions, scan
+
+        hosts = []
+
+        async def fake_sweep(endpoint, **kwargs):
+            hosts.append(endpoint["host"])
+            return {
+                "endpoint": f"{endpoint['host']}:{endpoint['port']}",
+                "units": {"present": answer},
+                "identity": {},
+                "sunspec": {},
+                "cutoffs": [],
+            }
+
+        monkeypatch.setattr(scan, "sweep", fake_sweep)
+        monkeypatch.setattr(actions, "_configured_connections", lambda: list(self.SAVED))
+        monkeypatch.setattr(actions, "_refuse_if_running", lambda: None)
+        result = actions.auto_config() if config is None else actions.auto_config(config=config)
+        assert hosts == swept
+        if connections is None:
+            assert result == {
+                "status": "error",
+                "message": "No connection to scan. Add one (host and port, or a serial port) and "
+                "press Auto-configure; nothing answered on 127.0.0.1:502.",
+            }
+        else:
+            assert result["config"]["connections"] == connections
