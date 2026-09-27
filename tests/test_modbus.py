@@ -2502,7 +2502,7 @@ class TestRegisterCatalogRows:
                     {"name": "rpm", "address": 7, "rate": 5.0},
                     {"name": "serial", "address": 8, "type": "input", "rate": 0},
                 ],
-                "controls": [{"name": "relay", "address": 1, "type": "coil", "writable": True}],
+                "controls/out": [{"name": "relay", "address": 1, "type": "coil", "writable": True}],
             },
         }
         client = _device(register_map=RegisterMap.from_dict(data), name="cat")
@@ -2530,16 +2530,16 @@ class TestRegisterCatalogRows:
             "sensors/temp",
             "sensors/rpm",
             "sensors/serial",
-            "controls/relay",
+            "controls/out/relay",
         }
         assert rows["sensors/temp"]["event"] == "sensors"
         assert rows["sensors/temp"]["path"] == "sensors/temp"
         # A path from the catalog resolves through the named-action lookup.
         client = registry.get_device("c/cat")
-        error, reg, event = actions._resolve_register(client, rows["controls/relay"]["path"])
+        error, reg, event = actions._resolve_register(client, rows["controls/out/relay"]["path"])
         assert error is None
         assert reg.name == "relay"
-        assert event == "controls"
+        assert event == "controls/out"
 
     def test_scale_description_and_existing_keys(self):
         """New metadata is reported and the pre-existing keys are unchanged."""
@@ -2569,11 +2569,11 @@ class TestRegisterCatalogRows:
         assert result["map_name"] == "catalog_device"
         assert result["count"] == 2
         rows = self._rows(result)
-        assert set(rows) == {"sensors/temp", "controls/relay"}  # rpm unmarked, serial input
+        assert set(rows) == {"sensors/temp", "controls/out/relay"}  # rpm unmarked, serial input
         for row in rows.values():
             assert set(row) == self.ROW_KEYS
             assert row["writable"] is True
-        assert rows["controls/relay"]["event"] == "controls"
+        assert rows["controls/out/relay"]["event"] == "controls/out"
 
     def test_no_map_reports_null_map_name(self):
         """Raw mode still answers with the top-level map_name key."""

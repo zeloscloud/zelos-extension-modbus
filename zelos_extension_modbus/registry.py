@@ -50,11 +50,11 @@ def _paths(device: str, writable_only: bool) -> list[str]:
     ]
 
 
-def device_registers(device: str) -> list[str]:
+def device_registers(device: str = "") -> list[str]:
     """Event/field paths of every register on ``device``."""
     return _paths(device, writable_only=False)
 
 
-def device_writable_registers(device: str) -> list[str]:
+def device_writable_registers(device: str = "") -> list[str]:
     """Event/field paths of the writable registers on ``device``."""
     return _paths(device, writable_only=True)
