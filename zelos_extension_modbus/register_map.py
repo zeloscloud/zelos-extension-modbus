@@ -57,6 +57,7 @@ Within a single event, register field names must be unique after sanitization
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import math
@@ -284,6 +285,34 @@ def _resolve_scale_refs(event_name: str, registers: list[Register]) -> None:
         reg.ref = ref
 
 
+def _not_found(path: Path) -> str:
+    """Why a map file is missing, with close names from its directory."""
+    msg = f"Register map file not found: {path}"
+    if not path.parent.is_dir():
+        return f"{msg} ({path.parent} does not exist)"
+    names = [f.name for f in path.parent.iterdir() if f.is_file() and f.suffix.lower() == ".json"]
+    if close := difflib.get_close_matches(path.name, names, n=3):
+        msg += f" (did you mean {', '.join(close)}?)"
+    return msg
+
+
+def resolve_map_file(value: str) -> Path:
+    """A configured map path on the agent's host, `~` expanded.
+
+    Relative paths are refused: the extension runs in its install directory,
+    which moves on every upgrade (CLI commands resolve against the shell instead).
+    """
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise ValueError(
+            f"Register map path must be absolute or start with ~: {value} "
+            "(paths are on the agent's host)"
+        )
+    if not path.is_file():
+        raise FileNotFoundError(_not_found(path))
+    return path
+
+
 @dataclass
 class RegisterMap:
     """Collection of register definitions organized by user-defined events."""
@@ -304,9 +333,9 @@ class RegisterMap:
         Returns:
             RegisterMap instance
         """
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"Register map file not found: {path}")
+        path = Path(path).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(_not_found(path))
 
         with path.open() as f:
             data = json.load(f)
