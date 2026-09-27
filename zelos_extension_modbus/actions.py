@@ -842,7 +842,7 @@ def verify_map(
     max_seconds: float = SCAN_ACTION_SECONDS,
 ) -> dict[str, Any]:
     """Verify a register map against a device; the report inline."""
-    from zelos_extension_modbus.register_map import RegisterMap
+    from zelos_extension_modbus.register_map import RegisterMap, resolve_map_file
     from zelos_extension_modbus.scan import quiet_pymodbus
     from zelos_extension_modbus.scan import verify_map as run_verify
 
@@ -855,7 +855,7 @@ def verify_map(
     if not map_file:
         raise ValueError(f"No register map given and none configured for unit {unit}.")
     quiet_pymodbus()
-    register_map = RegisterMap.from_file(map_file.strip())
+    register_map = RegisterMap.from_file(resolve_map_file(map_file.strip()))
     max_seconds = min(float(max_seconds), VERIFY_TIMEOUT - 60)
     return asyncio.run(run_verify(endpoint, register_map, unit, max_seconds=max_seconds))
 

@@ -53,7 +53,7 @@ from zelos_extension_modbus.demo.simulator import (
     run_demo_server_sync,
     uint32_to_registers,
 )
-from zelos_extension_modbus.register_map import Register, RegisterMap
+from zelos_extension_modbus.register_map import Register, RegisterMap, resolve_map_file
 
 _RATE_STATUS = (
     "requested_rate",
@@ -185,6 +185,16 @@ class TestRegisterMap:
             reg_map = RegisterMap.from_file(f.name)
         assert len(reg_map.registers) == 1
         Path(f.name).unlink()
+
+    def test_resolve_map_file(self, tmp_path, monkeypatch):
+        """Configured paths: ~ expands, relative is refused, a typo gets a close name."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / "meter.json").write_text("{}")
+        assert resolve_map_file("~/meter.json") == tmp_path / "meter.json"
+        with pytest.raises(ValueError, match="absolute or start with ~"):
+            resolve_map_file("maps/meter.json")
+        with pytest.raises(FileNotFoundError, match=r"did you mean meter\.json"):
+            resolve_map_file("~/meters.json")
 
     def test_get_by_name(self):
         """Find register by name across events."""

@@ -95,7 +95,7 @@
                         "register_map_file": {
                           "type": "string",
                           "title": "Register Map File",
-                          "description": "JSON file that defines which registers to read and how to decode them",
+                          "description": "JSON file that defines which registers to read and how to decode them. A path on the agent's host: absolute or starting with ~",
                           "ui:widget": "file-picker",
                           "ui:options": {
                             "accept": ".json"

@@ -29,7 +29,7 @@ from zelos_extension_modbus.constants import (
     Transport,
     name_error,
 )
-from zelos_extension_modbus.register_map import RegisterMap
+from zelos_extension_modbus.register_map import RegisterMap, resolve_map_file
 from zelos_extension_modbus.sunspec import build_register_map
 
 logger = logging.getLogger(__name__)
@@ -183,8 +183,7 @@ def _load_register_map(path_str: str | None) -> RegisterMap | None:
     if not path_str:
         return None
     try:
-        # from_file raises FileNotFoundError for a missing path, caught below.
-        reg_map = RegisterMap.from_file(path_str)
+        reg_map = RegisterMap.from_file(resolve_map_file(path_str))
         logger.info(f"Loaded register map with {len(reg_map.registers)} registers")
         return reg_map
     except Exception as e:
