@@ -11,9 +11,10 @@ import contextlib
 import logging
 import math
 import struct
+import sys
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import zelos_sdk
@@ -44,6 +45,9 @@ _DIAG_EVERY = 10
 # Seconds between attempts to build a device's register map when the device
 # answered but discovery failed (a timeout follows the demotion schedule).
 MAP_RETRY_INTERVAL = 30.0
+# A demoted device awaiting its map is probed with one 2-register read here
+# (SunSpec's usual marker); any answer, even an exception, proves it is back.
+MAP_PROBE_ADDRESS = 40000
 
 # Reconnect backoff: doubles per failed connect up to the cap; a completed poll resets it.
 RECONNECT_INITIAL = 3.0
@@ -77,7 +81,7 @@ EXCEPTION_NAMES = {
 
 NO_RESPONSE = "no response from device"
 # A write that got no answer may still have landed.
-OUTCOME_UNKNOWN = " (outcome unknown, check the device)"
+OUTCOME_UNKNOWN = " (the write may have landed; read back before retrying)"
 
 # A block the device refuses (illegal address) is retried this often (Kepware
 # "Deactivate Tags on Illegal Address").
@@ -113,6 +117,7 @@ class _Block:
     next_due: float = 0.0  # monotonic
     last_read: float | None = None  # previous read's start, for the achieved rate
     error: int | None = None  # exception code of the failing read, warned once
+    refs: list[_Block] = field(default_factory=list)  # blocks holding its scale_ref exponents
 
     @property
     def refused(self) -> bool:
@@ -245,6 +250,17 @@ def encode_value(
     return _reorder_registers(list(struct.unpack(f">{n}H", raw)), byte_order)
 
 
+def coil_state(value: Any) -> bool:
+    """A coil write's state: true/false, 0/1 or "ON"/"OFF"; anything else ValueError."""
+    if isinstance(value, bool):
+        return value
+    if value in ("ON", "OFF"):
+        return value == "ON"
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"{value!r} is not a coil state (true/false, 0/1, ON/OFF)")
+
+
 def encode_register(register: Register, value: float | int | bool) -> tuple[list[int], Any]:
     """(raw words, the value they decode to) for a write; ValueError if not exact.
 
@@ -252,14 +268,23 @@ def encode_register(register: Register, value: float | int | bool) -> tuple[list
     nearest writable value, rather than quietly rounded. float32 keeps its own
     precision (~7 digits).
     """
-    if register.type == RegisterType.COIL:
-        return [int(bool(value))], bool(value)
+    if register.type == RegisterType.COIL or register.datatype == "bool":
+        state = coil_state(value)
+        return [int(state)], state
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"{value} is not a finite number")
     raw = encode_value(value, register.datatype, register.scale, register.byte_order)
     written = decode_value(raw, register.datatype, register.scale, register.byte_order)
-    rel_tol = 1e-6 if register.datatype == "float32" else 1e-9
-    if not math.isclose(written, value, rel_tol=rel_tol, abs_tol=1e-9 * abs(register.scale)):
+    if register.datatype in ("float32", "float64"):
+        rel_tol = 1e-6 if register.datatype == "float32" else 1e-9
+        exact = math.isclose(written, value, rel_tol=rel_tol, abs_tol=1e-9 * abs(register.scale))
+    else:
+        # Integers: exact in raw counts, up to float error in value / scale
+        # (1e-9 of a step, or a few ULPs at large magnitudes).
+        steps = value / register.scale if register.scale != 1 else value
+        error = abs(steps - math.floor(steps + 0.5)) if isinstance(steps, float) else 0
+        exact = error <= max(1e-9, 4 * sys.float_info.epsilon * abs(steps))
+    if not exact:
         raise ValueError(
             f"{value} is not a whole {register.datatype} step (scale {register.scale:g}); "
             f"nearest writable value is {written}"
@@ -319,7 +344,14 @@ def json_safe(value: Any) -> Any:
 
 
 class RequestFailed(Exception):
-    """An action's request failed; the message is the reason shown to the user."""
+    """An action's request failed; the message is the reason shown to the user.
+
+    ``unknown``: a write got no definite answer and may have landed.
+    """
+
+    def __init__(self, reason: str, unknown: bool = False) -> None:
+        super().__init__(reason)
+        self.unknown = unknown
 
 
 def refused(code: int) -> str:
@@ -564,6 +596,11 @@ class ModbusConnection:
                 await asyncio.sleep(wait)
             if not await self._ensure_connected():
                 raise ConnectionException(f"cannot connect to {self.endpoint}")
+            if not self._client.connected:
+                # Dropped during connect_delay_ms: pymodbus would reconnect on its own
+                # (no backoff, no delay); reconnect through connect() instead.
+                self.connected = False
+                raise ConnectionException(f"{self.endpoint}: link dropped")
             self._client.ctx.retries = 0 if single else self.retries
             try:
                 return await getattr(self._client, method)(device_id=unit_id, **kwargs)
@@ -606,37 +643,36 @@ class ModbusConnection:
     def _batch(self, now: float) -> list[tuple[ModbusDevice, _Block | None]]:
         """This tick's work: (device, block), or (device, None) for a map build.
 
-        Every due block at the connection's fastest rate, plus at most ONE due
-        slower block (OpenEMS LOW round robin), most overdue first (lateness /
-        rate). Slower blocks thus spread one per tick instead of bursting and
-        stalling the fast points, and a first sweep staggers them for good (a
-        block is due again one rate after it was read). A demoted device gets
-        one probe block when its retry is due, and nothing else.
+        Every due block at the connection's fastest rate first, then at most ONE
+        other item (OpenEMS LOW round robin): a due slower block, a demoted
+        device's probe, or a map build, most overdue first (lateness / period).
+        Slower work thus spreads one item per tick instead of bursting and
+        stalling the fast points, and a first sweep staggers slow blocks for
+        good (a block is due again one rate after it was read). A block brings
+        the blocks holding its scale_ref exponents, whatever their rate or due
+        time: a value is only scaled by an exponent read with it.
         """
-        work: list[tuple[ModbusDevice, _Block | None]] = []
         live: list[tuple[ModbusDevice, _Block]] = []
-        probes: list[tuple[ModbusDevice, _Block]] = []
+        other: list[tuple[float, ModbusDevice, _Block | None]] = []  # (lag, device, work)
         for dev in self.devices:
             if now < dev._retry_at:
                 continue
             if dev.map_pending:
-                work.append((dev, None))
+                period = dev._backoff or MAP_RETRY_INTERVAL
+                other.append(((dev._retry_at - now) / period, dev, None))
             elif dev.demoted:
-                probes += [(dev, b) for b in dev._schedule(now)[:1]]
+                probe = dev._probe(now)
+                if probe:
+                    other.append(((dev._retry_at - now) / dev._backoff, dev, probe))
             else:
                 live += [(dev, b) for b in dev._schedule(now)]
-        if not live:
-            return work + probes
-
-        def overdue(item: tuple[ModbusDevice, _Block]) -> tuple[float, float]:
-            block = item[1]
-            return ((block.next_due - now) / block.rate, block.rate)
-
-        fastest = min(b.rate for _, b in live)
-        due = sorted(((d, b) for d, b in live if b.next_due <= now), key=overdue)
-        fast = [item for item in due if item[1].rate == fastest]
-        slow = [item for item in due if item[1].rate != fastest][:1]
-        return work + probes + sorted(fast + slow, key=overdue)
+        fastest = min((b.rate for _, b in live), default=None)
+        fast: list[tuple[float, ModbusDevice, _Block | None]] = []
+        for dev, b in live:
+            if b.next_due <= now:
+                (fast if b.rate == fastest else other).append(((b.next_due - now) / b.rate, dev, b))
+        work = sorted(fast, key=lambda w: w[0]) + sorted(other, key=lambda w: w[0])[:1]
+        return _with_refs([(dev, b) for _, dev, b in work], now)
 
     async def _poll(self, work: list[tuple[ModbusDevice, _Block | None]]) -> bool:
         """Run one tick's work, then log each device's values; False if the link was lost."""
@@ -716,6 +752,24 @@ class ModbusConnection:
                 return
 
 
+def _with_refs(
+    work: list[tuple[ModbusDevice, _Block | None]], now: float
+) -> list[tuple[ModbusDevice, _Block | None]]:
+    """``work`` with each block's scale_ref blocks just before it, each block once.
+
+    A refused ref block keeps its REFUSED_RETRY; its values log null meanwhile.
+    """
+    out: list[tuple[ModbusDevice, _Block | None]] = []
+    seen: set[int] = set()
+    for dev, block in work:
+        refs = [r for r in block.refs if not r.refused or r.next_due <= now] if block else []
+        for b in [*refs, block] if block else [None]:
+            if b is None or id(b) not in seen:
+                seen.add(id(b))
+                out.append((dev, b))
+    return out
+
+
 class ModbusDevice:
     """One unit id on a connection: its register map, poll schedule and trace events."""
 
@@ -727,6 +781,7 @@ class ModbusDevice:
         rate: float = 1.0,
         min_rate: float = 0.0,
         write_mode: str = WriteMode.AUTO,
+        allow_raw_writes: bool = False,
         block_reads: bool = True,
         max_block_size: int = MODBUS_MAX_READ_COUNT,
         max_bit_block_size: int = MODBUS_MAX_BIT_READ_COUNT,
@@ -749,6 +804,8 @@ class ModbusDevice:
                 polled faster)
             write_mode: 'auto' (FC 6 for single, FC 16 for multi) or
                         'fc16' (always FC 16 for all writes)
+            allow_raw_writes: Let the raw write actions (address, not map
+                name) run; mapped read-only registers stay refused
             block_reads: Coalesce contiguous registers into range reads
             max_block_size: Maximum addresses per register read (clamped to 1-125)
             max_bit_block_size: Maximum addresses per coil/discrete-input read
@@ -771,6 +828,7 @@ class ModbusDevice:
         self.name = name or f"unit{unit_id}"
         self.register_map = register_map
         self.write_mode = write_mode
+        self.allow_raw_writes = allow_raw_writes
 
         # Backstop for out-of-range knobs: the map `device` block and direct
         # construction bypass the config schema.
@@ -804,10 +862,8 @@ class ModbusDevice:
         self._blocks: list[_Block] | None = None
         self._tiers: dict[float, _Tier] = {}
         self._event_of: dict[int, str] = {}  # id(register) -> event, polled registers only
-        # This tick's decoded values, and the last value of every register read
-        # (scale_ref exponents come from here when read in another block).
+        # This tick's decoded values, by id(register).
         self._pending: dict[int, tuple[Register, Any]] = {}
-        self._decoded: dict[int, Any] = {}
 
         # Demotion: consecutive timeouts; backoff > 0 while demoted. retry_at
         # gates both probes and map builds.
@@ -914,6 +970,15 @@ class ModbusDevice:
         MAP_RETRY_INTERVAL.
         """
         now = time.monotonic() if now is None else now
+        if self.demoted:
+            # One request proves the unit is back; discovery then runs as normal work.
+            try:
+                await self._fetch(RegisterType.HOLDING, MAP_PROBE_ADDRESS, 2)
+            except ModbusIOException:
+                self._timed_out(now, "")  # demoted: backs off further
+                return
+            self._responded(now)
+            return
         try:
             self.register_map = await self._map_loader(self)
         except ConnectionException:
@@ -1046,22 +1111,24 @@ class ModbusDevice:
         Retried per ``retries`` like any request: FC 5/6/15/16 write absolute
         values, so a repeated write is idempotent.
         """
+        unknown = False
         try:
             result = await self.connection.request(method, self.unit_id, address=address, **kwargs)
-        except ConnectionException:
+        except ConnectionException:  # raised before anything is sent
             reason = f"cannot connect to {self.connection.endpoint}"
         except ModbusIOException:
-            reason = NO_RESPONSE + (OUTCOME_UNKNOWN if write else "")
+            reason, unknown = NO_RESPONSE, write
         except ModbusException as e:
-            reason = f"modbus error: {e}"
+            reason, unknown = f"modbus error: {e}", write
         else:
             if not result.isError():
                 return result
             code = getattr(result, "exception_code", -1)
             # 0B: the gateway forwarded the request and the unit never answered.
-            reason = refused(code) + (OUTCOME_UNKNOWN if write and code == 0x0B else "")
+            reason, unknown = refused(code), write and code == 0x0B
+        reason += OUTCOME_UNKNOWN if unknown else ""
         logger.warning(f"[{self.path}] {method} at {address + self.address_base}: {reason}")
-        raise RequestFailed(reason)
+        raise RequestFailed(reason, unknown)
 
     async def _read_range(self, reg_type: str, address: int, count: int) -> list[int] | list[bool]:
         """Typed read for actions (wire ``address``).
@@ -1135,8 +1202,8 @@ class ModbusDevice:
         """Build the read blocks: one plan per rate (blocks never mix rates).
 
         A scale_ref register is read at the fastest rate of the registers it
-        scales. Block size is static (Kepware): a refused block is retried,
-        never split.
+        scales, and its block rides along whenever a block it scales is read.
+        Block size is static (Kepware): a refused block is retried, never split.
         """
         rates: dict[int, tuple[Register, float]] = {}
         self._event_of = {}
@@ -1161,15 +1228,28 @@ class ModbusDevice:
             else:
                 plan = [ReadBlock(r.type, r.address, r.address_span, (r,)) for r in regs]
             self._blocks += [_Block(read, rate, now) for read in plan]
+        holder = {id(r): b for b in self._blocks for r in b.read.registers}
+        for block in self._blocks:
+            refs = {id(holder[id(r.ref)]): holder[id(r.ref)] for r in block.read.registers if r.ref}
+            block.refs = [b for key, b in refs.items() if key != id(block)]
         self._tiers = {rate: self._tiers.get(rate) or _Tier(rate) for rate in tiers}
 
     def _next_due(self) -> float:
         """Monotonic time this device next needs the link (inf: never)."""
-        if self.demoted or self.map_pending:
+        if self.map_pending:
             return self._retry_at
         if self._blocks is None:
             return 0.0
-        return min((b.next_due for b in self._blocks), default=math.inf)
+        first = min((b.next_due for b in self._blocks), default=math.inf)
+        return max(first, self._retry_at) if self.demoted else first
+
+    def _probe(self, now: float) -> _Block | None:
+        """A demoted device's probe: its most overdue due block, None if none is due.
+
+        A refused block is due only at its REFUSED_RETRY.
+        """
+        due = [b for b in self._schedule(now) if b.next_due <= now]
+        return min(due, key=lambda b: (b.next_due - now) / b.rate, default=None)
 
     async def _read_block(self, block: _Block, now: float) -> None:
         """Read one block into this tick's values.
@@ -1190,7 +1270,7 @@ class ModbusDevice:
             self.failed_reads += 1
             self._timed_out(now, f"No response for {self._range(read)}: {e}")
             return
-        self._responded(now)
+        self._responded(now, block)
         if isinstance(raw, list):
             self.successful_reads += 1
             self._pending.update((id(r), (r, v)) for r, v in decode_block(read, raw))
@@ -1261,11 +1341,18 @@ class ModbusDevice:
             block.last_read = None
         self._tiers = {rate: _Tier(rate) for rate in self._tiers}
 
-    def _responded(self, now: float) -> None:
-        """The device answered: clear the timeout count; a demoted device resumes now."""
+    def _responded(self, now: float, probe: _Block | None = None) -> None:
+        """The device answered: clear the timeout count; a demoted device resumes now.
+
+        On resuming, every block but the answered ``probe`` (due one rate after
+        it) is due now, and no rate is measured until a normal interval passes.
+        """
         if self.demoted:
             logger.info(f"[{self.path}] Answering again; polling resumed")
             for block in self._blocks or []:
+                if block is probe:
+                    continue
+                block.last_read = None
                 if not block.refused:  # keeps its REFUSED_RETRY backoff
                     block.next_due = min(block.next_due, now)
         self._timeouts = 0
@@ -1316,18 +1403,17 @@ class ModbusDevice:
     def _flush(self) -> dict[str, dict[str, Any]]:
         """This tick's values by event, scale refs applied; caches them and clears the tick.
 
-        A scale_ref exponent comes from this tick when its block was read,
-        else from its last read (null until it has been read once).
+        A scale_ref value is null unless its exponent was read this tick
+        (``_batch`` schedules them together, so null means that read failed).
         """
         pending, self._pending = self._pending, {}
-        self._decoded.update((key, value) for key, (_, value) in pending.items())
         results: dict[str, dict[str, Any]] = {}
         for key, (reg, value) in pending.items():
             event = self._event_of.get(key)
             if event is None:
                 continue  # an unpolled exponent, read only for its registers
             if reg.ref:
-                value = apply_scale_ref(value, self._decoded.get(id(reg.ref)))
+                value = apply_scale_ref(value, pending.get(id(reg.ref), (None, None))[1])
             results.setdefault(event, {})[reg.field_name] = value
             # Snapshot cache is keyed by the qualified register path, not the
             # sanitized trace field name, so actions address it the same way

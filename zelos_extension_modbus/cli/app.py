@@ -78,6 +78,8 @@ SUNSPEC_MAP = "sunspec"
 
 #: Seconds a stop waits for the poll loops to disconnect before giving up.
 SHUTDOWN_TIMEOUT = 3.0
+#: Seconds a forced exit waits for the trace flush.
+FORCED_FLUSH_TIMEOUT = 0.5
 
 
 def resolve_advanced(config: dict[str, Any]) -> dict[str, Any]:
@@ -254,6 +256,8 @@ def _create_connections(config: dict[str, Any], advanced: dict[str, Any]) -> lis
                 name=dev_name or None,
                 unit_id=dev_config.get("unit_id", 1),
                 rate=dev_config.get("rate", advanced.get("default_rate", 1.0)),
+                # App config only: a map must not grant itself raw writes.
+                allow_raw_writes=advanced.get("allow_raw_writes", False),
                 **settings,
             )
             for other in conn.devices[:-1]:
@@ -303,8 +307,28 @@ async def run_connections(connections: list[ModbusConnection]) -> None:
     _, pending = await asyncio.wait(tasks, timeout=SHUTDOWN_TIMEOUT)
     if pending:
         logger.error(f"{len(pending)} connection(s) did not stop in {SHUTDOWN_TIMEOUT:g}s; exiting")
+        flushed = _flush_traces(connections)
+        logger.warning(f"Forced exit; trace flush {'completed' if flushed else 'timed out'}")
         logging.shutdown()
         os._exit(1)
+
+
+def _flush_traces(connections: list[ModbusConnection]) -> bool:
+    """Flush every trace source, waiting at most FORCED_FLUSH_TIMEOUT; True if it finished.
+
+    Runs in a daemon thread: a flush has no timeout and must not hold up the exit.
+    """
+    sources = {id(t[0]): t[0] for c in connections for d in c.devices if (t := d._trace_target)}
+    sources[0] = zelos_sdk.init_global_source()  # logs; already exists, so name is ignored
+    done = threading.Event()
+
+    def flush() -> None:
+        for source in sources.values():
+            source.flush()
+        done.set()
+
+    threading.Thread(target=flush, daemon=True).start()
+    return done.wait(FORCED_FLUSH_TIMEOUT)
 
 
 def run_app_mode(demo: bool = False) -> None:

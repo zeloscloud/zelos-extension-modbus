@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import functools
 import logging
 import time
 from typing import Any
@@ -19,6 +20,7 @@ from zelos_extension_modbus.client import (
     NO_RESPONSE,
     OUTCOME_UNKNOWN,
     RequestFailed,
+    coil_state,
     encode_register,
     json_safe,
 )
@@ -54,16 +56,44 @@ def register_all() -> None:
 # ---------------------------------------------------------------------------
 
 
-#: Action result when the device did not answer in time; a write may have landed.
-TIMED_OUT = {"error": NO_RESPONSE + OUTCOME_UNKNOWN, "success": False}
+#: Action result when the device did not answer in time.
+TIMED_OUT = {"error": NO_RESPONSE, "success": False}
 #: Action result when the extension stops mid-request.
 STOPPING = {"error": "extension stopping", "success": False}
 
+#: Appended to every write action's description.
+WRITE_OUTCOME_HELP = (
+    " Result outcome: ok; refused (not written, see error); or unknown (no response, "
+    "the write may have landed: read back before retrying)."
+)
+#: Appended to the raw (address) write actions' descriptions.
+RAW_WRITE_HELP = (
+    " Refused unless advanced.allow_raw_writes is on, and for any address the device "
+    "map marks read-only."
+)
 
-def _run_coro(coro: Any, dev: Any) -> tuple[Any, dict | None]:
+
+def _write_action(fn: Any) -> Any:
+    """Stamp a write action's result with ``outcome``: ok, refused or unknown.
+
+    OPC UA Good/Bad/Uncertain: unknown (set by _run_coro) means no definite
+    answer, so the write may have landed.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = fn(*args, **kwargs)
+        result.setdefault("outcome", "ok" if result["success"] else "refused")
+        return result
+
+    return wrapper
+
+
+def _run_coro(coro: Any, dev: Any, write: bool = False) -> tuple[Any, dict | None]:
     """Run an async coroutine from a sync action handler: (result, None) or (None, error dict).
 
     Bridges the SDK's sync action thread to the connection's async event loop.
+    ``write``: a write with no definite answer carries ``outcome: unknown``.
     """
     conn = dev.connection
     # Worst case per request: every attempt times out, after the pacing gap.
@@ -79,30 +109,41 @@ def _run_coro(coro: Any, dev: Any) -> tuple[Any, dict | None]:
             return future.result(timeout=2 * per_request + reconnect + 5), None
         except TimeoutError:
             future.cancel()
-            return None, TIMED_OUT
+            if not write:
+                return None, TIMED_OUT
+            err = {"error": NO_RESPONSE + OUTCOME_UNKNOWN, "success": False}
+            return None, {**err, "outcome": "unknown"}
     except RequestFailed as e:
-        return None, {"error": str(e), "success": False}
+        err = {"error": str(e), "success": False}
+        return None, {**err, "outcome": "unknown"} if e.unknown else err
     except concurrent.futures.CancelledError:  # the poll loop was cancelled at shutdown
-        return None, STOPPING
+        return None, {**STOPPING, "outcome": "unknown"} if write else STOPPING
+
+
+def _integral(name: str, value: Any) -> int:
+    """``value`` as an int; ValueError unless a finite whole number (no truncation)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} {value!r} is not a number") from None
+    if isinstance(value, bool) or not number.is_integer():
+        raise ValueError(f"{name} {value!r} is not an integer")
+    return int(number)
 
 
 def _word(value: Any) -> int:
     """A raw register value: an integer 0-65535, or -32768..-1 as two's complement."""
-    number = float(value)
-    if isinstance(value, bool) or not number.is_integer():
-        raise ValueError(f"{value} is not an integer")
-    word = int(number)
+    word = _integral("value", value)
     if not -0x8000 <= word <= 0xFFFF:
         raise ValueError(f"{word} is outside 0-65535 (or -32768..-1 as two's complement)")
     return word & 0xFFFF
 
 
 def _resolve_register(dev: Any, path: str) -> tuple[str | None, Any, str | None]:
-    """Resolve an 'event/field' path to a Register on a specific device.
+    """Resolve an 'event/field' path (or a unique bare name) to a Register on a device.
 
     Returns (error_message, register, event): ``error_message`` and ``register``
-    are mutually exclusive. ``event`` is the owning event when the path carried
-    one, else None (the bare-name compat path leaves it to the register map).
+    are mutually exclusive. A bare name held by more than one event is refused.
     """
     if not dev.register_map:
         return ("No register map loaded", None, None)
@@ -115,11 +156,19 @@ def _resolve_register(dev: Any, path: str) -> tuple[str | None, Any, str | None]
                 return (None, reg, event_name)
         return (f"Register '{path}' not found", None, None)
 
-    # Fallback: bare name lookup (backwards compat)
-    reg = dev.register_map.get_by_name(path)
-    if not reg:
+    matches = [
+        (event, reg)
+        for event, regs in dev.register_map.events.items()
+        for reg in regs
+        if reg.name == path
+    ]
+    if not matches:
         return (f"Register '{path}' not found", None, None)
-    return (None, reg, None)
+    if len(matches) > 1:
+        paths = ", ".join(f"{event}/{reg.name}" for event, reg in matches)
+        return (f"Register '{path}' is ambiguous; use one of: {paths}", None, None)
+    event, reg = matches[0]
+    return (None, reg, event)
 
 
 #: Raw-action address fields: in the device map's base, converted at the wire.
@@ -135,17 +184,47 @@ def _address_field(title: str = "Address") -> Any:
     )
 
 
-def _wire(dev: Any, address: float, count: int = 1) -> tuple[int | None, dict | None]:
-    """Wire address for a user ``address`` in the device's base, or an error dict."""
+def _wire(dev: Any, address: Any, count: Any = 1) -> tuple[int | None, dict | None]:
+    """Wire address for a user ``address`` in the device's base, or an error dict.
+
+    ``address`` and ``count`` must be whole numbers: truncating 10.9 would
+    target a neighboring register.
+    """
+    try:
+        address, count = _integral("address", address), _integral("count", count)
+    except ValueError as e:
+        return None, {"error": str(e), "success": False}
     base = dev.address_base
-    wire = int(address) - base
-    if wire < 0 or wire + count > 0x10000:
+    wire = address - base
+    if wire < 0 or count < 1 or wire + count > 0x10000:
         return None, {
-            "error": f"Address {int(address)} (count {count}) is outside {base}-{0xFFFF + base} "
+            "error": f"Address {address} (count {count}) is outside {base}-{0xFFFF + base} "
             f"(address base {base})",
             "success": False,
         }
     return wire, None
+
+
+def _raw_write_refusal(dev: Any, reg_type: str, wire: int, count: int = 1) -> dict | None:
+    """Error dict unless raw writes are on and ``wire..wire+count`` hits no read-only register."""
+    if not dev.allow_raw_writes:
+        return {
+            "error": "Raw writes are disabled (advanced.allow_raw_writes); write a register "
+            "the device map marks writable by name instead",
+            "success": False,
+        }
+    if dev.map_pending:
+        return {"error": "Device map not loaded yet; raw writes wait for it", "success": False}
+    for event, regs in dev.register_map.events.items() if dev.register_map else ():
+        for reg in regs:
+            overlaps = reg.address < wire + count and wire < reg.address + reg.address_span
+            if reg.type == reg_type and overlaps and not reg.writable:
+                return {
+                    "error": f"Address {reg.map_address} is read-only in the device map "
+                    f"({event}/{reg.name})",
+                    "success": False,
+                }
+    return None
 
 
 def _get_device_or_error(device: str) -> tuple[Any | None, dict | None]:
@@ -170,6 +249,7 @@ def _status_row(dev: Any) -> dict[str, Any]:
         "successful_reads": dev.successful_reads,
         "failed_reads": dev.failed_reads,
         "error": dev.last_error,
+        "map_pending": dev.map_pending,
         **dev.rate_status(),
     }
 
@@ -228,10 +308,13 @@ def list_devices() -> dict[str, Any]:
                 "successful_reads": dev.successful_reads,
                 "failed_reads": dev.failed_reads,
                 "trace_path": dev.trace_path,
+                "error": dev.last_error,
+                "map_pending": dev.map_pending,
                 "map_name": dev.register_map.name if dev.register_map else None,
                 "register_count": len(dev.register_map.registers) if dev.register_map else 0,
                 "rate": dev.rate,
                 "write_mode": dev.write_mode,
+                "raw_writes": dev.allow_raw_writes,
                 **dev.rate_status(),
             }
         )
@@ -311,11 +394,12 @@ def read_register(device: str, address: int, reg_type: str, count: int) -> dict[
     dev, err = _get_device_or_error(device)
     if err:
         return err
-    wire, err = _wire(dev, address, int(count))
+    wire, err = _wire(dev, address, count)
     if err:
         return err
+    count = int(count)
 
-    result, err = _run_coro(dev._read_range(reg_type, wire, int(count)), dev)
+    result, err = _run_coro(dev._read_range(reg_type, wire, count), dev)
     if err:
         return err
     return {
@@ -329,11 +413,14 @@ def read_register(device: str, address: int, reg_type: str, count: int) -> dict[
 
 @zelos_sdk.action(
     "Write Single Register (FC 6)",
-    "Write one holding register using function code 6; address in the device map's base",
+    "Write one holding register using function code 6; address in the device map's base."
+    + RAW_WRITE_HELP
+    + WRITE_OUTCOME_HELP,
 )
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 @_address_field()
 @zelos_sdk.action.number("value", title="Value")
+@_write_action
 def write_single_register(device: str, address: int, value: int) -> dict[str, Any]:
     """Write a single register using FC 6."""
     dev, err = _get_device_or_error(device)
@@ -346,8 +433,10 @@ def write_single_register(device: str, address: int, value: int) -> dict[str, An
         word = _word(value)
     except ValueError as e:
         return {"error": str(e), "success": False}
+    if err := _raw_write_refusal(dev, RegisterType.HOLDING, wire):
+        return err
 
-    _, err = _run_coro(dev.write_register(wire, word), dev)
+    _, err = _run_coro(dev.write_register(wire, word), dev, write=True)
     if err:
         return err
     return {
@@ -360,11 +449,13 @@ def write_single_register(device: str, address: int, value: int) -> dict[str, An
 
 @zelos_sdk.action(
     "Write Registers (FC 16)",
-    "Write one or more holding registers using function code 16; address in the device map's base",
+    "Write one or more holding registers using function code 16; address in the device "
+    "map's base." + RAW_WRITE_HELP + WRITE_OUTCOME_HELP,
 )
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 @_address_field("Start Address")
 @zelos_sdk.action.text("values", title="Values (comma-separated)")
+@_write_action
 def write_registers(device: str, address: int, values: str) -> dict[str, Any]:
     """Write registers using FC 16."""
     dev, err = _get_device_or_error(device)
@@ -382,8 +473,10 @@ def write_registers(device: str, address: int, values: str) -> dict[str, Any]:
     wire, err = _wire(dev, address, len(int_values))
     if err:
         return err
+    if err := _raw_write_refusal(dev, RegisterType.HOLDING, wire, len(int_values)):
+        return err
 
-    _, err = _run_coro(dev.write_registers(wire, int_values), dev)
+    _, err = _run_coro(dev.write_registers(wire, int_values), dev, write=True)
     if err:
         return err
     return {
@@ -427,12 +520,17 @@ def read_named_register(device: str, name: str) -> dict[str, Any]:
     }
 
 
-@zelos_sdk.action("Write Named Register", "Write a value to a register by event/name")
+@zelos_sdk.action(
+    "Write Named Register",
+    "Write a value to a register by event/name; only registers the device map marks "
+    "writable." + WRITE_OUTCOME_HELP,
+)
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 @zelos_sdk.action.select(
     "name", choices=device_writable_registers, depends_on="device", title="Register"
 )
 @zelos_sdk.action.number("value", title="Value")
+@_write_action
 def write_named_register(device: str, name: str, value: float) -> dict[str, Any]:
     """Write a value to a register by event/name path from the register map."""
     dev, err = _get_device_or_error(device)
@@ -445,7 +543,7 @@ def write_named_register(device: str, name: str, value: float) -> dict[str, Any]
 
     if not reg.writable:
         return {
-            "error": f"Register '{name}' is not writable (type: {reg.type})",
+            "error": f"Register '{name}' is read-only (the device map does not mark it writable)",
             "success": False,
         }
 
@@ -453,7 +551,7 @@ def write_named_register(device: str, name: str, value: float) -> dict[str, Any]
         _, written = encode_register(reg, value)  # refuse before any I/O
     except ValueError as e:  # out of range, or not a whole step
         return {"error": str(e), "success": False}
-    _, err = _run_coro(dev.write_register_value(reg, value), dev)
+    _, err = _run_coro(dev.write_register_value(reg, value), dev, write=True)
     if err:
         return err
     # A written setpoint is the freshest thing we know about it; without this
@@ -470,21 +568,32 @@ def write_named_register(device: str, name: str, value: float) -> dict[str, Any]
     }
 
 
-@zelos_sdk.action("Write Coil", "Write a boolean value to a coil; address in the device map's base")
+@zelos_sdk.action(
+    "Write Coil",
+    "Write a boolean value to a coil; address in the device map's base."
+    + RAW_WRITE_HELP
+    + WRITE_OUTCOME_HELP,
+)
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 @_address_field()
 @zelos_sdk.action.select("value", choices=["ON", "OFF"], default="OFF", title="Value")
+@_write_action
 def write_coil(device: str, address: int, value: str) -> dict[str, Any]:
     """Write a coil by address."""
     dev, err = _get_device_or_error(device)
     if err:
         return err
-    bool_value = value == "ON"
+    try:
+        bool_value = coil_state(value)
+    except ValueError as e:
+        return {"error": str(e), "success": False}
     wire, err = _wire(dev, address)
     if err:
         return err
+    if err := _raw_write_refusal(dev, RegisterType.COIL, wire):
+        return err
 
-    _, err = _run_coro(dev.write_coil(wire, bool_value), dev)
+    _, err = _run_coro(dev.write_coil(wire, bool_value), dev, write=True)
     if err:
         return err
     return {

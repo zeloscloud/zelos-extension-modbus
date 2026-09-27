@@ -3,13 +3,14 @@
   "type": "object",
   "title": "Modbus Configuration",
   "description": "Connect to one or more Modbus devices over TCP or RS232/RS485 serial (RTU).",
-  "ui:options": {"autoconfig": "Modbus/auto_config"},
+  "ui:options": {
+    "autoconfig": "Modbus/auto_config"
+  },
   "properties": {
     "connections": {
       "type": "array",
       "title": "Connections",
-      "description": "Each connection is a TCP endpoint or a serial port, with the devices reached over it. Click 'Add' to add a connection.",
-      "minItems": 1,
+      "description": "Each connection is a TCP endpoint or a serial port, with the devices reached over it. Click 'Add' to add a connection, or use Auto-configure to discover devices on the saved connections.",
       "items": {
         "title": "Connection",
         "type": "object",
@@ -37,8 +38,7 @@
           "devices": {
             "type": "array",
             "title": "Devices",
-            "description": "Modbus devices (unit IDs) on this connection. They share the link and are polled one request at a time.",
-            "minItems": 1,
+            "description": "Modbus devices (unit IDs) on this connection. They share the link and are polled one request at a time. Click 'Add' to add a device.",
             "items": {
               "title": "Device",
               "type": "object",
@@ -367,6 +367,13 @@
             "Always FC 16"
           ],
           "default": "auto"
+        },
+        "allow_raw_writes": {
+          "type": "boolean",
+          "title": "Allow Raw Writes",
+          "description": "Let Write Single Register, Write Registers and Write Coil write any address, bypassing the register map. Off: only registers a map marks writable can be written (by name). On: addresses the map marks read-only are still refused.",
+          "default": false,
+          "ui:widget": "toggle"
         }
       },
       "additionalProperties": false,

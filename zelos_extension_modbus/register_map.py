@@ -23,7 +23,8 @@ Required fields per register: address (in the map's address_base, default 1)
 Optional fields: name (default: r<address>), type (default: holding),
 datatype (default: uint16), unit, scale (default: 1.0),
 rate (poll rate in seconds; default: the device rate; 0 or null = not polled,
-actions still read and write it), and:
+actions still read and write it), writable (default false: read-only; true lets
+the write actions set a holding register or coil), and:
 
 - length: registers a "string" spans (required for strings). Strings decode
   2 ASCII bytes per register, high byte first (byte_order is ignored), end at
@@ -35,6 +36,7 @@ actions still read and write it), and:
   force, and changing the exponent rescales the other value).
 - invalid: raw values meaning "not implemented", logged as null. Compared
   against the unsigned value of the register's words (int16 -32768 is 32768).
+  On a string only [0]: all NUL bytes.
 - values: {"<int>": "<label>"} enum on an unscaled integer register, shown as
   labels in the trace.
 
@@ -154,8 +156,8 @@ class Register:
     scale: float = 1.0
     byte_order: str = ByteOrder.BIG
     description: str = ""
-    # None = writable unless read-only by type (input, discrete input, string)
-    writable: bool | None = None
+    # Read-only unless the map opts in; input and discrete input are always read-only
+    writable: bool = False
     # None = the device rate; 0 = not polled
     rate: float | None = None
     length: int | None = None
@@ -208,7 +210,7 @@ class Register:
         if self.byte_order not in BYTE_ORDERS:
             msg = f"Invalid byte_order '{self.byte_order}'. Must be one of {BYTE_ORDERS}"
             raise ValueError(msg)
-        if self.writable is not None and not isinstance(self.writable, bool):
+        if not isinstance(self.writable, bool):
             raise ValueError(f"Register '{self.name}': writable must be true or false")
         if not _is_number(self.scale) or not math.isfinite(self.scale) or self.scale == 0:
             raise ValueError(f"Register '{self.name}': scale must be a finite non-zero number")
@@ -216,8 +218,6 @@ class Register:
         if self.address + self.address_span > 0x10000:
             raise ValueError(f"Register '{self.name}': spans past the last address")
         # Input registers and discrete inputs are read-only by Modbus spec
-        if self.writable is None:
-            self.writable = self.datatype != "string" and not self.scale_ref
         if self.type in (RegisterType.INPUT, RegisterType.DISCRETE_INPUT):
             self.writable = False
 
@@ -241,11 +241,15 @@ class Register:
         if self.scale_ref and self.writable:
             raise ValueError(f"{where}: a scale_ref register is read-only")
         if self.invalid and (
-            self.datatype in ("bool", "string")
+            self.datatype == "bool"
             or self.type in BIT_REGISTER_TYPES
             or not all(_is_int(v) and v >= 0 for v in self.invalid)
+            or (self.datatype == "string" and self.invalid != [0])
         ):
-            raise ValueError(f"{where}: 'invalid' needs raw integers >= 0 on a numeric register")
+            raise ValueError(
+                f"{where}: 'invalid' needs raw integers >= 0 on a numeric register, "
+                "or [0] (all NUL) on a string"
+            )
         if self.values:
             if not is_int or self.scale != 1 or self.scale_ref:
                 raise ValueError(f"{where}: 'values' needs an unscaled integer register")
@@ -255,13 +259,10 @@ class Register:
                 raise ValueError(f"{where}: 'values' keys must be integers") from None
 
 
-def _resolve_scale_refs(
-    event_name: str, registers: list[Register], explicit_writable: set[int]
-) -> None:
+def _resolve_scale_refs(event_name: str, registers: list[Register]) -> None:
     """Point each scale_ref register at its exponent register in the same event.
 
-    The exponent becomes read-only; ``explicit_writable`` (ids of registers the
-    map marks writable) makes that a load error instead.
+    The exponent is read-only: marking it writable is a load error.
     """
     by_name = {r.name: r for r in registers}
     for reg in registers:
@@ -275,12 +276,11 @@ def _resolve_scale_refs(
                 "must name an integer register in the same event"
             )
             raise ValueError(msg)
-        if id(ref) in explicit_writable:
+        if ref.writable:
             raise ValueError(
                 f"Register '{ref.name}' in event '{event_name}': it is the scale_ref of "
                 f"'{reg.name}', so it is read-only"
             )
-        ref.writable = False
         reg.ref = ref
 
 
@@ -334,7 +334,6 @@ class RegisterMap:
             # trace layer collapses reserved characters and clobbers colliding
             # rows on log. Reject both raw and post-sanitization collisions here.
             seen_fields: dict[str, str] = {}
-            explicit_writable: set[int] = set()
             for reg_data in registers_data:
                 # Explicit JSON null means not polled (same as 0); an absent key
                 # keeps the device rate (None).
@@ -358,7 +357,7 @@ class RegisterMap:
                     scale=reg_data.get("scale", 1.0),
                     byte_order=reg_data.get("byte_order", default_byte_order),
                     description=reg_data.get("description", ""),
-                    writable=reg_data.get("writable"),
+                    writable=reg_data.get("writable", False),
                     rate=rate,
                     length=reg_data.get("length"),
                     scale_ref=reg_data.get("scale_ref", ""),
@@ -375,9 +374,7 @@ class RegisterMap:
                     raise ValueError(msg)
                 seen_fields[field_name] = reg.name
                 registers.append(reg)
-                if reg_data.get("writable") is True:
-                    explicit_writable.add(id(reg))
-            _resolve_scale_refs(event_name, registers, explicit_writable)
+            _resolve_scale_refs(event_name, registers)
             events[event_name] = registers
 
         return cls(

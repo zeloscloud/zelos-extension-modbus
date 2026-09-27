@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -12,6 +13,7 @@ import pytest
 from conftest import await_listening, free_port
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus.client.mixin import ModbusClientMixin
+from pymodbus.exceptions import ModbusIOException
 
 from zelos_extension_modbus.demo.simulator import (
     SCAN_TARGET_COUNTER,
@@ -23,6 +25,7 @@ from zelos_extension_modbus.demo.simulator import (
 from zelos_extension_modbus.register_map import RegisterMap
 from zelos_extension_modbus.scan import (
     ALLOWED,
+    SILENT_AFTER,
     RangeFinder,
     ScanLink,
     classify_words,
@@ -167,6 +170,29 @@ class TestScanTarget:
         assert set(issues) == {"e/counter", "e/zero", "e/hole"}
         assert issues["e/hole"] == ["exception 02"]
         assert issues["e/counter"][0].startswith("implausible float32")  # a uint32 read as float
+
+    def test_verify_cuts_off_a_unit_that_goes_silent(self, monkeypatch):
+        """A unit that answers once and then goes silent is cut off, not read to the end."""
+        answered = []
+
+        async def request(method, unit, **kwargs):
+            if answered:
+                raise ModbusIOException("no response")
+            answered.append(1)
+            return SimpleNamespace(isError=lambda: False, registers=[1])
+
+        async def open_link(self, **changes):
+            self.conn = SimpleNamespace(request=request, disconnect=AsyncMock())
+            return True
+
+        monkeypatch.setattr(ScanLink, "open", open_link)
+        reg_map = RegisterMap.from_dict({"events": {"e": [{"address": a} for a in range(1, 41)]}})
+        report = _run(verify_map({"host": "x"}, reg_map, samples=1))
+        assert report["cutoff"] == f"no response to the last {SILENT_AFTER} requests"
+        assert (report["requests"], report["unchecked"]) == (
+            1 + SILENT_AFTER,
+            40 - 1 - SILENT_AFTER,
+        )
 
     def test_budget_abort_is_bounded(self):
         async def timed(ep):

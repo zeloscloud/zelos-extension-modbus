@@ -56,7 +56,7 @@ Names are letters, digits, space, `_` or `-`; anything else is rejected at start
 | `default_rate` | `1.0` | Poll rate (s) when neither the register nor the device sets one |
 | `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `timeout` | `3.0` | Seconds to wait for each response |
-| `retries` | `1` | Extra attempts per request; a failed request costs `timeout x (1 + retries)`. Writes retry too: FC 5/6/15/16 write absolute values, so a repeat is idempotent |
+| `retries` | `1` | Extra attempts per request; a failed request costs `timeout x (1 + retries)` |
 | `request_delay_ms` | `0` | Minimum gap between requests on a connection (RS485 gateways, slow RTU devices) |
 | `connect_delay_ms` | `0` | Pause after each (re)connect before the first request |
 | `demote_after` | `3` | Consecutive timeouts before a device is demoted (see [Polling](#polling)) |
@@ -66,6 +66,7 @@ Names are letters, digits, space, `_` or `-`; anything else is rejected at start
 | `max_bit_block_size` | `2000` | Max coils / discrete inputs per range read |
 | `max_read_gap` | `0` | Max uncovered registers bridged within a block |
 | `write_mode` | `auto` | `auto` (FC 6 single / FC 16 multi) or `fc16` (always FC 16) |
+| `allow_raw_writes` | off | Enable the raw write actions (`write_single_register`, `write_registers`, `write_coil`); addresses the map marks read-only stay refused. App config only |
 
 Per key, a register map `device` block overrides Advanced. A config from 0.1.x (`interfaces`, per-interface unit ID/map, top-level `log_level`) fails at start: set the connections up again in the config form.
 
@@ -75,9 +76,9 @@ Troubleshooting serial/USB connection failures: see [DEBUG.md](DEBUG.md).
 
 Rate precedence: register `rate` > device Rate > `default_rate`; a map `min_rate` floors it. Each connection runs one scheduler across its devices:
 
-- **Tick**: every due block at the connection's fastest rate, plus at most one due slower block, most overdue first (lateness / rate). Slow blocks spread over the ticks instead of bursting and stalling fast points; blocks never mix rates.
+- **Tick**: every due block at the connection's fastest rate first, then at most one other item, most overdue first: a due slower block, a demoted device's probe, or a SunSpec discovery. Slow work spreads over the ticks instead of bursting and stalling fast points; blocks never mix rates. A block holding a `scale_ref` exponent is read in the same tick as every block it scales.
 - **Requested vs achieved**: `get_status` / `get_snapshot` / `list_devices` report `requested_rate`, `achieved_rate` (smoothed read interval) and `overload_pct` (100 x mean lateness / rate) for the worst tier, and every tier under `tiers`. A tier over 100% for 30 s warns once, and logs its recovery.
-- **Demotion**: after `demote_after` consecutive timeouts or gateway exceptions 0A/0B (polling or SunSpec discovery) a device is skipped and its fields are not logged; one single-attempt probe (no retries) after 10 s, doubling to `demote_max_s`; any answer resumes it. `get_status` shows `demoted` and `retry_in_s`.
+- **Demotion**: after `demote_after` consecutive timeouts or gateway exceptions 0A/0B (polling or SunSpec discovery) a device is skipped and its fields are not logged; one single-attempt probe (no retries) of a due block after 10 s, doubling to `demote_max_s` (a device awaiting SunSpec discovery is probed with one read at 40001); any answer resumes it, and its achieved rate is null until a normal interval passes. `get_status` shows `demoted` and `retry_in_s`.
 - **Counters**: `successful_reads` and `failed_reads` per device (a timeout is a failed read). A failed read logs none of its block's fields that cycle.
 - **Link down**: every read that falls due counts in `failed_reads`, and `achieved_rate` / `overload_pct` are null until reads resume. Reconnects wait 3 s, doubling to 60 s; a poll that keeps the link resets it. The first failure is logged, then only when the wait grows.
 - **Illegal addresses** (Kepware "Deactivate Tags on Illegal Address"): block size is static (map `max_block_size` > Advanced > 125). A block answered with exception 02/03 logs one warning and is retried every 10 min, also across demotion; other blocks keep polling. `get_status` lists it under `refused` (`range`, `code`, `retry_in_s`). Run `verify` to find the bad registers, then fix the map or `max_block_size` (scan learns it). Other exception codes warn once per block and keep polling.
@@ -122,10 +123,10 @@ Addresses are 1-based by default, the Kepware/Ignition convention: holding regis
 | `scale` | No | `1.0` | Scale factor (finite, non-zero); a scaled integer decodes to a float. A write the register cannot hold exactly is refused, naming the nearest writable value |
 | `rate` | No | device rate | Poll rate (seconds); `0` or `null` = not polled, actions still read/write it |
 | `byte_order` | No | `big` | `big`, `little`, `big_swap`, `little_swap` |
-| `writable` | No | auto | Override write permission (`true`/`false`) |
+| `writable` | No | `false` | `true` lets the write actions set this holding register or coil; everything else is read-only |
 | `length` | strings | | Registers a `string` spans |
-| `scale_ref` | No | | Name of an integer register in the same event holding a power-of-10 exponent: value = raw x 10^exponent (null when the exponent is). Integer registers only, not with `scale`. The register and its exponent register are read-only (`writable: true` on either fails the load) |
-| `invalid` | No | | Raw values that mean "not implemented", logged as null. Compared as the unsigned value of the words (int16 `-32768` is `32768`) |
+| `scale_ref` | No | | Name of an integer register in the same event holding a power-of-10 exponent, read in the same tick: value = raw x 10^exponent (null when the exponent is, or its read failed). Integer registers only, not with `scale`. The register and its exponent register are read-only (`writable: true` on either fails the load) |
+| `invalid` | No | | Raw values that mean "not implemented", logged as null. Compared as the unsigned value of the words (int16 `-32768` is `32768`). On a string only `[0]`: all NUL bytes |
 | `values` | No | | Enum labels for an unscaled integer register, `{"0": "off", "1": "on"}`; shown in the trace |
 
 An optional top-level `device` block carries device-model quirks, e.g. `"device": {"max_block_size": 60, "byte_order": "big_swap"}`. Unknown keys or bad values fail the load.
@@ -169,7 +170,7 @@ Set a device's Register Map to `sunspec` (`"register_map": "sunspec"`, instead o
 2. Walk the model chain (model ID, length) to the `0xFFFF` end marker.
 3. Map every model with a [pysunspec2](https://github.com/sunspec/pysunspec2) definition.
 
-Discovery only reads (FC 3). No marker is a device error (logged, `error` in `get_status`) retried every 30 s; a silent device is demoted like a polled one. The connection keeps polling its other devices. Identity, nameplate and settings models (1, 120, 121, 702) poll every 60 s; the rest at the device rate.
+Discovery only reads (FC 3). No marker, an exception answer for a model header, or a chain without the end marker is a device error (logged, `error` in `get_status`, `map_pending` stays true) retried every 30 s; a partial map is never used; a silent device is demoted like a polled one. The connection keeps polling its other devices. Identity, nameplate and settings models (1, 120, 121, 702) poll every 60 s; the rest at the device rate.
 
 | SunSpec | Becomes |
 |---------|---------|
@@ -178,7 +179,7 @@ Discovery only reads (FC 3). No marker is a device error (logged, `error` in `ge
 | Repeating group | `<group>_<n>_<point>`, count from the model length |
 | `sf` scale factor | `scale_ref` to the `*_SF` field; a fixed integer `sf` becomes `scale` |
 | `enum16`/`enum32` | `values` from the symbols |
-| Not-implemented value | null (`0x8000`, `0xFFFF`, `0x80000000`, NaN, ...; accumulators never) |
+| Not-implemented value | null (`0x8000`, `0xFFFF`, `0x80000000`, NaN, ...; `0` for accumulators and `ipaddr`, all NUL for strings) |
 | `bitfield*` | Raw integer |
 
 Skipped with a warning: models without a definition, point types `eui48`/`ipv6addr`, and repeating groups whose count needs a device read (nested or not last).
@@ -210,7 +211,7 @@ With the extension stopped, the same runs as actions. They return the report and
 |--------|-------------|
 | `auto_config` | Quick, the config form's Auto-configure: sweeps each saved connection's configured unit, 1-10 and 247 (RTU: also serial settings), identifies them, keeps its devices and adds one per new unit, `register_map: sunspec` where the marker is found (also on a configured unit, unless it sets `register_map_file`). One 25 s budget across connections; what did not fit is named in the message |
 | `scan_device` | Comprehensive, slow: scan a host or serial port (empty: the first configured connection); units as in the CLI unless `units` is given. Time limit up to 1740 s |
-| `verify_map` | Check a map file against the device register by register, naming each bad one (empty: the one configured for that unit). `ok` counts registers checked clean, `unchecked` those a cutoff (time limit, or 16 no-responses with nothing heard) skipped; the CLI exits 1 on a cutoff |
+| `verify_map` | Check a map file against the device register by register, naming each bad one (empty: the one configured for that unit). `ok` counts registers checked clean, `unchecked` those a cutoff (time limit, default 840 s; or 16 requests in a row unanswered) skipped; the CLI exits 1 on a cutoff |
 | `list_serial_ports` | Serial ports on the agent's machine, as choices |
 
 ## Actions
@@ -221,19 +222,21 @@ The extension provides actions accessible from the Zelos App (and to app extensi
 
 | Action | Description |
 |--------|-------------|
-| `list_devices` | One row per device: connection, unit ID, endpoint, trace path, and map summary |
+| `list_devices` | One row per device: connection, unit ID, endpoint, trace path, map summary, `raw_writes` (raw write actions enabled), and health (`error`, `map_pending`, `refused`, demotion) |
 | `get_status` | Connection status, `successful_reads`/`failed_reads`, requested vs achieved rate (worst tier), demotion, and block-read settings |
 | `get_snapshot` | Last value per `event/name` (value + timestamp) from the poll cache, no device I/O |
 | `read_register` | Read raw words/bits by address (map's base), register type, and count |
-| `write_single_register` | Write one holding register (FC 6): an integer 0-65535, or -32768..-1 as two's complement |
+| `write_single_register` | Write one holding register (FC 6): an integer 0-65535, or -32768..-1 as two's complement. Raw addresses, counts and values must be whole numbers |
 | `write_registers` | Write 1-123 holding registers (FC 16), values as for FC 6 |
-| `write_coil` | Write a boolean to a coil address (FC 5) |
-| `read_named_register` | Read a mapped register by `event/name` |
-| `write_named_register` | Write a mapped register by `event/name`; returns and caches the value actually written |
+| `write_coil` | Write `ON`/`OFF` (or true/false, 0/1) to a coil address (FC 5); anything else is refused |
+| `read_named_register` | Read a mapped register by `event/name` (a bare name only if one event has it) |
+| `write_named_register` | Write a mapped register by `event/name`; returns and caches the value actually written. A value the register cannot hold exactly (a fraction of a raw step) is refused; a coil takes only true/false or 0/1 |
 | `list_registers` | Register catalog: `event/name` path, address, datatype, scale, unit, effective `rate` (0 = not polled) |
 | `list_writable_registers` | Same catalog, writable registers only |
 
-A failed request returns `success: false` with the reason in `error`: `no response from device` (a write adds "outcome unknown, check the device": it may still have landed), `device refused: exception 02 (illegal data address)`, or `cannot connect to <endpoint>`.
+A failed request returns `success: false` with the reason in `error`: `no response from device`, `device refused: exception 02 (illegal data address)`, or `cannot connect to <endpoint>`.
+
+Every write result carries `outcome` (OPC UA Good/Bad/Uncertain): `ok`; `refused` (not written: read-only, raw writes disabled, bad value, device exception, cannot connect); or `unknown` (no response, or gateway exception 0B: the write may have landed, so read back before retrying). `success` is true only for `ok`. The raw write actions need `allow_raw_writes` and never write an address the map marks read-only. Writes retry like reads, `retries` extra attempts (Kepware "Attempts Before Timeout"); FC 5/6/15/16 write absolute values, so a repeat is idempotent.
 
 ## Development
 

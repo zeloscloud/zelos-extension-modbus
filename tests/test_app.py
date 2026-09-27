@@ -9,8 +9,10 @@ Covers the seams that turn config.json into running connections:
 """
 
 import json
+from pathlib import Path
 
 import pytest
+from zelos_sdk.extensions.config import load_config
 
 from zelos_extension_modbus.cli.app import (
     OLD_CONFIG_ERROR,
@@ -18,6 +20,8 @@ from zelos_extension_modbus.cli.app import (
     _load_register_map,
     _old_config_error,
 )
+
+SCHEMA = Path(__file__).parent.parent / "config.schema.json"
 
 
 def _tcp(**conn):
@@ -43,7 +47,13 @@ class TestCreateConnections:
                 }
             ]
         }
-        advanced = {"timeout": 5.0, "retries": 2, "request_delay_ms": 20, "max_block_size": 32}
+        advanced = {
+            "timeout": 5.0,
+            "retries": 2,
+            "request_delay_ms": 20,
+            "max_block_size": 32,
+            "allow_raw_writes": True,
+        }
         (conn,) = _create_connections(config, advanced)
 
         assert (conn.name, conn.serial_port, conn.baudrate) == (
@@ -57,6 +67,7 @@ class TestCreateConnections:
         assert [d.unit_id for d in conn.devices] == [7, 8]
         assert [d.rate for d in conn.devices] == [0.5, 1.0]
         assert all(d.max_block_size == 32 and d.connection is conn for d in conn.devices)
+        assert all(d.allow_raw_writes for d in conn.devices)
 
     def test_absent_keys_use_constructor_defaults(self):
         """Keys omitted from config fall back to the constructor defaults."""
@@ -70,6 +81,7 @@ class TestCreateConnections:
             "auto",
         )
         assert (dev.block_reads, dev.max_block_size, dev.max_read_gap) == (True, 125, 0)
+        assert dev.allow_raw_writes is False
 
     def test_colliding_default_names_take_port(self):
         """Unnamed TCP connections to one host get `_<port>`; others keep their names."""
@@ -127,10 +139,16 @@ class TestCreateConnections:
             "two-map-sources",
         ],
     )
-    def test_invalid_config_exits(self, caplog, connections, message):
-        """Illegal names, duplicates or two map sources exit with one line naming the problem."""
+    def test_invalid_config_exits(self, caplog, tmp_path, connections, message):
+        """Illegal names, duplicates or two map sources exit with one line naming the problem.
+
+        Through the SDK's load_config: its defaults must not fill an empty list.
+        """
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps({"connections": connections}))
+        config = load_config(config_path=path, schema_path=SCHEMA)
         with pytest.raises(SystemExit) as exc:
-            _create_connections({"connections": connections}, {})
+            _create_connections(config, {})
         assert exc.value.code == 1
         assert message in caplog.text
 

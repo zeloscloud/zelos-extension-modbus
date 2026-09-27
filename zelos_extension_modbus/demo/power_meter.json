@@ -3,46 +3,178 @@
   "description": "Demo 3-phase power meter with comprehensive register types",
   "events": {
     "voltage": [
-      {"name": "L1", "address": 1, "datatype": "float32", "unit": "V"},
-      {"name": "L2", "address": 3, "datatype": "float32", "unit": "V"},
-      {"name": "L3", "address": 5, "datatype": "float32", "unit": "V"}
+      {
+        "name": "L1",
+        "address": 1,
+        "datatype": "float32",
+        "unit": "V"
+      },
+      {
+        "name": "L2",
+        "address": 3,
+        "datatype": "float32",
+        "unit": "V"
+      },
+      {
+        "name": "L3",
+        "address": 5,
+        "datatype": "float32",
+        "unit": "V"
+      }
     ],
     "current": [
-      {"name": "L1", "address": 7, "datatype": "float32", "unit": "A"},
-      {"name": "L2", "address": 9, "datatype": "float32", "unit": "A"},
-      {"name": "L3", "address": 11, "datatype": "float32", "unit": "A"}
+      {
+        "name": "L1",
+        "address": 7,
+        "datatype": "float32",
+        "unit": "A"
+      },
+      {
+        "name": "L2",
+        "address": 9,
+        "datatype": "float32",
+        "unit": "A"
+      },
+      {
+        "name": "L3",
+        "address": 11,
+        "datatype": "float32",
+        "unit": "A"
+      }
     ],
     "power": [
-      {"name": "total", "address": 13, "datatype": "float32", "unit": "kW"},
-      {"name": "factor", "address": 15, "datatype": "float32"},
-      {"name": "frequency", "address": 17, "datatype": "float32", "unit": "Hz"},
-      {"name": "energy", "address": 19, "datatype": "uint32", "unit": "Wh"}
+      {
+        "name": "total",
+        "address": 13,
+        "datatype": "float32",
+        "unit": "kW"
+      },
+      {
+        "name": "factor",
+        "address": 15,
+        "datatype": "float32"
+      },
+      {
+        "name": "frequency",
+        "address": 17,
+        "datatype": "float32",
+        "unit": "Hz"
+      },
+      {
+        "name": "energy",
+        "address": 19,
+        "datatype": "uint32",
+        "unit": "Wh"
+      }
     ],
     "status": [
-      {"name": "temperature", "address": 21, "datatype": "int16", "unit": "°C", "scale": 0.1},
-      {"name": "relay1", "address": 1, "type": "coil"},
-      {"name": "relay2", "address": 2, "type": "coil"},
-      {"name": "alarm", "address": 3, "type": "coil"}
+      {
+        "name": "temperature",
+        "address": 21,
+        "datatype": "int16",
+        "unit": "\u00b0C",
+        "scale": 0.1
+      },
+      {
+        "name": "relay1",
+        "address": 1,
+        "type": "coil",
+        "writable": true
+      },
+      {
+        "name": "relay2",
+        "address": 2,
+        "type": "coil",
+        "writable": true
+      },
+      {
+        "name": "alarm",
+        "address": 3,
+        "type": "coil",
+        "writable": true
+      }
     ],
     "inputs": [
-      {"name": "firmware_version", "address": 1, "type": "input", "datatype": "uint16"},
-      {"name": "serial_number", "address": 2, "type": "input", "datatype": "uint32"},
-      {"name": "uptime_hours", "address": 4, "type": "input", "datatype": "uint32", "unit": "h"}
+      {
+        "name": "firmware_version",
+        "address": 1,
+        "type": "input",
+        "datatype": "uint16"
+      },
+      {
+        "name": "serial_number",
+        "address": 2,
+        "type": "input",
+        "datatype": "uint32"
+      },
+      {
+        "name": "uptime_hours",
+        "address": 4,
+        "type": "input",
+        "datatype": "uint32",
+        "unit": "h"
+      }
     ],
     "digital_inputs": [
-      {"name": "door_open", "address": 1, "type": "discrete_input"},
-      {"name": "external_fault", "address": 2, "type": "discrete_input"},
-      {"name": "grid_connected", "address": 3, "type": "discrete_input"}
+      {
+        "name": "door_open",
+        "address": 1,
+        "type": "discrete_input"
+      },
+      {
+        "name": "external_fault",
+        "address": 2,
+        "type": "discrete_input"
+      },
+      {
+        "name": "grid_connected",
+        "address": 3,
+        "type": "discrete_input"
+      }
     ],
     "setpoints": [
-      {"name": "voltage_high_limit", "address": 101, "datatype": "uint16", "unit": "V"},
-      {"name": "voltage_low_limit", "address": 102, "datatype": "uint16", "unit": "V"},
-      {"name": "power_limit", "address": 103, "datatype": "int32", "unit": "W"},
-      {"name": "energy_reset", "address": 105, "datatype": "uint32"}
+      {
+        "name": "voltage_high_limit",
+        "address": 101,
+        "datatype": "uint16",
+        "unit": "V",
+        "writable": true
+      },
+      {
+        "name": "voltage_low_limit",
+        "address": 102,
+        "datatype": "uint16",
+        "unit": "V",
+        "writable": true
+      },
+      {
+        "name": "power_limit",
+        "address": 103,
+        "datatype": "int32",
+        "unit": "W",
+        "writable": true
+      },
+      {
+        "name": "energy_reset",
+        "address": 105,
+        "datatype": "uint32",
+        "writable": true
+      }
     ],
     "swapped_floats": [
-      {"name": "calibration_factor", "address": 111, "datatype": "float32", "byte_order": "big_swap"},
-      {"name": "offset_value", "address": 113, "datatype": "float32", "byte_order": "big_swap"}
+      {
+        "name": "calibration_factor",
+        "address": 111,
+        "datatype": "float32",
+        "byte_order": "big_swap"
+      },
+      {
+        "name": "offset_value",
+        "address": 113,
+        "datatype": "float32",
+        "byte_order": "big_swap",
+        "writable": true
+      }
     ]
   }
 }
