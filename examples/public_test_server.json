@@ -8,7 +8,8 @@
         "type": "holding",
         "address": 1,
         "datatype": "uint16",
-        "description": "Holding Register 1 (writable, may be overwritten by other users)"
+        "description": "Holding Register 1 (writable, may be overwritten by other users)",
+        "writable": true
       },
       {
         "name": "hr_2",
@@ -82,21 +83,24 @@
         "type": "coil",
         "address": 1,
         "datatype": "bool",
-        "description": "Coil 1 (writable)"
+        "description": "Coil 1 (writable)",
+        "writable": true
       },
       {
         "name": "coil_2",
         "type": "coil",
         "address": 2,
         "datatype": "bool",
-        "description": "Coil 2 (writable)"
+        "description": "Coil 2 (writable)",
+        "writable": true
       },
       {
         "name": "coil_3",
         "type": "coil",
         "address": 3,
         "datatype": "bool",
-        "description": "Coil 3 (writable)"
+        "description": "Coil 3 (writable)",
+        "writable": true
       }
     ],
     "discrete_inputs": [

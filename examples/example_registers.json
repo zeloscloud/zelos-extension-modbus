@@ -36,9 +36,9 @@
         "type": "input",
         "address": 5,
         "datatype": "int16",
-        "unit": "°C",
+        "unit": "\u00b0C",
         "scale": 0.1,
-        "description": "Temperature sensor (signed, 0.1°C resolution)"
+        "description": "Temperature sensor (signed, 0.1\u00b0C resolution)"
       },
       {
         "name": "humidity",
@@ -56,14 +56,16 @@
         "type": "coil",
         "address": 1,
         "datatype": "bool",
-        "description": "Relay 1 output"
+        "description": "Relay 1 output",
+        "writable": true
       },
       {
         "name": "relay_2",
         "type": "coil",
         "address": 2,
         "datatype": "bool",
-        "description": "Relay 2 output"
+        "description": "Relay 2 output",
+        "writable": true
       }
     ],
     "inputs": [

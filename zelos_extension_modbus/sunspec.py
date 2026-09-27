@@ -41,7 +41,8 @@ BASE_ADDRESSES = (40000, 0, 50000)
 END_MODEL_ID = 0xFFFF
 MAX_MODELS = 100  # bound on a garbage chain
 
-# SunSpec point type -> (datatype, not-implemented raw value or None)
+# SunSpec point type -> (datatype, not-implemented raw value): accumulators
+# and addresses are 0, strings all NUL.
 POINT_TYPES: dict[str, tuple[str, int | None]] = {
     "int16": ("int16", 0x8000),
     "sunssf": ("int16", 0x8000),
@@ -49,20 +50,20 @@ POINT_TYPES: dict[str, tuple[str, int | None]] = {
     "count": ("uint16", 0xFFFF),
     "enum16": ("uint16", 0xFFFF),
     "bitfield16": ("uint16", 0xFFFF),
-    "acc16": ("uint16", None),
+    "acc16": ("uint16", 0),
     "int32": ("int32", 0x80000000),
     "uint32": ("uint32", 0xFFFFFFFF),
     "enum32": ("uint32", 0xFFFFFFFF),
     "bitfield32": ("uint32", 0xFFFFFFFF),
-    "acc32": ("uint32", None),
-    "ipaddr": ("uint32", None),
+    "acc32": ("uint32", 0),
+    "ipaddr": ("uint32", 0),
     "int64": ("int64", 0x8000000000000000),
     "uint64": ("uint64", 0xFFFFFFFFFFFFFFFF),
     "bitfield64": ("uint64", 0xFFFFFFFFFFFFFFFF),
-    "acc64": ("uint64", None),
+    "acc64": ("uint64", 0),
     "float32": ("float32", 0x7FC00000),
     "float64": ("float64", 0x7FF8000000000000),
-    "string": ("string", None),
+    "string": ("string", 0),  # all NUL
 }
 ENUM_TYPES = {"enum16", "enum32"}
 HEADER_POINTS = {"ID", "L"}  # model header, already known
@@ -87,8 +88,13 @@ async def _read(device: ModbusDevice, address: int, count: int) -> list[int] | N
 async def build_register_map(device: ModbusDevice) -> RegisterMap:
     """Discover the device's SunSpec models and map them.
 
+    Only a whole chain, ended by the 0xFFFF marker, makes a map: a partial one
+    would silently drop models, so the device retries discovery instead.
+
     Raises:
-        DiscoveryError: no `SunS` marker at any base address.
+        DiscoveryError: no `SunS` marker at any base address, an exception
+            answer for a model header, or no end marker.
+        ModbusIOException: no response.
     """
     base = None
     for address in BASE_ADDRESSES:
@@ -103,10 +109,11 @@ async def build_register_map(device: ModbusDevice) -> RegisterMap:
     warned: set[str] = set()
     address = base + 2
     for _ in range(MAX_MODELS):
-        header = await _read(device, address, 2) if address + 2 <= 0x10000 else None
+        if address + 2 > 0x10000:
+            raise DiscoveryError(f"model chain runs past the last address at {address + 1}")
+        header = await _read(device, address, 2)
         if header is None:
-            logger.warning(f"SunSpec: no model header at {address + 1}; ending the model chain")
-            break
+            raise DiscoveryError(f"exception answer for the model header at {address + 1}")
         model_id, length = header
         if model_id == END_MODEL_ID:
             break
@@ -119,7 +126,7 @@ async def build_register_map(device: ModbusDevice) -> RegisterMap:
             events[event] = registers
         address += 2 + length
     else:
-        logger.warning(f"SunSpec: stopped after {MAX_MODELS} models without an end marker")
+        raise DiscoveryError(f"no end marker after {MAX_MODELS} models")
 
     models = ", ".join(events) or "none"
     logger.info(f"SunSpec: base {base + 1}, models: {models}")

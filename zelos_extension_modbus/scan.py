@@ -89,8 +89,10 @@ SLOW_AFTER = 2
 SPEED_UP_AFTER = 20
 DEFAULT_SAMPLES = 10
 DEFAULT_PERIOD = 5.0
-#: Consecutive timeouts, with nothing heard yet, that mark a link silent.
+#: Consecutive timeouts that mark a link (scan: with nothing heard yet) or unit silent.
 SILENT_AFTER = 16
+#: verify_map's default wall clock, the verify action's longest.
+VERIFY_MAX_SECONDS = 840.0
 
 TCP_UNITS = (1, 0, 255)  # tried after the configured unit
 RTU_UNITS = range(1, 248)
@@ -193,6 +195,7 @@ class ScanLink:
         self.deadline = time.monotonic() + max_seconds if max_seconds else None
         self.requests = 0
         self.timeouts = 0
+        self.silent = 0  # no responses in a row
         self.answered: set[int] = set()  # units heard from (a gateway 0A/0B is not)
         self.by_fc: Counter[int] = Counter()
         self.conn: ModbusConnection | None = None
@@ -266,9 +269,11 @@ class ScanLink:
             response = await self.conn.request(method, unit, **kwargs)
         except (ModbusException, OSError):
             self.timeouts += 1
+            self.silent += 1
             self._missed(unit)
             return Reply()  # no response
         exc = getattr(response, "exception_code", -1) if response.isError() else None
+        self.silent = self.silent + 1 if exc in GATEWAY_ABSENT else 0
         if exc in GATEWAY_ABSENT:
             self._missed(unit)
         elif exc == 0x06:
@@ -1102,9 +1107,11 @@ async def verify_map(
     """Read every register of ``register_map`` ``samples`` times; report problems.
 
     Each register is read on its own, so an exception names its register. A
-    cutoff (max_seconds, or SILENT_AFTER timeouts with nothing heard) leaves
-    the registers not read yet out of ``ok``, counted in ``unchecked``.
+    cutoff (max_seconds, default VERIFY_MAX_SECONDS, or SILENT_AFTER requests
+    in a row with no response, whatever answered before) leaves the registers
+    not read yet out of ``ok``, counted in ``unchecked``.
     """
+    max_seconds = max_seconds or VERIFY_MAX_SECONDS
     link = ScanLink(endpoint, timeout=timeout, delay_ms=delay_ms, max_seconds=max_seconds)
     started = time.monotonic()
     report: dict[str, Any] = {
@@ -1128,8 +1135,8 @@ async def verify_map(
                         READ_METHODS[reg.type], unit, address=reg.address, count=reg.address_span
                     )
                     reads.setdefault((event, reg.name), []).append(reply)
-                    if not link.answered and link.timeouts >= SILENT_AFTER:
-                        raise BudgetExceeded(f"no response to {link.timeouts} requests")
+                    if link.silent >= SILENT_AFTER:
+                        raise BudgetExceeded(f"no response to the last {link.silent} requests")
     except BudgetExceeded as e:
         report["cutoff"] = str(e)
     finally:

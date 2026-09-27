@@ -1,6 +1,7 @@
 """string, scale_ref, invalid (not implemented) and values: load, decode, trace."""
 
 import asyncio
+import time
 
 import pytest
 from conftest import poll_once
@@ -11,7 +12,7 @@ from zelos_extension_modbus.register_map import RegisterMap
 MAP = {
     "events": {
         "e": [
-            {"name": "s", "address": 1, "datatype": "string", "length": 3},
+            {"name": "s", "address": 1, "datatype": "string", "length": 3, "invalid": [0]},
             # Disabled: read only because `v` needs it in the same sweep.
             {
                 "name": "sf",
@@ -47,6 +48,7 @@ class _Source:
     [
         ({}, "s", "ABC"),
         ({0: 0x2020, 1: 0x2020, 2: 0x2020}, "s", ""),
+        ({0: 0, 1: 0, 2: 0}, "s", None),  # all NUL: not implemented
         ({}, "v", 230.5),
         ({3: 2}, "v", 230500.0),
         ({3: 0x8000}, "v", None),  # exponent not implemented
@@ -54,7 +56,17 @@ class _Source:
         ({5: 0x8000}, "n", None),
         ({}, "st", 1),
     ],
-    ids=["string", "blank-string", "sf-neg", "sf-pos", "sf-null", "int", "invalid", "enum"],
+    ids=[
+        "string",
+        "blank-string",
+        "nul-string",
+        "sf-neg",
+        "sf-pos",
+        "sf-null",
+        "int",
+        "invalid",
+        "enum",
+    ],
 )
 @pytest.mark.parametrize("block_reads", [True, False], ids=["block", "single"])
 def test_decode(words, field, expected, block_reads):
@@ -102,7 +114,7 @@ def test_decode(words, field, expected, block_reads):
         ({"address": 65536, "datatype": "uint32"}, "spans past the last address"),
         ({"datatype": "float32", "values": {"1": "a"}}, "unscaled integer"),
         ({"values": {"one": "a"}}, "keys must be integers"),
-        ({"datatype": "string", "length": 1, "invalid": [0]}, "'invalid' needs"),
+        ({"datatype": "string", "length": 1, "invalid": [1]}, "'invalid' needs"),
     ],
     ids=[
         "string-no-length",
@@ -141,3 +153,47 @@ def test_scale_ref_pair_is_read_only():
     }
     with pytest.raises(ValueError, match="scale_ref of 'v', so it is read-only"):
         RegisterMap.from_dict({"events": events})
+
+
+def test_scale_ref_read_with_its_value():
+    """A slow value is scaled only by an exponent read in the same batch, even from
+    another block that is not due; a failed exponent read nulls it."""
+    events = {
+        "e": [
+            {"name": "f", "address": 50},  # the fast tier
+            {"name": "v", "address": 1, "rate": 60, "scale_ref": "sf"},
+            {"name": "sf", "address": 100, "datatype": "int16", "rate": 0},
+        ]
+    }
+    conn = ModbusConnection(name="c")
+    dev = ModbusDevice(conn, register_map=RegisterMap.from_dict({"events": events}))
+    image = {0: 2305, 49: 1, 99: 0xFFFF}
+    reads = []
+
+    async def fetch(reg_type, address, count):
+        reads.append(address)
+        word = image[address]
+        return -word if word < 0 else [word]  # negative: that exception code
+
+    dev._fetch = fetch
+    logged = []
+    dev._log_values = logged.append
+    loop = asyncio.new_event_loop()
+
+    def tick():
+        now = time.monotonic()
+        for block in dev._schedule(now):  # the exponent's block is never due by itself
+            block.next_due = now + 1000 if block.read.address == 99 else now
+        loop.run_until_complete(conn._poll(conn._batch(now)))
+        return logged[-1]["e"]["v"]
+
+    assert tick() == 230.5
+    image[99] = 0xFFFE  # exponent -1 -> -2
+    assert tick() == 23.05
+    image[99] = -4  # the exponent read fails (exception 04)
+    assert tick() is None
+    image[99] = -2  # refused: kept to its 10 min retry, not dragged along
+    assert tick() is None
+    reads.clear()
+    assert tick() is None and 99 not in reads
+    loop.close()

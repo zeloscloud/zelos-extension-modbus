@@ -429,7 +429,7 @@ def verify(
 
     Flags exceptions, registers that read 0 on every sample, implausible
     floats and not-implemented sentinels. Reads only. Exits 1 on any problem
-    or a cutoff (--max-seconds, or a silent unit).
+    or a cutoff (--max-seconds, default 840; or 16 requests in a row unanswered).
 
     \b
     Example:
