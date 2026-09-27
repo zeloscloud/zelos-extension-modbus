@@ -148,12 +148,15 @@ def _resolve_register(dev: Any, path: str) -> tuple[str | None, Any, str | None]
     if not dev.register_map:
         return ("No register map loaded", None, None)
 
-    parts = path.split("/", 1)
-    if len(parts) == 2:
-        event_name, reg_name = parts
-        for reg in dev.register_map.get_event(event_name):
-            if reg.name == reg_name:
-                return (None, reg, event_name)
+    if "/" in path:
+        # Event names may contain "/" (e.g. a scan draft's "holding/b1"), so match
+        # the map's own events rather than splitting at a fixed slash.
+        for event_name, regs in dev.register_map.events.items():
+            if path.startswith(f"{event_name}/"):
+                reg_name = path[len(event_name) + 1 :]
+                for reg in regs:
+                    if reg.name == reg_name:
+                        return (None, reg, event_name)
         return (f"Register '{path}' not found", None, None)
 
     matches = [
