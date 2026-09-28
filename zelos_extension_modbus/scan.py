@@ -12,6 +12,10 @@ time per link with an inter-request delay, per-stage request and wall-clock
 budgets, and a global deadline checked before every request, so an abort
 lands within one request timeout. Draft maps are always ``writable: false``.
 
+``Discovery`` reuses the S3 range finder for a running device's auto-scan:
+one read per poll-loop turn, through the device's own request path (which
+only reads, FC 01-04).
+
 Internally addresses are 0-based wire addresses; everything user-facing
 (windows, report ranges, draft maps) is 1-based, the maps' default
 address_base. Register names carry the table and that address: ``hr40001`` is
@@ -581,6 +585,80 @@ class RangeFinder:
         except Unsupported:
             return "unsupported"
         return "ok"
+
+
+class _Read:
+    """One auto-scan read, awaited inside RangeFinder and answered by the poll loop."""
+
+    def __init__(self, table: str, address: int, count: int) -> None:
+        self.table, self.address, self.count = table, address, count
+
+    def __await__(self) -> Any:
+        return (yield self)
+
+
+class _HandOff:
+    """RangeFinder's link for Discovery: every read is yielded to the driver."""
+
+    async def read(self, table: str, unit: int, address: int, count: int) -> Reply:
+        reply = await _Read(table, address, count)
+        if reply.exc == 0x01:
+            raise Unsupported(table)
+        return reply
+
+
+class Discovery:
+    """Auto-scan: the scan's range finder over the default windows, one read at a time.
+
+    The finder coroutine is driven by hand, not by the event loop: ``pending``
+    is its next read, which the device sends through its own request path when
+    the scheduler gives it a turn, then hands back to ``answer``. Valid runs
+    accumulate in ``runs``; ``found`` yields each new address once.
+    """
+
+    def __init__(self, rtu: bool, max_block: int, max_bit_block: int) -> None:
+        link = _HandOff()
+        self.words = RangeFinder(link, 0, max_block)
+        self.bits = RangeFinder(link, 0, max_bit_block)
+        self.windows = list(RTU_WINDOWS if rtu else TCP_WINDOWS)
+        self.runs: dict[str, list[tuple[int, int]]] = {t: [] for t in TABLES}
+        self.table: str | None = None
+        self.misses = 0  # no-responses in a row to ``pending``
+        self._reported = dict.fromkeys(TABLES, 0)  # wire addresses below are reported
+        self._steps = self._run()
+        self.pending: _Read | None = self._steps.send(None)
+
+    async def _run(self) -> None:
+        for table in TABLES:
+            self.table = table
+            finder = self.bits if table in BIT_REGISTER_TYPES else self.words
+            await finder.table(table, self.windows, self.runs[table])
+        self.table = None
+
+    @property
+    def done(self) -> bool:
+        return self.pending is None
+
+    def answer(self, values: list[Any] | int | None) -> None:
+        """Feed ``pending``'s outcome (values, exception code, or None: a hole) and step."""
+        self.misses = 0
+        if isinstance(values, list):
+            reply = Reply(values=values, response=values)
+        else:
+            reply = Reply(exc=values, response=values)
+        try:
+            self.pending = self._steps.send(reply)
+        except StopIteration:
+            self.pending = None
+            self.table = None
+
+    def found(self) -> Iterator[tuple[str, int]]:
+        """(table, wire address) of every valid address not yielded before, in order."""
+        for table, runs in self.runs.items():
+            for lo, hi in runs:
+                yield from ((table, a) for a in range(max(lo, self._reported[table]), hi))
+            if runs:
+                self._reported[table] = runs[-1][1]
 
 
 # ---------------------------------------------------------------------------

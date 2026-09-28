@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import logging
 import math
 import struct
@@ -15,6 +16,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import zelos_sdk
@@ -27,10 +29,12 @@ from zelos_extension_modbus.constants import (
     MIN_RATE,
     MODBUS_MAX_BIT_READ_COUNT,
     MODBUS_MAX_READ_COUNT,
+    RAW_EVENT_PREFIX,
     ByteOrder,
     RegisterType,
     Transport,
     WriteMode,
+    raw_names,
     trace_layout,
 )
 from zelos_extension_modbus.register_map import Register, RegisterMap
@@ -86,6 +90,13 @@ OUTCOME_UNKNOWN = " (the write may have landed; read back before retrying)"
 # A block the device refuses (illegal address) is retried this often (Kepware
 # "Deactivate Tags on Illegal Address").
 REFUSED_RETRY = 600.0
+# Block error for an auto-scanned block that never answers while the device
+# answers others: deactivated like a refused block.
+SILENT = -1
+DEACTIVATED = (*ILLEGAL_ADDRESS, SILENT)
+
+#: Auto-scan defaults: discovered registers poll slowly (s).
+AUTO_SCAN_RATE = 10.0
 
 # Achieved-rate smoothing per read, and how long an overload (or its recovery)
 # must hold before it is logged.
@@ -116,13 +127,14 @@ class _Block:
     rate: float
     next_due: float = 0.0  # monotonic
     last_read: float | None = None  # previous read's start, for the achieved rate
-    error: int | None = None  # exception code of the failing read, warned once
+    error: int | None = None  # exception code (or SILENT) of the failing read, warned once
+    misses: int = 0  # no-responses in a row
     refs: list[_Block] = field(default_factory=list)  # blocks holding its scale_ref exponents
 
     @property
     def refused(self) -> bool:
-        """The device answered illegal address: not polled, retried every REFUSED_RETRY."""
-        return self.error in ILLEGAL_ADDRESS
+        """Illegal address (or SILENT): not polled, retried every REFUSED_RETRY."""
+        return self.error in DEACTIVATED
 
 
 @dataclass
@@ -641,11 +653,14 @@ class ModbusConnection:
         logger.info(f"{self._connection_str} stopped")
 
     def _batch(self, now: float) -> list[tuple[ModbusDevice, _Block | None]]:
-        """This tick's work: (device, block), or (device, None) for a map build.
+        """This tick's work: (device, block), or (device, None) for a map build or
+        an auto-scan read.
 
         Every due block at the connection's fastest rate first, then at most ONE
         other item (OpenEMS LOW round robin): a due slower block, a demoted
         device's probe, or a map build, most overdue first (lateness / period).
+        An auto-scan read ranks last (lag 0): it takes the tick's slot only when
+        nothing else is overdue.
         Slower work thus spreads one item per tick instead of bursting and
         stalling the fast points, and a first sweep staggers slow blocks for
         good (a block is due again one rate after it was read). A block brings
@@ -662,10 +677,12 @@ class ModbusConnection:
                 other.append(((dev._retry_at - now) / period, dev, None))
             elif dev.demoted:
                 probe = dev._probe(now)
-                if probe:
+                if probe or dev.scanning:
                     other.append(((dev._retry_at - now) / dev._backoff, dev, probe))
             else:
                 live += [(dev, b) for b in dev._schedule(now)]
+                if dev.scanning:
+                    other.append((0.0, dev, None))
         fastest = min((b.rate for _, b in live), default=None)
         fast: list[tuple[float, ModbusDevice, _Block | None]] = []
         for dev, b in live:
@@ -684,7 +701,7 @@ class ModbusConnection:
                 continue  # demoted earlier this tick
             try:
                 if block is None:
-                    await dev.load_map(now)
+                    await (dev.load_map(now) if dev.map_pending else dev._discover(now))
                 else:
                     polled[id(dev)] = dev
                     await dev._read_block(block, now)
@@ -791,6 +808,7 @@ class ModbusDevice:
         demote_max_s: float = 300.0,
         name: str | None = None,
         map_loader: Callable[[ModbusDevice], Awaitable[RegisterMap]] | None = None,
+        auto_scan: bool = False,
     ) -> None:
         """Initialize a device and attach it to ``connection``.
 
@@ -821,6 +839,8 @@ class ModbusDevice:
             map_loader: Builds the register map over the link once connected
                 (SunSpec discovery), in place of ``register_map``. Retried
                 until it succeeds; the device's events are declared then.
+            auto_scan: Without a map (and a non-zero rate): discover the valid
+                registers over the link and poll each at ``rate`` as it is found
         """
         self.connection = connection
         connection.devices.append(self)
@@ -880,6 +900,17 @@ class ModbusDevice:
         # reads so get_snapshot can answer without any device I/O.
         self._last_values: dict[str, tuple[Any, int]] = {}
 
+        # Raw registers (no map name): auto-scan's, one event each, and the
+        # names of every raw event declared (auto-scan or read_register).
+        self._discovered: dict[str, list[Register]] = {}
+        self._raw_names: set[str] = set()
+        self._discovery = None
+        if auto_scan and self.rate and register_map is None and map_loader is None:
+            from zelos_extension_modbus.scan import Discovery  # scan imports this module
+
+            rtu = connection.transport == Transport.RTU
+            self._discovery = Discovery(rtu, self.max_block_size, self.max_bit_block_size)
+
     @property
     def path(self) -> str:
         """``<connection>/<device>``: the registry key actions select by."""
@@ -901,6 +932,11 @@ class ModbusDevice:
         return self._map_loader is not None
 
     @property
+    def scanning(self) -> bool:
+        """Auto-scan still has reads to make."""
+        return self._discovery is not None and not self._discovery.done
+
+    @property
     def demoted(self) -> bool:
         """Skipped after demote_after consecutive timeouts; only probed until it answers."""
         return self._backoff > 0
@@ -914,10 +950,15 @@ class ModbusDevice:
         return max(rate, self.min_rate) if rate else 0.0
 
     @property
+    def events(self) -> dict[str, list[Register]]:
+        """Every register by event: the map's, then auto-scan's."""
+        return {**(self.register_map.events if self.register_map else {}), **self._discovered}
+
+    @property
     def polled_events(self) -> dict[str, list[Register]]:
         """Events mapped to their polled registers; events with none are omitted."""
         result: dict[str, list[Register]] = {}
-        for event_name, regs in (self.register_map.events if self.register_map else {}).items():
+        for event_name, regs in self.events.items():
             polled = [r for r in regs if self.rate_of(r)]
             if polled:
                 result[event_name] = polled
@@ -953,12 +994,138 @@ class ModbusDevice:
             "refused": [
                 {
                     "range": self._range(b.read),
-                    "code": b.error,
+                    "code": None if b.error == SILENT else b.error,
                     "retry_in_s": round(max(0.0, b.next_due - now), 1),
                 }
                 for b in self._blocks or []
                 if b.refused
             ],
+        }
+
+    def auto_scan_status(self) -> dict[str, Any] | None:
+        """Auto-scan progress (None: not auto-scanned): state, table being scanned,
+        registers found, and those ignored (refused or silent, retried every 10 min)."""
+        if self._discovery is None:
+            return None
+        return {
+            "state": "scanning" if self.scanning else "done",
+            "table": self._discovery.table,
+            "found": len(self._discovered),
+            "ignored": sum(len(b.read.registers) for b in list(self._blocks or []) if b.refused),
+        }
+
+    def _raw_event(self, reg_type: str, address: int) -> tuple[str, str] | None:
+        """(event, field) for a raw register at wire ``address``, declaring its event once.
+
+        None when the map has an event of that name (it owns the path).
+        """
+        event, field_name = raw_names(reg_type, address + self.address_base)
+        if event in self._raw_names:
+            return event, field_name
+        if self.register_map and event in self.register_map.events:
+            return None
+        self._raw_names.add(event)
+        if self._trace_target:
+            source, prefix = self._trace_target
+            dtype = SDK_DATATYPE_MAP["bool" if reg_type in BIT_REGISTER_TYPES else "uint16"]
+            fields = [zelos_sdk.TraceEventFieldMetadata(field_name, dtype)]
+            self._events[event] = source.add_event(f"{prefix}/{event}", fields)
+        return event, field_name
+
+    async def read_raw(self, reg_type: str, address: int, count: int) -> list[int] | list[bool]:
+        """Read by wire ``address`` for read_register: traced per register, one DEBUG line.
+
+        Raises:
+            RequestFailed: with the reason (nothing is traced).
+        """
+        values = await self._read_range(reg_type, address, count)
+        first = address + self.address_base
+        logger.debug(f"[{self.path}] read {reg_type} {first} x{count}: {values}")
+        ms = int(time.time() * 1000)
+        for i, value in enumerate(values):
+            names = self._raw_event(reg_type, address + i)
+            if names is None:
+                continue
+            event, field_name = names
+            if trace_event := self._events.get(event):
+                trace_event.log(**{field_name: value})
+            self._last_values[f"{event}/{field_name}"] = (value, ms)
+        return values
+
+    async def _discover(self, now: float) -> None:
+        """One auto-scan read; each valid register it proves joins polling at once.
+
+        No response retries the read (it counts toward demotion). Only
+        demote_after in a row while the device is not demoted (it answers
+        other reads) treat the range as a hole.
+        """
+        scan = self._discovery
+        want = scan.pending
+        try:
+            raw = await self._fetch(want.table, want.address, want.count)
+        except ModbusIOException as e:
+            first = want.address + self.address_base
+            self._timed_out(now, f"Auto-scan: no response for {want.table} {first}: {e}")
+            scan.misses += 1
+            if scan.misses < self.demote_after or self.demoted:
+                return
+            raw = None
+        else:
+            self._responded(now)
+        scan.answer(raw)
+        # Reads the device refused as too large shrink every later block.
+        self.max_block_size, self.max_bit_block_size = scan.words.block, scan.bits.block
+        grew = False
+        for table, address in scan.found():
+            event, field_name = self._raw_event(table, address)  # no map: never None
+            datatype = "bool" if table in BIT_REGISTER_TYPES else "uint16"
+            reg = Register(address, field_name, table, datatype, base=self.address_base)
+            self._discovered[event] = [reg]
+            grew = True
+        if grew:
+            self._plan(now)
+        if scan.done:
+            logger.info(f"[{self.path}] Auto-scan done: {len(self._discovered)} registers")
+
+    def discovered_map(self) -> dict[str, Any]:
+        """The auto-scanned registers as a register map, ignored ones left out.
+
+        Contiguous runs per table become events (`registers/1-150`), each
+        register keeps its trace field name, read-only, at its polled rate.
+        """
+        ignored = {id(r) for b in list(self._blocks or []) if b.refused for r in b.read.registers}
+        order = list(RegisterType)
+        regs = sorted(
+            (r for [r] in list(self._discovered.values()) if id(r) not in ignored),
+            key=lambda r: (order.index(r.type), r.address),
+        )
+        events: dict[str, list[dict[str, Any]]] = {}
+        runs = itertools.groupby(enumerate(regs), key=lambda p: (p[1].type, p[1].address - p[0]))
+        for (table, _), run in runs:
+            run = [r for _, r in run]
+            first, last = run[0].map_address, run[-1].map_address
+            name = f"{RAW_EVENT_PREFIX[table]}/{first}" + (f"-{last}" if last != first else "")
+            events[name] = [
+                {
+                    "name": r.name,
+                    "type": r.type,
+                    "address": r.map_address,
+                    "datatype": r.datatype,
+                    "writable": False,
+                    "rate": self.rate_of(r),
+                }
+                for r in run
+            ]
+        scan = self._discovery
+        limits = {"max_block_size": scan.words.learned_block}
+        limits["max_bit_block_size"] = scan.bits.learned_block
+        stamp = datetime.now(UTC).isoformat(timespec="seconds")
+        return {
+            "name": self.name,
+            "description": f"Auto-scan of {self.connection.endpoint} unit {self.unit_id} at "
+            f"{stamp}: raw words and bits, read-only. Review names, types and scaling.",
+            "device": {"address_base": self.address_base} | {k: v for k, v in limits.items() if v},
+            "events": events,
         }
 
     async def load_map(self, now: float | None = None) -> None:
@@ -1012,17 +1179,6 @@ class ModbusDevice:
         self.trace_path = f"{source.name}/{event_prefix}"
         self._trace_target = (source, event_prefix)
         if self.map_pending:
-            return
-
-        if not self.register_map or not self.register_map.events:
-            # No register map - create a generic raw event
-            source.add_event(
-                f"{event_prefix}/raw",
-                [
-                    zelos_sdk.TraceEventFieldMetadata("address", zelos_sdk.DataType.UInt16),
-                    zelos_sdk.TraceEventFieldMetadata("value", zelos_sdk.DataType.Int32),
-                ],
-            )
             return
 
         # Create events from user-defined event names. polled_events already
@@ -1204,7 +1360,9 @@ class ModbusDevice:
         A scale_ref register is read at the fastest rate of the registers it
         scales, and its block rides along whenever a block it scales is read.
         Block size is static (Kepware): a refused block is retried, never split.
+        A block that survives a re-plan (auto-scan growth) keeps its state.
         """
+        old = {(b.read.type, b.read.address, b.read.count, b.rate): b for b in self._blocks or []}
         rates: dict[int, tuple[Register, float]] = {}
         self._event_of = {}
         for event, regs in self.polled_events.items():
@@ -1227,7 +1385,13 @@ class ModbusDevice:
                 )
             else:
                 plan = [ReadBlock(r.type, r.address, r.address_span, (r,)) for r in regs]
-            self._blocks += [_Block(read, rate, now) for read in plan]
+            for read in plan:
+                block = old.get((read.type, read.address, read.count, rate))
+                if block:
+                    block.read = read
+                else:
+                    block = _Block(read, rate, now)
+                self._blocks.append(block)
         holder = {id(r): b for b in self._blocks for r in b.read.registers}
         for block in self._blocks:
             refs = {id(holder[id(r.ref)]): holder[id(r.ref)] for r in block.read.registers if r.ref}
@@ -1238,8 +1402,8 @@ class ModbusDevice:
         """Monotonic time this device next needs the link (inf: never)."""
         if self.map_pending:
             return self._retry_at
-        if self._blocks is None:
-            return 0.0
+        if self._blocks is None or self.scanning:
+            return self._retry_at
         first = min((b.next_due for b in self._blocks), default=math.inf)
         return max(first, self._retry_at) if self.demoted else first
 
@@ -1255,9 +1419,11 @@ class ModbusDevice:
         """Read one block into this tick's values.
 
         No response (or a gateway's unit-absent answer) counts toward demotion;
-        an exception answer is warned once per block (``_failed``). The block
-        is next due one rate from now (no backlog after a stall). A failed read
-        logs none of its fields.
+        an exception answer is warned once per block (``_failed``). An
+        auto-scanned block with demote_after no-responses in a row while the
+        device answers others is deactivated (SILENT). The block is next due
+        one rate from now (no backlog after a stall). A failed read logs none
+        of its fields.
         """
         if block.last_read is not None and not self.demoted:  # probe gaps are not a rate
             self._sample(block.rate, now - block.last_read, now)
@@ -1269,7 +1435,12 @@ class ModbusDevice:
         except ModbusIOException as e:
             self.failed_reads += 1
             self._timed_out(now, f"No response for {self._range(read)}: {e}")
+            block.misses += 1
+            silent = block.misses >= self.demote_after and not self.demoted
+            if self._discovery is not None and silent:
+                self._failed(block, now, SILENT)
             return
+        block.misses = 0
         self._responded(now, block)
         if isinstance(raw, list):
             self.successful_reads += 1
@@ -1287,20 +1458,25 @@ class ModbusDevice:
         return f"{read.type} {first}-{first + read.count - 1}"
 
     def _failed(self, block: _Block, now: float, code: int) -> None:
-        """An exception answer for ``block``: warned once per code.
+        """An exception answer (or SILENT) for ``block``: warned once per code.
 
-        Illegal address deactivates the block (Kepware): retried every
+        Illegal address or SILENT deactivates the block (Kepware): retried every
         REFUSED_RETRY. Block size is static, so one bad address silences its
         whole block; ``verify`` reads register by register to find it. Other
         codes keep the block polled.
         """
-        if code in ILLEGAL_ADDRESS:
+        if code in DEACTIVATED:
             block.next_due = now + REFUSED_RETRY
             block.last_read = None  # the retry gap is not a rate
         if code == block.error:
             return
         block.error = code
-        if block.refused:
+        if code == SILENT:
+            logger.warning(
+                f"[{self.path}] No response for {self._range(block.read)} while the device "
+                f"answers others: not polled, retried every {REFUSED_RETRY / 60:.0f} min"
+            )
+        elif block.refused:
             logger.warning(
                 f"[{self.path}] Device refuses {self._range(block.read)} (exception {code:02X}, "
                 f"illegal address): not polled, retried every {REFUSED_RETRY / 60:.0f} min. "

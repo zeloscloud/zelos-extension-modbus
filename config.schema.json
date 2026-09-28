@@ -74,7 +74,7 @@
                 "rate": {
                   "type": "number",
                   "title": "Rate (seconds)",
-                  "description": "Poll rate for registers without their own rate. Empty: the Advanced default rate. 0 = not polled (actions still read and write).",
+                  "description": "Poll rate for registers without their own rate. Empty: the Advanced default rate (auto-scanned devices: Auto-scan Rate). 0 = not polled, no auto-scan (actions still read and write).",
                   "minimum": 0,
                   "ui:placeholder": "1.0"
                 }
@@ -95,11 +95,18 @@
                         "register_map_file": {
                           "type": "string",
                           "title": "Register Map File",
-                          "description": "JSON file that defines which registers to read and how to decode them. A path on the agent's host: absolute or starting with ~",
+                          "description": "JSON file that defines which registers to read and how to decode them. A path on the agent's host: absolute or starting with ~. Empty: auto-scan (below).",
                           "ui:widget": "file-picker",
                           "ui:options": {
                             "accept": ".json"
                           }
+                        },
+                        "auto_scan": {
+                          "type": "boolean",
+                          "title": "Auto-scan",
+                          "description": "Without a register map file: at start, discover the device's valid registers with reads only (FC 01-04; holding, input, coils, discrete inputs) and poll each one as it is found, every Advanced Auto-scan Rate, traced as registers/<address> (input_registers/, coils/, discrete_inputs/). Off: nothing is polled without a map. Save Map turns what it found into a map file.",
+                          "default": true,
+                          "ui:widget": "toggle"
                         }
                       }
                     },
@@ -120,6 +127,7 @@
                 "name",
                 "register_map",
                 "register_map_file",
+                "auto_scan",
                 "*"
               ]
             }
@@ -262,6 +270,13 @@
           "title": "Default Rate (seconds)",
           "description": "Poll rate for devices and registers that set none. Slower registers are spread one read per tick so they never stall the fastest.",
           "default": 1.0,
+          "minimum": 0.01
+        },
+        "auto_scan_rate": {
+          "type": "number",
+          "title": "Auto-scan Rate (seconds)",
+          "description": "Poll rate for registers found by auto-scan (devices without a register map) when the device sets no Rate. Slow by default: every register found is polled.",
+          "default": 10.0,
           "minimum": 0.01
         },
         "log_level": {

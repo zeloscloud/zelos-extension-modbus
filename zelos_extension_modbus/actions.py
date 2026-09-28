@@ -145,13 +145,14 @@ def _resolve_register(dev: Any, path: str) -> tuple[str | None, Any, str | None]
     Returns (error_message, register, event): ``error_message`` and ``register``
     are mutually exclusive. A bare name held by more than one event is refused.
     """
-    if not dev.register_map:
+    events = dev.events
+    if not events:
         return ("No register map loaded", None, None)
 
     if "/" in path:
         # Event names may contain "/" (e.g. a scan draft's "holding/b1"), so match
         # the map's own events rather than splitting at a fixed slash.
-        for event_name, regs in dev.register_map.events.items():
+        for event_name, regs in events.items():
             if path.startswith(f"{event_name}/"):
                 reg_name = path[len(event_name) + 1 :]
                 for reg in regs:
@@ -159,12 +160,7 @@ def _resolve_register(dev: Any, path: str) -> tuple[str | None, Any, str | None]
                         return (None, reg, event_name)
         return (f"Register '{path}' not found", None, None)
 
-    matches = [
-        (event, reg)
-        for event, regs in dev.register_map.events.items()
-        for reg in regs
-        if reg.name == path
-    ]
+    matches = [(event, reg) for event, regs in events.items() for reg in regs if reg.name == path]
     if not matches:
         return (f"Register '{path}' not found", None, None)
     if len(matches) > 1:
@@ -253,8 +249,13 @@ def _status_row(dev: Any) -> dict[str, Any]:
         "failed_reads": dev.failed_reads,
         "error": dev.last_error,
         "map_pending": dev.map_pending,
+        "auto_scan": dev.auto_scan_status(),
         **dev.rate_status(),
     }
+
+
+def _register_count(dev: Any) -> int:
+    return sum(len(regs) for regs in dev.events.values())
 
 
 def _datatype(reg: Any) -> str:
@@ -314,7 +315,8 @@ def list_devices() -> dict[str, Any]:
                 "error": dev.last_error,
                 "map_pending": dev.map_pending,
                 "map_name": dev.register_map.name if dev.register_map else None,
-                "register_count": len(dev.register_map.registers) if dev.register_map else 0,
+                "register_count": _register_count(dev),
+                "auto_scan": dev.auto_scan_status(),
                 "rate": dev.rate,
                 "write_mode": dev.write_mode,
                 "raw_writes": dev.allow_raw_writes,
@@ -340,7 +342,7 @@ def get_status(device: str) -> dict[str, Any]:
         "max_block_size": dev.max_block_size,
         "max_bit_block_size": dev.max_bit_block_size,
         "max_read_gap": dev.max_read_gap,
-        "registers": len(dev.register_map.registers) if dev.register_map else 0,
+        "registers": _register_count(dev),
         "success": True,
     }
 
@@ -379,7 +381,10 @@ def get_snapshot(device: str) -> dict[str, Any]:
 
 
 @zelos_sdk.action(
-    "Read Register", "Read registers by address, in the device map's base (default 1-based)"
+    "Read Register",
+    "Read registers by address, in the device map's base (default 1-based). Each value is "
+    "also traced as event registers/<address> (input_registers/, coils/, discrete_inputs/ "
+    "for the other tables), field <address>_value.",
 )
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 @_address_field()
@@ -402,7 +407,7 @@ def read_register(device: str, address: int, reg_type: str, count: int) -> dict[
         return err
     count = int(count)
 
-    result, err = _run_coro(dev._read_range(reg_type, wire, count), dev)
+    result, err = _run_coro(dev.read_raw(reg_type, wire, count), dev)
     if err:
         return err
     return {
@@ -610,23 +615,21 @@ def _register_list(device: str, writable_only: bool) -> dict[str, Any]:
     dev, err = _get_device_or_error(device)
     if err:
         return err
-    if not dev.register_map:
-        return {"registers": [], "count": 0, "map_name": None, "success": True}
     regs = [
         _register_row(dev, event, r)
-        for event, event_regs in dev.register_map.events.items()
+        for event, event_regs in dev.events.items()
         for r in event_regs
         if r.writable or not writable_only
     ]
     return {
         "registers": regs,
         "count": len(regs),
-        "map_name": dev.register_map.name,
+        "map_name": dev.register_map.name if dev.register_map else None,
         "success": True,
     }
 
 
-@zelos_sdk.action("List Registers", "List all registers in the map")
+@zelos_sdk.action("List Registers", "List all registers in the map, or found by auto-scan")
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 def list_registers(device: str) -> dict[str, Any]:
     """List all registers in the register map."""
@@ -638,6 +641,48 @@ def list_registers(device: str) -> dict[str, Any]:
 def list_writable_registers(device: str) -> dict[str, Any]:
     """List all writable registers in the register map."""
     return _register_list(device, writable_only=True)
+
+
+@zelos_sdk.action(
+    "Save Map",
+    "Write the device's current register map to a JSON file on the agent's host: its loaded "
+    "map, or for an auto-scanned device the registers found so far (raw uint16 words and "
+    "bits, read-only, contiguous runs as events), ready to use as a Register Map File. "
+    "Path absolute or starting with ~, in an existing directory; an existing file is "
+    "replaced only with overwrite.",
+)
+@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@zelos_sdk.action.text("path", title="Path", description="e.g. ~/maps/meter.json")
+@zelos_sdk.action.boolean(
+    "overwrite", title="Overwrite", required=False, default=False, widget="toggle"
+)
+def save_map(device: str, path: str, overwrite: bool = False) -> dict[str, Any]:
+    """Write the device's loaded map, or its auto-scanned registers as a map."""
+    from zelos_extension_modbus.register_map import write_map_file
+
+    dev, err = _get_device_or_error(device)
+    if err:
+        return err
+    if dev.register_map:
+        data = dev.register_map.source
+    elif dev.auto_scan_status():
+        data = dev.discovered_map()
+    else:
+        return {
+            "error": "No register map loaded, and the device is not auto-scanned",
+            "success": False,
+        }
+    try:
+        written = write_map_file(path.strip(), data, overwrite)
+    except (ValueError, OSError) as e:
+        return {"error": str(e), "success": False}
+    return {
+        "path": str(written),
+        "events": len(data["events"]),
+        "registers": sum(len(regs) for regs in data["events"].values()),
+        "auto_scan": dev.auto_scan_status(),
+        "success": True,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -731,7 +776,8 @@ def _link_fields(fn: Any) -> Any:
     "reads only (FC 01-04, 43/14, 17) and return its units, identity, valid address ranges "
     "and a draft register map (every register read-only) inline, for review before use. "
     "For just finding devices use Auto-configure; to check an existing map use Verify Map. "
-    "Run with the extension stopped; writes nothing.",
+    "Run with the extension stopped; writes nothing to the device. With out_path, also "
+    "writes the draft map there (several units: <name>_unit<id>.json).",
     timeout=SCAN_TIMEOUT,
     standalone=True,
 )
@@ -770,6 +816,22 @@ def _link_fields(fn: Any) -> Any:
     default=SCAN_ACTION_SECONDS,
     required=False,
 )
+@zelos_sdk.action.text(
+    "out_path",
+    title="Save draft map to",
+    description="Optional JSON path on the agent's host: absolute or starting with ~, in an "
+    "existing directory",
+    required=False,
+    default="",
+)
+@zelos_sdk.action.boolean(
+    "overwrite",
+    title="Overwrite",
+    description="Replace an existing file at the save path",
+    required=False,
+    default=False,
+    widget="toggle",
+)
 def scan_device(
     target: str = "",
     transport: str = Transport.TCP,
@@ -781,15 +843,23 @@ def scan_device(
     units: str = "",
     ranges: str = "",
     max_seconds: float = SCAN_ACTION_SECONDS,
+    out_path: str = "",
+    overwrite: bool = False,
 ) -> dict[str, Any]:
-    """Scan one endpoint; the report and ``maps`` (unit id -> draft map) inline."""
+    """Scan one endpoint; the report and ``maps`` (unit id -> draft map) inline.
+
+    ``out_path``: also write the drafts, checked before the scan starts;
+    ``saved`` maps each unit to its path, or why it was not written.
+    """
+    from zelos_extension_modbus.register_map import map_output_path, write_map_file
     from zelos_extension_modbus.scan import parse_units, parse_windows, quiet_pymodbus, scan
 
     _refuse_if_running()
     endpoint, conn = _endpoint(target, transport, port, baudrate, parity, stopbits)
     devices = conn.get("devices") or [{}]
+    out = map_output_path(out_path.strip(), overwrite) if out_path.strip() else None
     quiet_pymodbus()
-    return asyncio.run(
+    result = asyncio.run(
         scan(
             endpoint,
             units=parse_units(units) or None,
@@ -799,6 +869,15 @@ def scan_device(
             configured_unit=devices[0].get("unit_id"),
         )
     )
+    if out:
+        maps, result["saved"] = result["maps"], {}
+        for unit, draft in maps.items():
+            dest = out if len(maps) == 1 else out.with_stem(f"{out.stem}_unit{unit}")
+            try:
+                result["saved"][str(unit)] = str(write_map_file(str(dest), draft, overwrite))
+            except (ValueError, OSError) as e:
+                result["saved"][str(unit)] = f"not saved: {e}"
+    return result
 
 
 @zelos_sdk.action(
@@ -900,6 +979,7 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     quiet_pymodbus()
     deadline = time.monotonic() + AUTO_CONFIG_SECONDS
     out, found, swept, seen, cut = [], 0, [], [], []
+    added = False  # a new unit without SunSpec: auto-scans at start
     for conn in connections:
         devices = [dict(d) for d in conn.get("devices") or [] if isinstance(d, dict)]
         known = {d.get("unit_id", 1) for d in devices}
@@ -929,6 +1009,7 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
             label = f"{result['endpoint']} unit {unit}" + (f" ({who})" if who else "")
             if unit not in known:
                 devices.append({"unit_id": unit})
+                added |= unit not in result["sunspec"]
             device = next(d for d in devices if d.get("unit_id", 1) == unit)
             if unit in result["sunspec"] and device.get("register_map") != "sunspec":
                 if device.get("register_map_file"):
@@ -952,9 +1033,10 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
             "status": "error",
             "message": f"No unit answered on {', '.join(swept) or 'any connection'}.{partial}",
         }
+    scans = " New units without SunSpec discover their registers at start (auto-scan)."
     return {
         "status": "success",
-        "message": f"Found {'; '.join(seen)}.{partial}",
+        "message": f"Found {'; '.join(seen)}.{partial}{scans if added else ''}",
         "config": {"connections": out},
     }
 
@@ -996,6 +1078,7 @@ ALL_ACTIONS = [
     write_coil,
     list_registers,
     list_writable_registers,
+    save_map,
     scan_device,
     verify_map,
     auto_config,

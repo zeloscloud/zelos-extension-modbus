@@ -21,7 +21,7 @@ from zelos_sdk.extensions import load_config
 from zelos_sdk.hooks.logging import TraceLoggingHandler
 
 from zelos_extension_modbus import ACTION_PREFIX
-from zelos_extension_modbus.client import ModbusConnection, ModbusDevice
+from zelos_extension_modbus.client import AUTO_SCAN_RATE, ModbusConnection, ModbusDevice
 from zelos_extension_modbus.constants import (
     DEFAULT_PREFIX,
     LOG_SOURCE_NAME,
@@ -175,10 +175,11 @@ def start_demo_server() -> threading.Thread:
 def _load_register_map(path_str: str | None) -> RegisterMap | None:
     """Load a register map from a file path string.
 
-    An unset/empty path is a deliberate raw-address-mode choice and returns
-    None. A configured-but-broken map (missing file, or a load/validation
-    failure) is a config error and exits: silently degrading to no-data would
-    hide a misconfiguration behind an empty signal tree.
+    An unset/empty path returns None: the device auto-scans (or, with
+    auto_scan off, polls nothing). A configured-but-broken map (missing file,
+    or a load/validation failure) is a config error and exits: silently
+    degrading to no-data would hide a misconfiguration behind an empty signal
+    tree.
     """
     if not path_str:
         return None
@@ -207,7 +208,9 @@ def _create_connections(config: dict[str, Any], advanced: dict[str, Any]) -> lis
     """Build each configured connection with its devices.
 
     Tuning precedence per key: map `device` block > `advanced` > constructor
-    default. Rate: the device's `rate` > `advanced.default_rate` > 1 s. Names
+    default. Rate: the device's `rate` > `advanced.default_rate` > 1 s; for a
+    device without a map, which auto-scans unless `auto_scan` is false,
+    `advanced.auto_scan_rate` > 10 s instead of the default rate. Names
     must be legal trace names and unique (connections overall; device names
     and unit ids per connection); anything else exits. Default names that
     collide (TCP connections to one host) take a `_<port>` suffix.
@@ -244,6 +247,13 @@ def _create_connections(config: dict[str, Any], advanced: dict[str, Any]) -> lis
             _exit_on(name_error(dev_name, "device Name"))
             map_source = _map_source(dev_config)
             register_map = map_source.get("register_map")
+            auto_scan = dev_config.get("auto_scan", True) and not (
+                register_map or "map_loader" in map_source
+            )
+            if auto_scan:
+                rate = advanced.get("auto_scan_rate", AUTO_SCAN_RATE)
+            else:
+                rate = advanced.get("default_rate", 1.0)
             map_device = register_map.device if register_map else {}
             settings = {k: advanced[k] for k in DEVICE_KEYS if k in advanced}
             settings.update(
@@ -254,7 +264,8 @@ def _create_connections(config: dict[str, Any], advanced: dict[str, Any]) -> lis
                 **map_source,
                 name=dev_name or None,
                 unit_id=dev_config.get("unit_id", 1),
-                rate=dev_config.get("rate", advanced.get("default_rate", 1.0)),
+                rate=dev_config.get("rate", rate),
+                auto_scan=auto_scan,
                 # App config only: a map must not grant itself raw writes.
                 allow_raw_writes=advanced.get("allow_raw_writes", False),
                 **settings,

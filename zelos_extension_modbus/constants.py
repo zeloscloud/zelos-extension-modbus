@@ -78,6 +78,24 @@ class RegisterType(StrEnum):
 # Bit-addressable types span one address each and return raw booleans (not words).
 BIT_REGISTER_TYPES = {RegisterType.COIL, RegisterType.DISCRETE_INPUT}
 
+#: Raw-register event prefix per table: holding keeps `registers/`, the others
+#: their own, so input register 5 never shares holding register 5's event.
+RAW_EVENT_PREFIX = {
+    RegisterType.HOLDING: "registers",
+    RegisterType.INPUT: "input_registers",
+    RegisterType.COIL: "coils",
+    RegisterType.DISCRETE_INPUT: "discrete_inputs",
+}
+
+
+def raw_names(reg_type: str, address: int) -> tuple[str, str]:
+    """(event, field) of a register traced without a map: `registers/123`, `123_value`.
+
+    ``address`` is in the device's address base. Each register is its own event.
+    """
+    return f"{RAW_EVENT_PREFIX[reg_type]}/{address}", f"{address}_value"
+
+
 # Modbus caps a single register read at 125 addresses, a bit read at 2000 and
 # a register write (FC 16) at 123.
 MODBUS_MAX_READ_COUNT = 125
