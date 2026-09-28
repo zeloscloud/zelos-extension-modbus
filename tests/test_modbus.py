@@ -47,13 +47,21 @@ from zelos_extension_modbus.client import (
 )
 from zelos_extension_modbus.constants import trace_layout
 from zelos_extension_modbus.demo.simulator import (
+    SCAN_TARGET_MAX_BLOCK,
+    SCAN_TARGET_RANGES,
     PowerMeterSimulator,
+    ScanTarget,
     create_demo_context,
     float32_to_registers,
     run_demo_server_sync,
     uint32_to_registers,
 )
-from zelos_extension_modbus.register_map import Register, RegisterMap, resolve_map_file
+from zelos_extension_modbus.register_map import (
+    Register,
+    RegisterMap,
+    map_output_path,
+    resolve_map_file,
+)
 
 _RATE_STATUS = (
     "requested_rate",
@@ -195,6 +203,26 @@ class TestRegisterMap:
             resolve_map_file("maps/meter.json")
         with pytest.raises(FileNotFoundError, match=r"did you mean meter\.json"):
             resolve_map_file("~/meters.json")
+
+    @pytest.mark.parametrize(
+        ("path", "overwrite", "error"),
+        [
+            ("~/new.json", False, None),
+            ("~/meter.json", True, None),
+            ("~/meter.json", False, "exists; set overwrite"),
+            ("maps/new.json", False, "absolute or start with ~"),
+            ("~/missing/new.json", False, "does not exist"),
+        ],
+    )
+    def test_map_output_path(self, tmp_path, monkeypatch, path, overwrite, error):
+        """Save paths: ~ expands, relative is refused, the parent must exist, no silent clobber."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / "meter.json").write_text("{}")
+        if error:
+            with pytest.raises(ValueError, match=error):
+                map_output_path(path, overwrite)
+        else:
+            assert map_output_path(path, overwrite) == Path(path).expanduser()
 
     def test_get_by_name(self):
         """Find register by name across events."""
@@ -1041,6 +1069,39 @@ def _fake_device(events, conn=None, latency=0.0, bad=(), dead=False, **kwargs):
     return dev, reads
 
 
+def _auto_device(tables, conn=None, broken=None, **kwargs):
+    """An auto-scanning device over fake ``tables`` ({table: {wire: value}}); no network.
+
+    Like the scan target: reads past SCAN_TARGET_MAX_BLOCK answer 03, holes 02. A
+    holding read covering an address in ``broken`` answers that code, or never
+    (None). Returns (device, reads) with reads as in ``_fake_device``.
+    """
+    dev = ModbusDevice(conn or ModbusConnection(name="c"), auto_scan=True, **kwargs)
+    reads: list[tuple[int, int, int, float]] = []
+    broken = {} if broken is None else broken
+
+    async def fetch(reg_type, address, count):
+        reads.append((dev.unit_id, address, count, time.monotonic()))
+        await asyncio.sleep(0)
+        span = range(address, address + count)
+        hit = sorted(broken.keys() & set(span)) if reg_type == "holding" else []
+        if hit and broken[hit[0]] is None:
+            raise ModbusIOException("no response")
+        if hit or count > SCAN_TARGET_MAX_BLOCK:
+            return broken[hit[0]] if hit else 3
+        values = tables.get(reg_type, {})
+        return [values[a] for a in span] if all(a in values for a in span) else 2
+
+    dev._fetch = fetch
+    return dev, reads
+
+
+def _discover_all(dev, now=0.0):
+    run = asyncio.get_event_loop().run_until_complete
+    while dev.scanning:
+        run(dev._discover(now))
+
+
 async def _run_for(conn, seconds):
     """Run ``conn``'s poll loop for ``seconds`` against fake devices (link always up)."""
 
@@ -1233,6 +1294,72 @@ class TestPollScheduler:
         run(dev._read_block(probe, t + 1.0))
         assert dev.rate_status()["achieved_rate"] == 1.0
 
+    def test_auto_scan_polls_as_it_finds(self, monkeypatch):
+        """Auto-scan finds the scan target's ranges one read per tick, polling each find
+        at its slow rate at once, while a mapped meter on the link keeps its fast rate."""
+        monkeypatch.setattr("zelos_extension_modbus.scan.TCP_WINDOWS", ((0, 1999),))
+        conn = ModbusConnection(name="c")
+        _, meter_reads = _fake_device(
+            {"e": [{"name": "v", "address": 1}]}, conn, unit_id=2, rate=0.1
+        )
+        dev, _ = _auto_device(ScanTarget().tables, conn, rate=1.0)
+        progress = []
+        discover = dev._discover
+
+        async def step(now):
+            await discover(now)
+            progress.append((dev.scanning, dev.successful_reads))
+
+        dev._discover = step
+        asyncio.get_event_loop().run_until_complete(_run_for(conn, 2.5))
+
+        assert any(scanning and polled for scanning, polled in progress)  # incremental
+        assert dev.auto_scan_status() == {
+            "state": "done",
+            "table": None,
+            "found": sum(hi - lo + 1 for runs in SCAN_TARGET_RANGES.values() for lo, hi in runs),
+            "ignored": 0,
+        }
+        want = {
+            f"{prefix}/{a + 1}"
+            for table, prefix in [
+                ("holding", "registers"),
+                ("input", "input_registers"),
+                ("coil", "coils"),
+                ("discrete_input", "discrete_inputs"),
+            ]
+            for lo, hi in SCAN_TARGET_RANGES[table]
+            for a in range(lo, hi + 1)
+        }
+        assert set(dev._discovered) == want  # holes absent, 1-based
+        assert dev.max_block_size == SCAN_TARGET_MAX_BLOCK  # learned from the 03 answers
+        assert all(b.rate == 1.0 for b in dev._blocks)
+        # Discovered blocks at most once a second; the meter never waits behind a burst.
+        assert dev.successful_reads <= 3 * len(dev._blocks)
+        fast = [r[3] for r in meter_reads]
+        assert max(b - a for a, b in zip(fast, fast[1:], strict=False)) < 0.3
+
+    @pytest.mark.parametrize(("code", "polls"), [(0x02, 1), (None, 3)], ids=["refused", "silent"])
+    def test_auto_scan_drops_a_failing_register(self, monkeypatch, code, polls):
+        """A discovered register the device later refuses, or never answers while answering
+        the rest, is dropped from polling (retried every 10 min); the rest keep polling."""
+        monkeypatch.setattr("zelos_extension_modbus.scan.TCP_WINDOWS", ((0, 99),))
+        broken = {}
+        tables = {"holding": {a: a for a in (*range(5), *range(10, 15))}}
+        dev, _ = _auto_device(tables, broken=broken, rate=1.0, demote_after=3)
+        _discover_all(dev)
+        broken[11] = code
+        run = asyncio.get_event_loop().run_until_complete
+        for t in range(polls):
+            values = run(poll_once(dev, now=10.0 + t))
+        assert "registers/1" in values and "registers/11" not in values
+        status = dev.auto_scan_status()
+        assert (status["found"], status["ignored"]) == (10, 5)
+        (row,) = dev.rate_status()["refused"]
+        assert (row["range"], row["code"]) == ("holding 11-15", code)
+        assert not dev.demoted
+        assert list(dev.discovered_map()["events"]) == ["registers/1-5"]
+
     @pytest.mark.parametrize(("code", "demoted", "warnings"), [(0x0B, True, 0), (0x04, False, 1)])
     def test_exception_answers(self, caplog, code, demoted, warnings):
         """A gateway's 0A/0B is no response (demotion); other codes warn once, keep polling."""
@@ -1411,6 +1538,46 @@ class TestInitTraceSource:
         client = _device(register_map=RegisterMap.from_dict(data))
         _traced(client)
         assert client._events["sensors"].name == "c/unit1/sensors"
+
+    @pytest.mark.parametrize(
+        ("reg_type", "reply", "event", "field"),
+        [
+            ("holding", {"registers": [7, 8]}, "registers/123", "123_value"),
+            ("input", {"registers": [7, 8]}, "input_registers/123", "123_value"),
+            ("coil", {"bits": [True, False]}, "coils/123", "123_value"),
+            ("discrete_input", {"bits": [True, False]}, "discrete_inputs/123", "123_value"),
+        ],
+    )
+    def test_raw_read_traced(self, reg_type, reply, event, field):
+        """read_register traces each register as its own event keyed by its address (map
+        base); tables other than holding get their own prefix. A failed read traces nothing."""
+        logged = {}
+
+        class Source:
+            def add_event(self, path, fields):
+                logged[path] = [fields[0].name, fields[0].data_type]
+                return SimpleNamespace(log=lambda **row: logged[path].append(row))
+
+        dev = _device()
+        dev._trace_target = (Source(), "c/unit1")
+        dev.connection.request = AsyncMock(
+            return_value=SimpleNamespace(isError=lambda: False, **reply)
+        )
+        run = asyncio.get_event_loop().run_until_complete
+        run(dev.read_raw(reg_type, 122, 2))
+        values = next(iter(reply.values()))
+        bits = reg_type in ("coil", "discrete_input")
+        dtype = zelos_sdk.DataType.Boolean if bits else zelos_sdk.DataType.UInt16
+        second = event.replace("123", "124")
+        assert logged == {
+            f"c/unit1/{event}": [field, dtype, {field: values[0]}],
+            f"c/unit1/{second}": ["124_value", dtype, {"124_value": values[1]}],
+        }
+        assert dev.last_values[f"{event}/{field}"][0] == values[0]
+        dev.connection.request = AsyncMock(return_value=ExceptionResponse(3, 2))
+        with pytest.raises(RequestFailed):
+            run(dev.read_raw(reg_type, 999, 1))
+        assert len(logged) == 2
 
     def test_all_disabled_event_not_added(self):
         """An event whose registers are all disabled is never added to the source."""
@@ -1914,6 +2081,34 @@ class TestActionsUnit:
             dev.connection.request = request
             assert read(address) == {"error": error, "success": False}
 
+    def test_save_map(self, tmp_path, monkeypatch):
+        """Save Map writes the loaded map, or auto-scan's finds as a map that loads and polls."""
+        monkeypatch.setattr("zelos_extension_modbus.scan.TCP_WINDOWS", ((0, 1999),))
+        target = ScanTarget().tables
+        dev, _ = _auto_device(target, name="auto")
+        registry.register(dev)
+        _discover_all(dev)
+        path = tmp_path / "auto.json"
+        result = actions.save_map(device="c/auto", path=str(path))
+        assert (result["success"], result["registers"]) == (True, 274)
+        assert "set overwrite" in actions.save_map(device="c/auto", path=str(path))["error"]
+        loaded = RegisterMap.from_file(path)
+        assert loaded.device == {"address_base": 1, "max_block_size": 60}
+        assert list(loaded.events)[:2] == ["registers/1-150", "registers/201-220"]
+        assert {r.rate for r in loaded.registers} == {1.0}
+        assert not any(r.writable for r in loaded.registers)
+        polled, _ = _auto_device(target, register_map=loaded, max_block_size=60)
+        values = asyncio.get_event_loop().run_until_complete(poll_once(polled, now=0.0))
+        assert values["registers/1001-1010"]["1006_value"] == target["holding"][1005]
+        assert values["coils/1-16"]["16_value"] is False
+        assert polled.failed_reads == 0
+
+        mapped = tmp_path / "mapped.json"
+        assert actions.save_map(device="c/test", path=str(mapped))["success"]
+        assert json.loads(mapped.read_text()) == registry.get_device("c/test").register_map.source
+        error = actions.save_map(device="c/no_map", path=str(tmp_path / "x.json"))["error"]
+        assert "not auto-scanned" in error
+
     def test_get_status_returns_info(self):
         """Get Status action returns expected fields."""
         result = actions.get_status(device="c/test")
@@ -1930,6 +2125,7 @@ class TestActionsUnit:
             "failed_reads",
             "error",
             "map_pending",
+            "auto_scan",
             *_RATE_STATUS,
             "rate",
             "min_rate",
@@ -2260,7 +2456,7 @@ class TestListDevicesAction:
         """One row per device, keyed by the registry's <connection>/<device> path."""
         conn = ModbusConnection(host="10.0.0.5")
         meter = ModbusDevice(conn, unit_id=7, register_map=register_map)
-        raw = ModbusDevice(conn, unit_id=2, name="aux")
+        raw = ModbusDevice(conn, unit_id=2, name="aux", auto_scan=True)
         registry.register(meter)
         registry.register(raw)
         conn.start("Modbus", zelos_sdk.TraceSource("Modbus"))
@@ -2286,6 +2482,7 @@ class TestListDevicesAction:
             "map_pending": False,
             "map_name": "power_meter",
             "register_count": len(register_map.registers),
+            "auto_scan": None,
             "rate": 1.0,
             "write_mode": "auto",
             "raw_writes": False,
@@ -2299,6 +2496,12 @@ class TestListDevicesAction:
         }
         assert rows["10_0_0_5/aux"]["map_name"] is None
         assert rows["10_0_0_5/aux"]["register_count"] == 0
+        assert rows["10_0_0_5/aux"]["auto_scan"] == {
+            "state": "scanning",
+            "table": "holding",
+            "found": 0,
+            "ignored": 0,
+        }
 
     def test_names_are_the_keys_other_actions_accept(self, register_map):
         """Each reported name resolves through the shared device lookup."""
@@ -2324,6 +2527,7 @@ class TestGetSnapshotAction:
         "failed_reads",
         "error",
         "map_pending",
+        "auto_scan",
         *_RATE_STATUS,
         "captured_at_unix_ms",
         "values",

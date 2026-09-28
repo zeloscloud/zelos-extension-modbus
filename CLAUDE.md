@@ -20,7 +20,8 @@ just package      # Build .tar.gz for marketplace
 
 - `main.py` - CLI entry point (app mode, trace subcommand)
 - `zelos_extension_modbus/client.py` - `ModbusConnection` (one link, serialized requests, per-connection scheduler: fastest-rate blocks + one slower block per tick) and `ModbusDevice` (unit ID + map + trace events, rate tiers, demotion, refused-block deactivation)
-- `zelos_extension_modbus/constants.py` - `trace_layout` (the one trace-naming rule) and `name_error`
+- `zelos_extension_modbus/constants.py` - `trace_layout` (the one trace-naming rule), `raw_names` (per-register raw events) and `name_error`
+- `zelos_extension_modbus/scan.py` - Read-only scan and verify; `Discovery` drives its range finder one read per tick for auto-scan (`ModbusDevice._discover`)
 - `zelos_extension_modbus/actions.py` - SDK actions, `Modbus/<action>` with a `<connection>/<device>` selector
 - `zelos_extension_modbus/blocks.py` - Block-read planner (coalesce contiguous registers)
 - `zelos_extension_modbus/serial_diag.py` - RTU connect-failure diagnostics (stale node, perms, holders)

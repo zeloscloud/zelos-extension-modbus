@@ -313,6 +313,30 @@ def resolve_map_file(value: str) -> Path:
     return path
 
 
+def map_output_path(value: str, overwrite: bool = False) -> Path:
+    """Where a map may be written: absolute or ~ (as for reading), in an existing
+    directory; an existing file only with ``overwrite``. ValueError otherwise."""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise ValueError(
+            f"Map path must be absolute or start with ~: {value} (paths are on the agent's host)"
+        )
+    if not path.parent.is_dir():
+        raise ValueError(f"Cannot write {path}: {path.parent} does not exist")
+    if path.is_dir():
+        raise ValueError(f"Cannot write {path}: it is a directory")
+    if path.exists() and not overwrite:
+        raise ValueError(f"{path} exists; set overwrite to replace it")
+    return path
+
+
+def write_map_file(value: str, data: dict[str, Any], overwrite: bool = False) -> Path:
+    """Write map ``data`` as JSON to ``value`` (see ``map_output_path``); the path written."""
+    path = map_output_path(value, overwrite)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return path
+
+
 @dataclass
 class RegisterMap:
     """Collection of register definitions organized by user-defined events."""
@@ -322,6 +346,8 @@ class RegisterMap:
     description: str = ""
     # Validated "device" block (see module docstring)
     device: dict[str, Any] = field(default_factory=dict)
+    # The dict it was loaded from, for Save Map
+    source: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
     def from_file(cls, path: str | Path) -> RegisterMap:
@@ -411,6 +437,7 @@ class RegisterMap:
             name=data.get("name", "modbus"),
             description=data.get("description", ""),
             device=device,
+            source=data,
         )
 
     @property

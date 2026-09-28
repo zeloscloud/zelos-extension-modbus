@@ -8,6 +8,7 @@ A Zelos extension for the Modbus protocol. Read, write, and monitor registers fr
 - 📊 **All register types**: Holding, input, coils, and discrete inputs
 - 📄 **Register map files**: Define your device layout in a simple JSON file
 - ☀️ **SunSpec discovery**: Inverters, meters and batteries map themselves at connect
+- 🔍 **Auto-scan**: A device without a map finds its registers at start and streams them
 - ✏️ **Read & write actions**: Interactive register access from the Zelos App
 - 🔢 **Flexible data types**: 16/32/64-bit integers, floats, booleans
 - 🔄 **Byte order options**: Big/little endian with word-swap variants
@@ -15,7 +16,7 @@ A Zelos extension for the Modbus protocol. Read, write, and monitor registers fr
 ## Quick Start
 
 1. **Install** the extension from the Zelos App
-2. **Configure** a connection (TCP or RTU) and its devices (unit ID + register map file, or SunSpec)
+2. **Configure** a connection (TCP or RTU) and its devices (unit ID; a register map file, SunSpec, or nothing: auto-scan)
 3. **Start** the extension to begin streaming data
 4. **View** real-time register values in your Zelos App
 
@@ -43,8 +44,9 @@ A connection is a TCP endpoint or a serial port. Its devices share the link and 
 | Unit ID | `1` | Modbus slave/unit ID; unique per connection |
 | Name | `unit<ID>` | Trace name; unique per connection |
 | Register Map | `file` | `file` or `sunspec` (see [SunSpec](#sunspec)) |
-| Register Map File | | JSON register map; empty = raw mode. `file` only |
-| Rate | Advanced `default_rate` | Poll rate (s) for registers without their own `rate`; `0` = not polled (actions still work) |
+| Register Map File | | JSON register map; empty = auto-scan. `file` only |
+| Auto-scan | on | Without a map file: discover and poll the device's registers (see [Auto-scan](#auto-scan)); off = nothing polled |
+| Rate | Advanced `default_rate` (auto-scan: `auto_scan_rate`) | Poll rate (s) for registers without their own `rate`; `0` = not polled, no auto-scan (actions still work) |
 
 Names are letters, digits, space, `_` or `-`; anything else is rejected at start. `log` and `modbus_log` are reserved connection names.
 
@@ -54,6 +56,7 @@ Names are letters, digits, space, `_` or `-`; anything else is rejected at start
 |---------|---------|-------------|
 | `prefix` | `Modbus` | Trace source every connection publishes under: `Modbus/10_0_0_5/unit1/voltage`, logs at `Modbus/log`. Cleared: one source per connection (`10_0_0_5/unit1/voltage`) and logs under `modbus_log` |
 | `default_rate` | `1.0` | Poll rate (s) when neither the register nor the device sets one |
+| `auto_scan_rate` | `10.0` | Poll rate (s) of auto-scanned registers when the device sets no Rate |
 | `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `timeout` | `3.0` | Seconds to wait for each response |
 | `retries` | `1` | Extra attempts per request; a failed request costs `timeout x (1 + retries)` |
@@ -83,6 +86,21 @@ Rate precedence: register `rate` > device Rate > `default_rate`; a map `min_rate
 - **Link down**: every read that falls due counts in `failed_reads`, and `achieved_rate` / `overload_pct` are null until reads resume. Reconnects wait 3 s, doubling to 60 s; a poll that keeps the link resets it. The first failure is logged, then only when the wait grows.
 - **Illegal addresses** (Kepware "Deactivate Tags on Illegal Address"): block size is static (map `max_block_size` > Advanced > 125). A block answered with exception 02/03 logs one warning and is retried every 10 min, also across demotion; other blocks keep polling. `get_status` lists it under `refused` (`range`, `code`, `retry_in_s`). Run `verify` to find the bad registers, then fix the map or `max_block_size` (scan learns it). Other exception codes warn once per block and keep polling.
 - **Shutdown**: SIGTERM/SIGINT cancels every connection mid-request and disconnects; past 3 s the process exits anyway.
+
+### Auto-scan
+
+A device with no register map file (and not `sunspec`) discovers its registers at start, unless its Auto-scan toggle is off:
+
+- **Discovery**: scan's range finder (see [Scan](#scan)) over holding registers, input registers, coils and discrete inputs, TCP 1-65536, RTU 1-10000, 30001-31000, 40001-41000, 50001-51000. Reads only (FC 01-04), through the connection's request path: one discovery read per scheduler tick, only when nothing else is overdue, so other devices keep their rates. It learns the device's largest read into `max_block_size` / `max_bit_block_size`. A read with no response is retried (and counts toward demotion); after `demote_after` in a row while the device answers other reads, that range counts as a hole.
+- **Polling**: each valid register polls from the moment it is found, at the device Rate or `auto_scan_rate` (10 s), traced as a raw register (below). A register block that later answers exception 02/03, or `demote_after` times nothing while the device answers others, is ignored and retried every 10 min.
+- **Status**: `get_status` / `get_snapshot` / `list_devices` carry `auto_scan`: `state` (`scanning` / `done`), `table` being scanned, `found`, `ignored`. `list_registers` lists what was found.
+- **State**: in memory only; discovery re-runs on every start. `save_map` writes the finds as a map file to load instead.
+
+Each register is its own trace event, and the SDK holds roughly 0.75 MB per event: a device with hundreds of registers costs hundreds of MB. For a large device, save the map and trim it.
+
+### Raw registers
+
+Registers polled or read without a map name (auto-scan, `read_register`) are traced one event per register, keyed by its address in the device's base, with one field `<address>_value`: holding register 123 is `Modbus/<connection>/<device>/registers/123`, field `123_value`. Input registers, coils and discrete inputs use `input_registers/`, `coils/` and `discrete_inputs/`, so the tables never share an event. Values are raw uint16 words, or booleans for bits.
 
 ## Register Map
 
@@ -205,11 +223,11 @@ uv run main.py verify 192.168.1.100 registers.json --unit 3  # exits 1 on any pr
 
 Stage budgets and `--max-seconds` cut a scan short with a `cutoffs` entry in the report; past `--max-seconds` every stage stops and what was sampled is still classified. Devices that read 0 at unmapped addresses make every address look valid; those registers are `low` confidence. Islands shorter than 10 (100) addresses deep inside a hole of 125 (1000) or more can be missed.
 
-With the extension stopped, the same runs as actions. They return the report and draft maps inline and write no files.
+With the extension stopped, the same runs as actions. They return the report and draft maps inline; `scan_device` with `out_path` also writes the draft map there (several units: `<name>_unit<id>.json`, as the CLI's `--out`), with the `save_map` path rules below.
 
 | Action | Description |
 |--------|-------------|
-| `auto_config` | Quick, the config form's Auto-configure: sweeps each connection in the form (unsaved edits included; older apps: the saved config) for its configured unit, 1-10 and 247 (RTU: also serial settings), identifies them, keeps its devices and adds one per new unit, `register_map: sunspec` where the marker is found (also on a configured unit, unless it sets `register_map_file`). No connection: probes 127.0.0.1:502 only. One 25 s budget across connections; what did not fit is named in the message |
+| `auto_config` | Quick, the config form's Auto-configure: sweeps each connection in the form (unsaved edits included; older apps: the saved config) for its configured unit, 1-10 and 247 (RTU: also serial settings), identifies them, keeps its devices and adds one per new unit, `register_map: sunspec` where the marker is found (also on a configured unit, unless it sets `register_map_file`); the other new units [auto-scan](#auto-scan) at start. No connection: probes 127.0.0.1:502 only. One 25 s budget across connections; what did not fit is named in the message |
 | `scan_device` | Comprehensive, slow: scan a host or serial port (empty: the first configured connection); units as in the CLI unless `units` is given. Time limit up to 1740 s |
 | `verify_map` | Check a map file against the device register by register, naming each bad one (empty: the one configured for that unit). `ok` counts registers checked clean, `unchecked` those a cutoff (time limit, default 840 s; or 16 requests in a row unanswered) skipped; the CLI exits 1 on a cutoff |
 | `list_serial_ports` | Serial ports on the agent's machine, as choices |
@@ -225,14 +243,15 @@ The extension provides actions accessible from the Zelos App (and to app extensi
 | `list_devices` | One row per device: connection, unit ID, endpoint, trace path, map summary, `raw_writes` (raw write actions enabled), and health (`error`, `map_pending`, `refused`, demotion) |
 | `get_status` | Connection status, `successful_reads`/`failed_reads`, requested vs achieved rate (worst tier), demotion, and block-read settings |
 | `get_snapshot` | Last value per `event/name` (value + timestamp) from the poll cache, no device I/O |
-| `read_register` | Read raw words/bits by address (map's base), register type, and count |
+| `read_register` | Read raw words/bits by address (map's base), register type, and count; each value is traced as a [raw register](#raw-registers), plus one DEBUG log line. A failed read traces nothing |
 | `write_single_register` | Write one holding register (FC 6): an integer 0-65535, or -32768..-1 as two's complement. Raw addresses, counts and values must be whole numbers |
 | `write_registers` | Write 1-123 holding registers (FC 16), values as for FC 6 |
 | `write_coil` | Write `ON`/`OFF` (or true/false, 0/1) to a coil address (FC 5); anything else is refused |
 | `read_named_register` | Read a mapped register by `event/name` (a bare name only if one event has it) |
 | `write_named_register` | Write a mapped register by `event/name`; returns and caches the value actually written. A value the register cannot hold exactly (a fraction of a raw step) is refused; a coil takes only true/false or 0/1 |
-| `list_registers` | Register catalog: `event/name` path, address, datatype, scale, unit, effective `rate` (0 = not polled) |
+| `list_registers` | Register catalog (map or auto-scan): `event/name` path, address, datatype, scale, unit, effective `rate` (0 = not polled) |
 | `list_writable_registers` | Same catalog, writable registers only |
+| `save_map` | Write the device's current map to a JSON file: its loaded map, or for an auto-scanned device the registers found so far (uint16 words and bools, `writable: false`, its `address_base`, contiguous runs as events like `registers/1-150`, `rate` = the auto-scan rate, ignored registers left out). Load it as the Register Map File. Path absolute or `~`, parent directory must exist; an existing file only with `overwrite` |
 
 A failed request returns `success: false` with the reason in `error`: `no response from device`, `device refused: exception 02 (illegal data address)`, or `cannot connect to <endpoint>`.
 

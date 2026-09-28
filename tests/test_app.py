@@ -43,7 +43,11 @@ class TestCreateConnections:
                     "parity": "E",
                     "stopbits": 2,
                     "bytesize": 7,
-                    "devices": [{"unit_id": 7, "rate": 0.5}, {"unit_id": 8, "name": "b"}],
+                    "devices": [
+                        {"unit_id": 7, "rate": 0.5},
+                        {"unit_id": 8, "name": "b"},
+                        {"unit_id": 9, "auto_scan": False},
+                    ],
                 }
             ]
         }
@@ -53,6 +57,7 @@ class TestCreateConnections:
             "request_delay_ms": 20,
             "max_block_size": 32,
             "allow_raw_writes": True,
+            "auto_scan_rate": 20.0,
         }
         (conn,) = _create_connections(config, advanced)
 
@@ -63,9 +68,15 @@ class TestCreateConnections:
         )
         assert (conn.parity, conn.stopbits, conn.bytesize) == ("E", 2, 7)
         assert (conn.timeout, conn.retries, conn.request_delay_ms) == (5.0, 2, 20)
-        assert [d.path for d in conn.devices] == ["dev_ttyUSB0/unit7", "dev_ttyUSB0/b"]
-        assert [d.unit_id for d in conn.devices] == [7, 8]
-        assert [d.rate for d in conn.devices] == [0.5, 1.0]
+        assert [d.path for d in conn.devices] == [
+            "dev_ttyUSB0/unit7",
+            "dev_ttyUSB0/b",
+            "dev_ttyUSB0/unit9",
+        ]
+        assert [d.unit_id for d in conn.devices] == [7, 8, 9]
+        # No map: auto-scan at auto_scan_rate unless the device sets a rate or opts out.
+        assert [d.rate for d in conn.devices] == [0.5, 20.0, 1.0]
+        assert [d.scanning for d in conn.devices] == [True, True, False]
         assert all(d.max_block_size == 32 and d.connection is conn for d in conn.devices)
         assert all(d.allow_raw_writes for d in conn.devices)
 
@@ -74,11 +85,12 @@ class TestCreateConnections:
         (conn,) = _create_connections({"connections": [_tcp()]}, {})
         (dev,) = conn.devices
         assert (conn.name, conn.port, conn.timeout, conn.retries) == ("10_0_0_5", 502, 3.0, 1)
-        assert (dev.name, dev.unit_id, dev.rate, dev.write_mode) == (
+        assert (dev.name, dev.unit_id, dev.rate, dev.write_mode, dev.scanning) == (
             "unit1",
             1,
-            1.0,
+            10.0,
             "auto",
+            True,
         )
         assert (dev.block_reads, dev.max_block_size, dev.max_read_gap) == (True, 125, 0)
         assert dev.allow_raw_writes is False

@@ -40,11 +40,11 @@ def all_devices() -> list[str]:
 
 def _paths(device: str, writable_only: bool) -> list[str]:
     dev = _devices.get(device)
-    if not dev or not dev.register_map:
+    if not dev:
         return []
     return [
         f"{event}/{reg.name}"
-        for event, regs in dev.register_map.events.items()
+        for event, regs in dev.events.items()
         for reg in regs
         if reg.writable or not writable_only
     ]
