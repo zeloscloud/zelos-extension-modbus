@@ -1,6 +1,6 @@
 [project]
 name = "zelos-extension-modbus"
-version = "0.1.5"
+version = "0.1.6"
 description = "Modbus TCP/RTU protocol extension for Zelos"
 authors = [{ name = "Zelos", email = "support@zeloscloud.io" }]
 readme = "README.md"
