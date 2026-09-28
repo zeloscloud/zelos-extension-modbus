@@ -92,9 +92,10 @@ Rate precedence: register `rate` > device Rate > `default_rate`; a map `min_rate
 A device with no register map file (and not `sunspec`) discovers its registers at start, unless its Auto-scan toggle is off:
 
 - **Discovery**: scan's range finder (see [Scan](#scan)) over holding registers, input registers, coils and discrete inputs, TCP 1-65536, RTU 1-10000, 30001-31000, 40001-41000, 50001-51000. Reads only (FC 01-04), through the connection's request path: one discovery read per scheduler tick, only when nothing else is overdue, so other devices keep their rates. It learns the device's largest read into `max_block_size` / `max_bit_block_size`. A read with no response is retried (and counts toward demotion); after `demote_after` in a row while the device answers other reads, that range counts as a hole.
-- **Polling**: each valid register polls from the moment it is found, at the device Rate or `auto_scan_rate` (10 s), traced as a raw register (below). A register block that later answers exception 02/03, or `demote_after` times nothing while the device answers others, is ignored and retried every 10 min.
+- **Polling**: each valid register polls from the moment it is found, at the device Rate or `auto_scan_rate` (10 s), traced as a raw register (below).
+- **Failed registers**: per block, as Kepware (no bisecting): a block that answers exception 02/03, or `demote_after` times nothing while the device answers others, is ignored whole, every register in it, and retried every 10 min.
 - **Status**: `get_status` / `get_snapshot` / `list_devices` carry `auto_scan`: `state` (`scanning` / `done`), `table` being scanned, `found`, `ignored`. `list_registers` lists what was found.
-- **State**: in memory only; discovery re-runs on every start. `save_map` writes the finds as a map file to load instead.
+- **State**: in memory only; discovery re-runs on every start. `save_map` writes the finds as a map file to load instead, with the same trace paths and fields.
 
 Each register is its own trace event, and the SDK holds roughly 0.75 MB per event: a device with hundreds of registers costs hundreds of MB. For a large device, save the map and trim it.
 
@@ -251,7 +252,7 @@ The extension provides actions accessible from the Zelos App (and to app extensi
 | `write_named_register` | Write a mapped register by `event/name`; returns and caches the value actually written. A value the register cannot hold exactly (a fraction of a raw step) is refused; a coil takes only true/false or 0/1 |
 | `list_registers` | Register catalog (map or auto-scan): `event/name` path, address, datatype, scale, unit, effective `rate` (0 = not polled) |
 | `list_writable_registers` | Same catalog, writable registers only |
-| `save_map` | Write the device's current map to a JSON file: its loaded map, or for an auto-scanned device the registers found so far (uint16 words and bools, `writable: false`, its `address_base`, contiguous runs as events like `registers/1-150`, `rate` = the auto-scan rate, ignored registers left out). Load it as the Register Map File. Path absolute or `~`, parent directory must exist; an existing file only with `overwrite` |
+| `save_map` | Write the device's current map to a JSON file: its loaded map, or for an auto-scanned device the registers found so far (uint16 words and bools, `writable: false`, its `address_base`, one event per register named as auto-scan traces it (`registers/123`, field `123_value`), so loading it keeps every signal path, `rate` = the auto-scan rate, ignored registers left out). Load it as the Register Map File. Path absolute or `~`, parent directory must exist; an existing file only with `overwrite` |
 
 A failed request returns `success: false` with the reason in `error`: `no response from device`, `device refused: exception 02 (illegal data address)`, or `cannot connect to <endpoint>`.
 

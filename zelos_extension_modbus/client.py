@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import itertools
 import logging
 import math
 import struct
@@ -29,7 +28,6 @@ from zelos_extension_modbus.constants import (
     MIN_RATE,
     MODBUS_MAX_BIT_READ_COUNT,
     MODBUS_MAX_READ_COUNT,
-    RAW_EVENT_PREFIX,
     ByteOrder,
     RegisterType,
     Transport,
@@ -1090,22 +1088,17 @@ class ModbusDevice:
     def discovered_map(self) -> dict[str, Any]:
         """The auto-scanned registers as a register map, ignored ones left out.
 
-        Contiguous runs per table become events (`registers/1-150`), each
-        register keeps its trace field name, read-only, at its polled rate.
+        Each register is its own event, named as auto-scan traces it
+        (`registers/123`, field `123_value`), read-only, at its polled rate.
         """
         ignored = {id(r) for b in list(self._blocks or []) if b.refused for r in b.read.registers}
         order = list(RegisterType)
-        regs = sorted(
-            (r for [r] in list(self._discovered.values()) if id(r) not in ignored),
-            key=lambda r: (order.index(r.type), r.address),
+        found = sorted(
+            ((e, r) for e, [r] in list(self._discovered.items()) if id(r) not in ignored),
+            key=lambda p: (order.index(p[1].type), p[1].address),
         )
-        events: dict[str, list[dict[str, Any]]] = {}
-        runs = itertools.groupby(enumerate(regs), key=lambda p: (p[1].type, p[1].address - p[0]))
-        for (table, _), run in runs:
-            run = [r for _, r in run]
-            first, last = run[0].map_address, run[-1].map_address
-            name = f"{RAW_EVENT_PREFIX[table]}/{first}" + (f"-{last}" if last != first else "")
-            events[name] = [
+        events = {
+            event: [
                 {
                     "name": r.name,
                     "type": r.type,
@@ -1114,8 +1107,9 @@ class ModbusDevice:
                     "writable": False,
                     "rate": self.rate_of(r),
                 }
-                for r in run
             ]
+            for event, r in found
+        }
         scan = self._discovery
         limits = {"max_block_size": scan.words.learned_block}
         limits["max_bit_block_size"] = scan.bits.learned_block
