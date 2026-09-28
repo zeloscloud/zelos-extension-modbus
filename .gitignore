@@ -258,3 +258,6 @@ config.json
 examples/*_local.json
 examples/*.xlsx
 scratch/
+
+# Agent worktrees and local settings
+.claude/
