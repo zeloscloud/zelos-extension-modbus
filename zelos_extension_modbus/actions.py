@@ -647,7 +647,8 @@ def list_writable_registers(device: str) -> dict[str, Any]:
     "Save Map",
     "Write the device's current register map to a JSON file on the agent's host: its loaded "
     "map, or for an auto-scanned device the registers found so far (raw uint16 words and "
-    "bits, read-only, contiguous runs as events), ready to use as a Register Map File. "
+    "bits, read-only, one event per register with auto-scan's trace paths), ready to use "
+    "as a Register Map File. "
     "Path absolute or starting with ~, in an existing directory; an existing file is "
     "replaced only with overwrite.",
 )

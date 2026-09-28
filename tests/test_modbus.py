@@ -1358,7 +1358,7 @@ class TestPollScheduler:
         (row,) = dev.rate_status()["refused"]
         assert (row["range"], row["code"]) == ("holding 11-15", code)
         assert not dev.demoted
-        assert list(dev.discovered_map()["events"]) == ["registers/1-5"]
+        assert list(dev.discovered_map()["events"]) == [f"registers/{a}" for a in range(1, 6)]
 
     @pytest.mark.parametrize(("code", "demoted", "warnings"), [(0x0B, True, 0), (0x04, False, 1)])
     def test_exception_answers(self, caplog, code, demoted, warnings):
@@ -2085,7 +2085,7 @@ class TestActionsUnit:
         """Save Map writes the loaded map, or auto-scan's finds as a map that loads and polls."""
         monkeypatch.setattr("zelos_extension_modbus.scan.TCP_WINDOWS", ((0, 1999),))
         target = ScanTarget().tables
-        dev, _ = _auto_device(target, name="auto")
+        dev, reads = _auto_device(target, name="auto")
         registry.register(dev)
         _discover_all(dev)
         path = tmp_path / "auto.json"
@@ -2094,14 +2094,21 @@ class TestActionsUnit:
         assert "set overwrite" in actions.save_map(device="c/auto", path=str(path))["error"]
         loaded = RegisterMap.from_file(path)
         assert loaded.device == {"address_base": 1, "max_block_size": 60}
-        assert list(loaded.events)[:2] == ["registers/1-150", "registers/201-220"]
         assert {r.rate for r in loaded.registers} == {1.0}
         assert not any(r.writable for r in loaded.registers)
-        polled, _ = _auto_device(target, register_map=loaded, max_block_size=60)
-        values = asyncio.get_event_loop().run_until_complete(poll_once(polled, now=0.0))
-        assert values["registers/1001-1010"]["1006_value"] == target["holding"][1005]
-        assert values["coils/1-16"]["16_value"] is False
-        assert polled.failed_reads == 0
+        # Same signal paths, values and requests per sweep as the auto-scan it came from.
+        run = asyncio.get_event_loop().run_until_complete
+        dev_reads, dev_values = len(reads), run(poll_once(dev, now=0.0))
+        dev_reads = len(reads) - dev_reads
+        polled, polled_reads = _auto_device(target, register_map=loaded, max_block_size=60)
+        values = run(poll_once(polled, now=0.0))
+        assert values == dev_values and len(values) == 274
+        assert {e: list(f) for e, f in values.items()} == {
+            e: [r.field_name for r in regs] for e, regs in loaded.events.items()
+        }
+        assert values["registers/1006"] == {"1006_value": target["holding"][1005]}
+        assert values["coils/16"] == {"16_value": False}
+        assert len(polled_reads) == dev_reads and polled.failed_reads == 0
 
         mapped = tmp_path / "mapped.json"
         assert actions.save_map(device="c/test", path=str(mapped))["success"]
