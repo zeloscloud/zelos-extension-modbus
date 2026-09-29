@@ -46,7 +46,7 @@ A connection is a TCP endpoint or a serial port. Its devices share the link and 
 | Register Map | `file` | `file` or `sunspec` (see [SunSpec](#sunspec)) |
 | Register Map File | | JSON register map; empty = auto-scan. `file` only |
 | Auto-scan | on | Without a map file: discover and poll the device's registers (see [Auto-scan](#auto-scan)); off = nothing polled |
-| Rate | Advanced `default_rate` (auto-scan: `auto_scan_rate`) | Poll rate (s) for registers without their own `rate`; `0` = not polled, no auto-scan (actions still work) |
+| Rate | Advanced `default_rate`, else TCP 1 s / RTU 10 s | Poll rate (s) for registers without their own `rate`; `0` = not polled, no auto-scan (actions still work) |
 
 Names are letters, digits, space, `_` or `-`; anything else is rejected at start. `log` and `modbus_log` are reserved connection names.
 
@@ -55,8 +55,7 @@ Names are letters, digits, space, `_` or `-`; anything else is rejected at start
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `prefix` | `Modbus` | Trace source every connection publishes under: `Modbus/10_0_0_5/unit1/voltage`, logs at `Modbus/log`. Cleared: one source per connection (`10_0_0_5/unit1/voltage`) and logs under `modbus_log` |
-| `default_rate` | `1.0` | Poll rate (s) when neither the register nor the device sets one |
-| `auto_scan_rate` | `10.0` | Poll rate (s) of auto-scanned registers when the device sets no Rate |
+| `default_rate` | TCP `1.0`, RTU `10.0` | Poll rate (s) when neither the register nor the device sets one; empty = the transport default (see [Polling](#polling)) |
 | `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `timeout` | `3.0` | Seconds to wait for each response |
 | `retries` | `1` | Extra attempts per request; a failed request costs `timeout x (1 + retries)` |
@@ -77,7 +76,7 @@ Troubleshooting serial/USB connection failures: see [DEBUG.md](DEBUG.md).
 
 ### Polling
 
-Rate precedence: register `rate` > device Rate > `default_rate`; a map `min_rate` floors it. Each connection runs one scheduler across its devices:
+Rate precedence: register `rate` > device Rate > `default_rate` > transport default; a map `min_rate` floors it. Transport default: TCP 1 s matches Modbus Poll/Kepware/Ignition; serial buses are shared and a large map cannot sweep at 1 s at 9600 baud, so RTU defaults to 10 s. Each connection runs one scheduler across its devices:
 
 - **Tick**: every due block at the connection's fastest rate first, then at most one other item, most overdue first: a due slower block, a demoted device's probe, or a SunSpec discovery. Slow work spreads over the ticks instead of bursting and stalling fast points; blocks never mix rates. A block holding a `scale_ref` exponent is read in the same tick as every block it scales.
 - **Requested vs achieved**: `get_status` / `get_snapshot` / `list_devices` report `requested_rate`, `achieved_rate` (smoothed read interval) and `overload_pct` (100 x mean lateness / rate) for the worst tier, and every tier under `tiers`. A tier over 100% for 30 s warns once, and logs its recovery.
@@ -93,7 +92,7 @@ Rate precedence: register `rate` > device Rate > `default_rate`; a map `min_rate
 A device with no register map file (and not `sunspec`) discovers its registers at start, unless its Auto-scan toggle is off:
 
 - **Discovery**: scan's range finder (see [Scan](#scan)) over holding registers, input registers, coils and discrete inputs, TCP 1-65536, RTU 1-10000, 30001-31000, 40001-41000, 50001-51000. Reads only (FC 01-04), through the connection's request path: one discovery read per scheduler tick, only when nothing else is overdue, so other devices keep their rates. It learns the device's largest read into `max_block_size` / `max_bit_block_size`. A read with no response is retried (and counts toward demotion); after `demote_after` in a row while the device answers other reads, that range counts as a hole.
-- **Polling**: each valid register polls from the moment it is found, at the device Rate or `auto_scan_rate` (10 s), traced as a raw register (below).
+- **Polling**: each valid register polls from the moment it is found, at the device's rate (same precedence as mapped devices), traced as a raw register (below).
 - **Failed registers**: per block, as common SCADA tools do (no bisecting): a block that answers exception 02/03, or `demote_after` times nothing while the device answers others, is ignored whole, every register in it, and retried every 10 min.
 - **Status**: `get_status` / `get_snapshot` / `list_devices` carry `auto_scan`: `state` (`scanning` / `done`), `table` being scanned, `found`, `ignored`. `list_registers` lists what was found.
 - **State**: in memory only; discovery re-runs on every start. `save_map` writes the finds as a map file to load instead, with the same trace paths and fields.
