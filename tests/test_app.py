@@ -20,6 +20,7 @@ from zelos_extension_modbus.cli.app import (
     _create_connections,
     _load_register_map,
     _old_config_error,
+    resolve_advanced,
 )
 
 SCHEMA = Path(__file__).parent.parent / "config.schema.json"
@@ -58,7 +59,6 @@ class TestCreateConnections:
             "request_delay_ms": 20,
             "max_block_size": 32,
             "allow_raw_writes": True,
-            "auto_scan_rate": 20.0,
         }
         (conn,) = _create_connections(config, advanced)
 
@@ -75,8 +75,8 @@ class TestCreateConnections:
             "dev_ttyUSB0/unit9",
         ]
         assert [d.unit_id for d in conn.devices] == [7, 8, 9]
-        # No map: auto-scan at auto_scan_rate unless the device sets a rate or opts out.
-        assert [d.rate for d in conn.devices] == [0.5, 20.0, 1.0]
+        # No map: auto-scan unless opted out; RTU transport default unless the device sets a rate.
+        assert [d.rate for d in conn.devices] == [0.5, 10.0, 10.0]
         assert [d.scanning for d in conn.devices] == [True, True, False]
         assert all(d.max_block_size == 32 and d.connection is conn for d in conn.devices)
         assert all(d.allow_raw_writes for d in conn.devices)
@@ -89,7 +89,7 @@ class TestCreateConnections:
         assert (dev.name, dev.unit_id, dev.rate, dev.write_mode, dev.scanning) == (
             "unit1",
             1,
-            10.0,
+            1.0,
             "auto",
             True,
         )
@@ -118,6 +118,37 @@ class TestCreateConnections:
         config = {"connections": [_tcp(devices=[{"register_map_file": str(map_file)}])]}
         (conn,) = _create_connections(config, advanced)
         assert conn.devices[0].max_block_size == expected
+
+    @pytest.mark.parametrize(
+        ("transport", "register", "device", "advanced", "expected"),
+        [
+            ("tcp", 0.2, 0.5, 5.0, 0.2),
+            ("tcp", None, 0.5, 5.0, 0.5),
+            ("rtu", None, None, 5.0, 5.0),
+            ("tcp", None, None, None, 1.0),
+            ("rtu", None, None, None, 10.0),
+        ],
+        ids=["register", "device", "advanced", "transport-tcp", "transport-rtu"],
+    )
+    def test_rate_precedence(self, tmp_path, transport, register, device, advanced, expected):
+        """Register rate > device rate > advanced.default_rate > transport default.
+
+        Through the SDK's load_config: the schema must not fill default_rate.
+        """
+        reg = {"address": 1} if register is None else {"address": 1, "rate": register}
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"events": {"e": [reg]}}))
+        link = {"host": "10.0.0.5"} if transport == "tcp" else {"serial_port": "/dev/ttyUSB0"}
+        dev = {"register_map_file": str(map_file)} | ({} if device is None else {"rate": device})
+        config = {"connections": [{"transport": transport, **link, "devices": [dev]}]}
+        if advanced is not None:
+            config["advanced"] = {"default_rate": advanced}
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps(config))
+        config = load_config(config_path=path, schema_path=SCHEMA)
+        (conn,) = _create_connections(config, resolve_advanced(config))
+        (dev,) = conn.devices
+        assert dev.rate_of(dev.register_map.registers[0]) == expected
 
     @pytest.mark.parametrize(
         ("connections", "message"),

@@ -21,7 +21,7 @@ from zelos_sdk.extensions import load_config
 from zelos_sdk.hooks.logging import TraceLoggingHandler
 
 from zelos_extension_modbus import ACTION_PREFIX
-from zelos_extension_modbus.client import AUTO_SCAN_RATE, ModbusConnection, ModbusDevice
+from zelos_extension_modbus.client import TRANSPORT_RATE, ModbusConnection, ModbusDevice
 from zelos_extension_modbus.constants import (
     DEFAULT_PREFIX,
     LOG_SOURCE_NAME,
@@ -208,9 +208,8 @@ def _create_connections(config: dict[str, Any], advanced: dict[str, Any]) -> lis
     """Build each configured connection with its devices.
 
     Tuning precedence per key: map `device` block > `advanced` > constructor
-    default. Rate: the device's `rate` > `advanced.default_rate` > 1 s; for a
-    device without a map, which auto-scans unless `auto_scan` is false,
-    `advanced.auto_scan_rate` > 10 s instead of the default rate. Names
+    default. Rate: the device's `rate` > `advanced.default_rate` > the
+    transport's TRANSPORT_RATE, auto-scanned devices included. Names
     must be legal trace names and unique (connections overall; device names
     and unit ids per connection); anything else exits. Default names that
     collide (TCP connections to one host) take a `_<port>` suffix.
@@ -250,10 +249,7 @@ def _create_connections(config: dict[str, Any], advanced: dict[str, Any]) -> lis
             auto_scan = dev_config.get("auto_scan", True) and not (
                 register_map or "map_loader" in map_source
             )
-            if auto_scan:
-                rate = advanced.get("auto_scan_rate", AUTO_SCAN_RATE)
-            else:
-                rate = advanced.get("default_rate", 1.0)
+            rate = advanced.get("default_rate", TRANSPORT_RATE[conn.transport])
             map_device = register_map.device if register_map else {}
             settings = {k: advanced[k] for k in DEVICE_KEYS if k in advanced}
             settings.update(

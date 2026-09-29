@@ -93,8 +93,9 @@ REFUSED_RETRY = 600.0
 SILENT = -1
 DEACTIVATED = (*ILLEGAL_ADDRESS, SILENT)
 
-#: Auto-scan defaults: discovered registers poll slowly (s).
-AUTO_SCAN_RATE = 10.0
+#: Poll rate (s) when neither register, device nor config sets one. Serial
+#: buses are shared and slow: a large map cannot sweep at 1 s at 9600 baud.
+TRANSPORT_RATE = {Transport.TCP: 1.0, Transport.RTU: 10.0}
 
 # Achieved-rate smoothing per read, and how long an overload (or its recovery)
 # must hold before it is logged.
