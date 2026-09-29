@@ -1010,6 +1010,9 @@ async def _reach(
     rtu = link.endpoint.get("transport") == Transport.RTU
     first = [configured_unit] if configured_unit is not None else []
     if autodetect and rtu:
+        if not await link.open():  # no settings help a port that won't open
+            report |= {"serial": None, "error": f"cannot open {link.label}"}
+            return []
         with link.stage("autodetect"):
             likely = list(dict.fromkeys(first + list(AUTODETECT_UNITS)))
             report["serial"] = await autodetect_serial(link, likely)

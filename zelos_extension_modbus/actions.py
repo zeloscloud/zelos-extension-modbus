@@ -979,10 +979,11 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
         connections = [DEFAULT_CONNECTION]
     quiet_pymodbus()
     deadline = time.monotonic() + AUTO_CONFIG_SECONDS
-    out, found, swept, seen, cut, unreachable = [], 0, [], [], [], []
+    out, found, swept, seen, cut, unreachable, unopened = [], 0, [], [], [], [], []
     no_port = False  # an RTU connection with no serial port to open
     for conn in connections:
-        if conn.get("transport") == Transport.RTU and not conn.get("serial_port"):
+        rtu = conn.get("transport") == Transport.RTU
+        if rtu and not conn.get("serial_port"):
             no_port = True
             out.append(conn)
             continue
@@ -996,13 +997,16 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
         result = asyncio.run(
             sweep(
                 link_kwargs(conn),
-                autodetect=conn.get("transport") == Transport.RTU,
+                autodetect=rtu,
                 configured_unit=devices[0].get("unit_id", 1) if devices else None,
                 max_seconds=left,
             )
         )
         if result.get("error"):  # the link never opened
-            unreachable.append(result["endpoint"])
+            if rtu:
+                unopened.append(conn["serial_port"])
+            else:
+                unreachable.append(result["endpoint"])
         else:
             swept.append(result["endpoint"])
         if result["cutoffs"]:
@@ -1010,25 +1014,30 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
         conn = dict(conn)
         if serial := result.get("serial"):
             conn |= {k: serial[k] for k in ("baudrate", "parity", "stopbits")}
+        units, added = [], []
         for unit in result.get("units", {}).get("present", []):
-            found += 1
             ids = result["identity"].get(unit, {}).get("device_id", {})
             who = " ".join(ids.get(k, "") for k in ("VendorName", "ProductCode")).strip()
-            label = f"{result['endpoint']} unit {unit}" + (f" ({who})" if who else "")
+            notes = [who] if who else []
             if unit not in known:
                 devices.append({"unit_id": unit})
+                added.append(unit)
             device = next(d for d in devices if d.get("unit_id", 1) == unit)
             if unit in result["sunspec"] and device.get("register_map") != "sunspec":
                 if device.get("register_map_file"):
-                    label += ", SunSpec detected (register_map_file kept)"
+                    notes.append("SunSpec detected, register_map_file kept")
                 else:
                     device["register_map"] = "sunspec"
-                    label += ", register_map set to sunspec"
-            seen.append(label)
+                    notes.append("register_map set to sunspec")
+            units.append((unit, notes))
+        if units:
+            found += len(units)
+            seen.append(_found(result["endpoint"], units, added))
         conn["devices"] = devices
         out.append(conn)
     partial = f" Not fully swept in {AUTO_CONFIG_SECONDS:g} s: {', '.join(cut)}." if cut else ""
     failed = f" Couldn't connect to {', '.join(unreachable)}." if unreachable else ""
+    failed += f" Couldn't open {', '.join(unopened)}." if unopened else ""
     failed += " Choose a Serial Port to scan." if no_port else ""
     if not found and probe:
         host, port = DEFAULT_CONNECTION["host"], DEFAULT_CONNECTION["port"]
@@ -1042,9 +1051,16 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
         return {"status": "error", "message": f"{silent}{failed}{partial}".strip()}
     return {
         "status": "success",
-        "message": f"Found {'; '.join(seen)}.{failed}{partial}",
+        "message": f"{'; '.join(seen)}.{failed}{partial}",
         "config": {"connections": out},
     }
+
+
+def _found(endpoint: str, units: list[tuple[int, list[str]]], added: list[int]) -> str:
+    """``a:502: found units 1 (Acme X), 2; added 2``."""
+    listed = ", ".join(f"{u} ({', '.join(n)})" if n else str(u) for u, n in units)
+    tail = f"; added {', '.join(map(str, added))}" if added else ""
+    return f"{endpoint}: found unit{'s' * (len(units) > 1)} {listed}{tail}"
 
 
 @zelos_sdk.action(
