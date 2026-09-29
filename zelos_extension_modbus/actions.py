@@ -980,8 +980,12 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     quiet_pymodbus()
     deadline = time.monotonic() + AUTO_CONFIG_SECONDS
     out, found, swept, seen, cut, unreachable = [], 0, [], [], [], []
-    added = False  # a new unit without SunSpec: auto-scans at start
+    no_port = False  # an RTU connection with no serial port to open
     for conn in connections:
+        if conn.get("transport") == Transport.RTU and not conn.get("serial_port"):
+            no_port = True
+            out.append(conn)
+            continue
         devices = [dict(d) for d in conn.get("devices") or [] if isinstance(d, dict)]
         known = {d.get("unit_id", 1) for d in devices}
         left = deadline - time.monotonic()
@@ -1013,7 +1017,6 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
             label = f"{result['endpoint']} unit {unit}" + (f" ({who})" if who else "")
             if unit not in known:
                 devices.append({"unit_id": unit})
-                added |= unit not in result["sunspec"]
             device = next(d for d in devices if d.get("unit_id", 1) == unit)
             if unit in result["sunspec"] and device.get("register_map") != "sunspec":
                 if device.get("register_map_file"):
@@ -1026,6 +1029,7 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
         out.append(conn)
     partial = f" Not fully swept in {AUTO_CONFIG_SECONDS:g} s: {', '.join(cut)}." if cut else ""
     failed = f" Couldn't connect to {', '.join(unreachable)}." if unreachable else ""
+    failed += " Choose a Serial Port to scan." if no_port else ""
     if not found and probe:
         host, port = DEFAULT_CONNECTION["host"], DEFAULT_CONNECTION["port"]
         return {
@@ -1036,10 +1040,9 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     if not found:
         silent = f"No unit answered on {', '.join(swept)}." if swept else ""
         return {"status": "error", "message": f"{silent}{failed}{partial}".strip()}
-    scans = " New units without SunSpec discover their registers at start (auto-scan)."
     return {
         "status": "success",
-        "message": f"Found {'; '.join(seen)}.{failed}{partial}{scans if added else ''}",
+        "message": f"Found {'; '.join(seen)}.{failed}{partial}",
         "config": {"connections": out},
     }
 
