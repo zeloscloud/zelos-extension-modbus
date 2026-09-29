@@ -265,8 +265,51 @@ class TestAutoConfig:
         if connections is None:
             assert result == {
                 "status": "error",
-                "message": "No connection to scan. Add one (host and port, or a serial port) and "
-                "press Auto-configure; nothing answered on 127.0.0.1:502.",
+                "message": "Nothing answered on 127.0.0.1:502, the default. Add a connection "
+                "(host and port, or a serial port).",
             }
         else:
             assert result["config"]["connections"] == connections
+
+    @pytest.mark.parametrize(
+        ("answers", "result"),
+        [
+            # one link never opened, the other found a unit: still filled in, the failure named
+            (
+                {"a": [1], "b": None},
+                {
+                    "status": "success",
+                    "message": "Found a:502 unit 1. Couldn't connect to b:502. New units without "
+                    "SunSpec discover their registers at start (auto-scan).",
+                },
+            ),
+            # opened but silent vs never opened: different fixes, so different words
+            (
+                {"a": [], "b": None},
+                {
+                    "status": "error",
+                    "message": "No unit answered on a:502. Couldn't connect to b:502.",
+                },
+            ),
+        ],
+    )
+    def test_unreachable_is_named(self, monkeypatch, answers, result):
+        from zelos_extension_modbus import actions, scan
+
+        async def fake_sweep(endpoint, **kwargs):
+            present = answers[endpoint["host"]]
+            report = {
+                "endpoint": f"{endpoint['host']}:502",
+                "identity": {},
+                "sunspec": {},
+                "cutoffs": [],
+            }
+            if present is None:
+                return report | {"error": "cannot open", "units": {}}
+            return report | {"units": {"present": present}}
+
+        monkeypatch.setattr(scan, "sweep", fake_sweep)
+        monkeypatch.setattr(actions, "_refuse_if_running", lambda: None)
+        conns = [{"transport": "tcp", "host": h, "port": 502} for h in answers]
+        got = actions.auto_config(config={"connections": conns})
+        assert {k: got[k] for k in ("status", "message")} == result
