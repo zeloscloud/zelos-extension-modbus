@@ -23,7 +23,7 @@
               "tcp",
               "rtu"
             ],
-            "enumNames": [
+            "ui:enumNames": [
               "TCP (Ethernet)",
               "RTU (Serial RS232/RS485)"
             ],
@@ -65,7 +65,7 @@
                     "file",
                     "sunspec"
                   ],
-                  "enumNames": [
+                  "ui:enumNames": [
                     "Register map file",
                     "SunSpec (auto-discover)"
                   ],
@@ -209,7 +209,7 @@
                       "E",
                       "O"
                     ],
-                    "enumNames": [
+                    "ui:enumNames": [
                       "None",
                       "Even",
                       "Odd"
@@ -377,7 +377,7 @@
             "auto",
             "fc16"
           ],
-          "enumNames": [
+          "ui:enumNames": [
             "Auto (FC 6 / FC 16)",
             "Always FC 16"
           ],
