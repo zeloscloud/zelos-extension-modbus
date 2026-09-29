@@ -458,6 +458,7 @@ class ModbusConnection:
         # Consecutive connect failures (throttles serial diagnostics); the last reason.
         self._connect_failures = 0
         self.connect_error = ""
+        self.ever_connected = False
         self._loop: asyncio.AbstractEventLoop | None = None
         # close_after_sweep: set by start(); parked = closed on purpose while idle.
         self._close_after_sweep = False
@@ -511,6 +512,7 @@ class ModbusConnection:
 
         if up:
             self._connect_failures = 0
+            self.ever_connected = True
             # A close_after_sweep reopen is routine, not news.
             log = logger.debug if self._parked else logger.info
             self._parked = False
@@ -737,7 +739,17 @@ class ModbusConnection:
                 elif not await self.ensure_connected():
                     for dev in self.devices:
                         dev._missed(time.monotonic())
-                    if backoff != logged:
+                        if not dev.answered:
+                            dev._unreachable(
+                                f"cannot connect to {self.endpoint}{self.connect_error}"
+                            )
+                    if not self.ever_connected and not logged:
+                        logger.error(
+                            f"Connection '{self.name}' ({self.endpoint}): cannot connect"
+                            f"{self.connect_error}; retrying in {backoff:g}s"
+                        )
+                        logged = backoff
+                    elif backoff != logged:
                         logger.warning(
                             f"Cannot connect to {self._connection_str}{self.connect_error}; "
                             f"retrying in {backoff:g}s"
@@ -870,8 +882,12 @@ class ModbusDevice:
         # Kepware-style counters over poll reads; a timeout is a failed read.
         self.successful_reads = 0
         self.failed_reads = 0
-        # Why the device is not polling (map discovery failed), else None.
+        # Why the device is not polling (unreachable, map discovery failed), else None.
         self.last_error: str | None = None
+        # No answer since start (unreachable): since when, and whether it was logged.
+        self.answered = False
+        self._since = datetime.now(UTC).isoformat(timespec="seconds")
+        self._reported = False
 
         self._map_loader = map_loader
         self._trace_target: tuple[zelos_sdk.TraceSource, str] | None = None
@@ -935,6 +951,21 @@ class ModbusDevice:
         return self._discovery is not None and not self._discovery.done
 
     @property
+    def state(self) -> str:
+        """``unreachable`` (no answer since start), ``disconnected`` (link down after
+        it answered), ``demoted`` (answered, now silent) or ``ok``."""
+        if not self.answered:
+            return "unreachable"
+        if self.connection._connect_failures:
+            return "disconnected"
+        return "demoted" if self.demoted else "ok"
+
+    def _unreachable(self, error: str) -> None:
+        """No answer since start: keep why; the connection or first timeout logs it once."""
+        self.last_error = error
+        self._reported = True
+
+    @property
     def demoted(self) -> bool:
         """Skipped after demote_after consecutive timeouts; only probed until it answers."""
         return self._backoff > 0
@@ -986,6 +1017,8 @@ class ModbusDevice:
             "requested_rate": head.get("requested_rate"),
             "achieved_rate": head.get("achieved_rate"),
             "overload_pct": head.get("overload_pct"),
+            "state": self.state,
+            "unreachable_since": None if self.answered else self._since,
             "demoted": self.demoted,
             "retry_in_s": None if retry is None else round(retry, 1),
             "tiers": tiers,
@@ -1496,7 +1529,14 @@ class ModbusDevice:
             logger.debug(f"[{self.path}] Probe failed; next in {self._backoff:.0f}s")
             return
         self._timeouts += 1
-        logger.warning(f"[{self.path}] {what}")
+        if not self.answered and not self._reported:
+            self._unreachable(f"no response since start: {what}")
+            logger.error(
+                f"Device '{self.path}' (unit {self.unit_id}): no response since start ({what}); "
+                "retrying"
+            )
+        else:
+            logger.warning(f"[{self.path}] {what}")
         if self._timeouts < self.demote_after:
             return
         self._backoff = DEMOTE_BACKOFF
@@ -1528,6 +1568,11 @@ class ModbusDevice:
         self._timeouts = 0
         self._backoff = 0.0
         self._retry_at = 0.0
+        if not self.answered:
+            self.answered = True
+            if self._reported:
+                self.last_error = None
+                logger.info(f"Device '{self.path}' (unit {self.unit_id}): responding")
 
     def _missed(self, now: float) -> None:
         """The link is down: each read that fell due is a failed read; no rate is achieved.

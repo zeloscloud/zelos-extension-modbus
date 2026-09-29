@@ -8,6 +8,7 @@ Covers the seams that turn config.json into running connections:
   map rather than silently degrading to no-data.
 """
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -223,3 +224,19 @@ class TestLoadRegisterMap:
         reg_map = _load_register_map(str(good))
         assert reg_map is not None
         assert len(reg_map.registers) == 1
+
+
+def test_unreachable_server_at_start_exits(caplog):
+    """A server absent at start stops the extension; retries start after first contact."""
+    from conftest import free_port
+
+    from zelos_extension_modbus.cli.app import run_connections
+    from zelos_extension_modbus.client import ModbusConnection
+
+    conn = ModbusConnection(name="gw", host="127.0.0.1", port=free_port(), timeout=0.5, retries=0)
+    loop = asyncio.new_event_loop()  # private: later tests use the default loop
+    with pytest.raises(SystemExit) as exc:
+        loop.run_until_complete(run_connections([conn]))
+    loop.close()
+    assert exc.value.code == 1
+    assert "Connection 'gw' (127.0.0.1:" in caplog.text and "cannot connect" in caplog.text

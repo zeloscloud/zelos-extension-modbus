@@ -67,6 +67,8 @@ _RATE_STATUS = (
     "requested_rate",
     "achieved_rate",
     "overload_pct",
+    "state",
+    "unreachable_since",
     "demoted",
     "retry_in_s",
     "tiers",
@@ -1169,14 +1171,20 @@ class TestPollScheduler:
         assert max(b - a for a, b in zip(fast, fast[1:], strict=False)) < 0.4
         assert {r[1] for r in reads if r[1]} == {10 * k + 9 for k in range(20)}
 
-    def test_dead_device_demoted(self, monkeypatch):
-        """A dead unit is demoted after demote_after timeouts; then only probes cost link time."""
+    def test_dead_device_demoted(self, monkeypatch, caplog):
+        """A dead unit is demoted after demote_after timeouts; then only probes cost link time.
+        Silent since start, it is unreachable: one ERROR, then retried like a later drop."""
         monkeypatch.setattr("zelos_extension_modbus.client.DEMOTE_BACKOFF", 0.5)
         conn = ModbusConnection(name="c")
         events = {"e": [{"name": "v", "address": 1}]}
         live, live_reads = _fake_device(events, conn, unit_id=1, rate=0.1)
         dead, dead_reads = _fake_device(events, conn, unit_id=2, rate=0.1, dead=True, latency=0.2)
-        asyncio.get_event_loop().run_until_complete(_run_for(conn, 2.0))
+        with caplog.at_level(logging.WARNING):
+            asyncio.get_event_loop().run_until_complete(_run_for(conn, 2.0))
+        (error,) = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+        assert error.startswith("Device 'c/unit2' (unit 2): no response since start")
+        assert (live.state, dead.state) == ("ok", "unreachable")
+        assert dead.last_error.startswith("no response since start")
 
         # 3 timeouts, then probes after 0.5 s and 1 s more (backoff doubles).
         assert 3 <= len(dead_reads) <= 5
@@ -1232,9 +1240,15 @@ class TestPollScheduler:
         calls.clear()
         run(dev.load_map(100.0))
         assert calls == [40000] and dev.demoted  # still silent: one request, backs off
-        answer[0] = 2  # an exception answer: the unit is back
+        assert dev.state == "unreachable"
+        answer[0] = 2  # an exception answer: the unit is present
         run(dev.load_map(200.0))
         assert calls == [40000, 40000] and not dev.demoted and dev.map_pending
+        assert (dev.state, dev.rate_status()["unreachable_since"], dev.last_error) == (
+            "ok",
+            None,
+            None,
+        )
         conn = dev.connection
         assert conn._batch(200.0) == [(dev, None)]  # discovery is now normal work
 
@@ -1453,6 +1467,43 @@ class TestReconnection:
             asyncio.get_event_loop().run_until_complete(request())
         assert not conn.connected
         conn._client.ctx.connect.assert_not_awaited()
+
+    def test_unreachable_at_start_retries_and_recovers(self, monkeypatch, caplog):
+        """No link at start: one ERROR, the device is unreachable and retried; once the
+        endpoint appears it responds (INFO). A later drop is only retried, no ERROR."""
+        monkeypatch.setattr("zelos_extension_modbus.client.RECONNECT_INITIAL", 0.2)
+        port = free_port()
+        conn = ModbusConnection(port=port, timeout=0.5, name="c")
+        dev = ModbusDevice(
+            conn, register_map=RegisterMap.from_dict({"events": {"e": [{"address": 1}]}})
+        )
+        server = DemoServer(port)
+
+        async def until(state):
+            for _ in range(100):
+                if dev.state == state:
+                    return
+                await asyncio.sleep(0.05)
+            raise AssertionError(f"{dev.state} != {state}")
+
+        async def main():
+            conn._running = True
+            task = asyncio.create_task(conn.run_async())
+            await asyncio.sleep(0.5)
+            assert dev.state == "unreachable" and dev.rate_status()["unreachable_since"]
+            assert dev.last_error.startswith(f"cannot connect to 127.0.0.1:{port}")
+            server.start()
+            await until("ok")
+            server.stop()
+            await until("disconnected")
+            conn.stop()
+            await task
+
+        with caplog.at_level(logging.INFO):
+            asyncio.get_event_loop().run_until_complete(main())
+        errors = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1 and errors[0].startswith(f"Connection 'c' (127.0.0.1:{port})")
+        assert "Device 'c/unit1' (unit 1): responding" in caplog.messages
 
     def test_cancel_mid_request_stops_the_loop(self):
         """pymodbus turns a cancel into ModbusIOException; the poll loop must still exit."""
@@ -2496,6 +2547,8 @@ class TestListDevicesAction:
             "requested_rate": None,  # planned on the first tick
             "achieved_rate": None,
             "overload_pct": None,
+            "state": "unreachable",  # no answer since start
+            "unreachable_since": meter._since,
             "demoted": False,
             "retry_in_s": None,
             "tiers": [],
