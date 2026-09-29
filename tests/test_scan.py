@@ -279,7 +279,7 @@ class TestAutoConfig:
                 {"a": [1], "b": None},
                 {
                     "status": "success",
-                    "message": "Found a:502 unit 1. Couldn't connect to b:502.",
+                    "message": "a:502: found unit 1; added 1. Couldn't connect to b:502.",
                 },
             ),
             # opened but silent vs never opened: different fixes, so different words
@@ -319,3 +319,45 @@ class TestAutoConfig:
         monkeypatch.setattr(actions, "_refuse_if_running", lambda: None)
         got = actions.auto_config(config={"connections": [{"transport": "rtu", "serial_port": ""}]})
         assert got == {"status": "error", "message": "Choose a Serial Port to scan."}
+
+    def test_rtu_port_that_wont_open_is_named(self, monkeypatch):
+        from zelos_extension_modbus import actions
+
+        monkeypatch.setattr(actions, "_refuse_if_running", lambda: None)
+        conn = {"transport": "rtu", "serial_port": "/dev/tty.nope"}
+        got = actions.auto_config(config={"connections": [conn]})
+        assert got == {"status": "error", "message": "Couldn't open /dev/tty.nope."}
+
+    @pytest.mark.parametrize(
+        ("present", "known", "sunspec", "message"),
+        [
+            ([1, 2], [1], {}, "a:502: found units 1 (Zelos ZSCAN-1), 2; added 2."),
+            ([1, 2], [], {}, "a:502: found units 1 (Zelos ZSCAN-1), 2; added 1, 2."),
+            ([1, 2], [1, 2], {}, "a:502: found units 1 (Zelos ZSCAN-1), 2."),
+            (
+                [1],
+                [],
+                {1: 40001},
+                "a:502: found unit 1 (Zelos ZSCAN-1, register_map set to sunspec); added 1.",
+            ),
+        ],
+    )
+    def test_found_message(self, monkeypatch, present, known, sunspec, message):
+        from zelos_extension_modbus import actions, scan
+
+        ident = {"device_id": {"VendorName": "Zelos", "ProductCode": "ZSCAN-1"}}
+
+        async def fake_sweep(endpoint, **kwargs):
+            return {
+                "endpoint": "a:502",
+                "units": {"present": present},
+                "identity": {1: ident},
+                "sunspec": sunspec,
+                "cutoffs": [],
+            }
+
+        monkeypatch.setattr(scan, "sweep", fake_sweep)
+        monkeypatch.setattr(actions, "_refuse_if_running", lambda: None)
+        devices = [{"unit_id": u} for u in known]
+        conn = {"transport": "tcp", "host": "a", "port": 502, "devices": devices}
+        assert actions.auto_config(config={"connections": [conn]})["message"] == message
