@@ -67,8 +67,6 @@ _RATE_STATUS = (
     "requested_rate",
     "achieved_rate",
     "overload_pct",
-    "state",
-    "unreachable_since",
     "demoted",
     "retry_in_s",
     "tiers",
@@ -1183,7 +1181,7 @@ class TestPollScheduler:
             asyncio.get_event_loop().run_until_complete(_run_for(conn, 2.0))
         (error,) = [r.message for r in caplog.records if r.levelno == logging.ERROR]
         assert error.startswith("Device 'c/unit2' (unit 2): no response since start")
-        assert (live.state, dead.state) == ("ok", "unreachable")
+        assert (live.answered, dead.answered) == (True, False)
         assert dead.last_error.startswith("no response since start")
 
         # 3 timeouts, then probes after 0.5 s and 1 s more (backoff doubles).
@@ -1240,15 +1238,11 @@ class TestPollScheduler:
         calls.clear()
         run(dev.load_map(100.0))
         assert calls == [40000] and dev.demoted  # still silent: one request, backs off
-        assert dev.state == "unreachable"
+        assert not dev.answered
         answer[0] = 2  # an exception answer: the unit is present
         run(dev.load_map(200.0))
         assert calls == [40000, 40000] and not dev.demoted and dev.map_pending
-        assert (dev.state, dev.rate_status()["unreachable_since"], dev.last_error) == (
-            "ok",
-            None,
-            None,
-        )
+        assert (dev.answered, dev.last_error) == (True, None)
         conn = dev.connection
         assert conn._batch(200.0) == [(dev, None)]  # discovery is now normal work
 
@@ -1479,23 +1473,23 @@ class TestReconnection:
         )
         server = DemoServer(port)
 
-        async def until(state):
+        async def until(check):
             for _ in range(100):
-                if dev.state == state:
+                if check():
                     return
                 await asyncio.sleep(0.05)
-            raise AssertionError(f"{dev.state} != {state}")
+            raise AssertionError("timed out")
 
         async def main():
             conn._running = True
             task = asyncio.create_task(conn.run_async())
             await asyncio.sleep(0.5)
-            assert dev.state == "unreachable" and dev.rate_status()["unreachable_since"]
+            assert not dev.answered
             assert dev.last_error.startswith(f"cannot connect to 127.0.0.1:{port}")
             server.start()
-            await until("ok")
+            await until(lambda: dev.answered and dev.last_error is None)
             server.stop()
-            await until("disconnected")
+            await until(lambda: not conn.connected)
             conn.stop()
             await task
 
@@ -2547,8 +2541,6 @@ class TestListDevicesAction:
             "requested_rate": None,  # planned on the first tick
             "achieved_rate": None,
             "overload_pct": None,
-            "state": "unreachable",  # no answer since start
-            "unreachable_since": meter._since,
             "demoted": False,
             "retry_in_s": None,
             "tiers": [],

@@ -884,9 +884,8 @@ class ModbusDevice:
         self.failed_reads = 0
         # Why the device is not polling (unreachable, map discovery failed), else None.
         self.last_error: str | None = None
-        # No answer since start (unreachable): since when, and whether it was logged.
+        # No answer since start: whether that was logged (once), cleared by the first answer.
         self.answered = False
-        self._since = datetime.now(UTC).isoformat(timespec="seconds")
         self._reported = False
 
         self._map_loader = map_loader
@@ -950,16 +949,6 @@ class ModbusDevice:
         """Auto-scan still has reads to make."""
         return self._discovery is not None and not self._discovery.done
 
-    @property
-    def state(self) -> str:
-        """``unreachable`` (no answer since start), ``disconnected`` (link down after
-        it answered), ``demoted`` (answered, now silent) or ``ok``."""
-        if not self.answered:
-            return "unreachable"
-        if self.connection._connect_failures:
-            return "disconnected"
-        return "demoted" if self.demoted else "ok"
-
     def _unreachable(self, error: str) -> None:
         """No answer since start: keep why; the connection or first timeout logs it once."""
         self.last_error = error
@@ -1017,8 +1006,6 @@ class ModbusDevice:
             "requested_rate": head.get("requested_rate"),
             "achieved_rate": head.get("achieved_rate"),
             "overload_pct": head.get("overload_pct"),
-            "state": self.state,
-            "unreachable_since": None if self.answered else self._since,
             "demoted": self.demoted,
             "retry_in_s": None if retry is None else round(retry, 1),
             "tiers": tiers,
