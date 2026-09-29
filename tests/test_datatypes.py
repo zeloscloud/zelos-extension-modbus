@@ -13,14 +13,8 @@ MAP = {
     "events": {
         "e": [
             {"name": "s", "address": 1, "datatype": "string", "length": 3, "invalid": [0]},
-            # Disabled: read only because `v` needs it in the same sweep.
-            {
-                "name": "sf",
-                "address": 4,
-                "datatype": "int16",
-                "invalid": [0x8000],
-                "rate": 0,
-            },
+            # `v`'s exponent: read with it, never traced.
+            {"name": "sf", "address": 4, "datatype": "int16", "invalid": [0x8000]},
             {"name": "v", "address": 5, "scale_ref": "sf", "unit": "V"},
             {"name": "n", "address": 6, "datatype": "int16", "invalid": [0x8000]},
             {"name": "st", "address": 7, "values": {"1": "on", "2": "off"}},
@@ -35,9 +29,10 @@ class _Source:
 
     def __init__(self):
         self.tables = []
+        self.fields = {}
 
     def add_event(self, name, fields):
-        return None
+        self.fields[name] = [f.name for f in fields]
 
     def add_value_table(self, event, field, table):
         self.tables.append((event, field, table))
@@ -90,7 +85,8 @@ def test_decode(words, field, expected, block_reads):
     loop.close()
 
     assert values[field] == expected
-    assert "sf" not in values  # disabled: read for `v`, never logged
+    assert "sf" not in values  # read for `v`, never logged
+    assert source.fields == {"c/unit1/e": ["s", "v", "n", "st"]}
     assert source.tables == [("c/unit1/e", "st", {1: "on", 2: "off"})]
     if block_reads:
         assert reads == [(0, 7)]  # the exponent rides in the same block

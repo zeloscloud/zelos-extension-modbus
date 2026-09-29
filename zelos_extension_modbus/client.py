@@ -1199,7 +1199,11 @@ class ModbusDevice:
         # drops unpolled registers and all-unpolled events (no dead leaves in
         # the signal tree). Field names are the register's precomputed
         # trace-safe name; from_dict guarantees they don't collide per event.
-        for event_name, regs in self.polled_events.items():
+        # Exponent registers are read but not traced; an event of only those is skipped.
+        for event_name, polled in self.polled_events.items():
+            regs = [r for r in polled if not r.is_exponent]
+            if not regs:
+                continue
             fields = [
                 zelos_sdk.TraceEventFieldMetadata(
                     reg.field_name,
@@ -1617,7 +1621,8 @@ class ModbusDevice:
                 continue  # an unpolled exponent, read only for its registers
             if reg.ref:
                 value = apply_scale_ref(value, pending.get(id(reg.ref), (None, None))[1])
-            results.setdefault(event, {})[reg.field_name] = value
+            if not reg.is_exponent:  # exponents scale others, but are not traced
+                results.setdefault(event, {})[reg.field_name] = value
             # Snapshot cache is keyed by the qualified register path, not the
             # sanitized trace field name, so actions address it the same way
             # read_named_register / write_named_register do.
