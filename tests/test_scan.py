@@ -279,8 +279,7 @@ class TestAutoConfig:
                 {"a": [1], "b": None},
                 {
                     "status": "success",
-                    "message": "Found a:502 unit 1. Couldn't connect to b:502. New units without "
-                    "SunSpec discover their registers at start (auto-scan).",
+                    "message": "Found a:502 unit 1. Couldn't connect to b:502.",
                 },
             ),
             # opened but silent vs never opened: different fixes, so different words
@@ -313,3 +312,10 @@ class TestAutoConfig:
         conns = [{"transport": "tcp", "host": h, "port": 502} for h in answers]
         got = actions.auto_config(config={"connections": conns})
         assert {k: got[k] for k in ("status", "message")} == result
+
+    def test_rtu_without_a_port_asks_for_one(self, monkeypatch):
+        from zelos_extension_modbus import actions
+
+        monkeypatch.setattr(actions, "_refuse_if_running", lambda: None)
+        got = actions.auto_config(config={"connections": [{"transport": "rtu", "serial_port": ""}]})
+        assert got == {"status": "error", "message": "Choose a Serial Port to scan."}
