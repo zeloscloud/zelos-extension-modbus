@@ -302,6 +302,19 @@ async def run_connections(connections: list[ModbusConnection]) -> None:
     A stop cancels the loops mid-request; each disconnects on the way out.
     Past SHUTDOWN_TIMEOUT the process exits anyway.
     """
+    # First contact is a hard requirement: a server that is not there at start is
+    # a config error. Once a link has been up, drops go through the retry cycle.
+    up = await asyncio.gather(*(conn.ensure_connected() for conn in connections))
+    down = [conn for conn, ok in zip(connections, up, strict=True) if not ok]
+    if down:
+        for conn in down:
+            logger.error(
+                f"Connection '{conn.name}' ({conn.endpoint}): cannot connect{conn.connect_error}"
+            )
+        for conn in connections:
+            await conn.disconnect()
+        raise SystemExit(1)
+
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):

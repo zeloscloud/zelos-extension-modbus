@@ -84,6 +84,8 @@ Rate precedence: register `rate` > device Rate > `default_rate`; a map `min_rate
 - **Demotion**: after `demote_after` consecutive timeouts or gateway exceptions 0A/0B (polling or SunSpec discovery) a device is skipped and its fields are not logged; one single-attempt probe (no retries) of a due block after 10 s, doubling to `demote_max_s` (a device awaiting SunSpec discovery is probed with one read at 40001); any answer resumes it, and its achieved rate is null until a normal interval passes. `get_status` shows `demoted` and `retry_in_s`.
 - **Counters**: `successful_reads` and `failed_reads` per device (a timeout is a failed read). A failed read logs none of its block's fields that cycle.
 - **Link down**: every read that falls due counts in `failed_reads`, and `achieved_rate` / `overload_pct` are null until reads resume. Reconnects wait 3 s, doubling to 60 s; a poll that keeps the link resets it. The first failure is logged, then only when the wait grows.
+- **Unreachable at start**: a connection whose server cannot be reached at start stops the extension with `Connection 'gw' (10.0.0.99:502): cannot connect` (fix the endpoint and start again); once a link has been up, drops are retried on the schedules above. A device behind a reachable server with no answer since start (timeout or gateway 0A/0B; an exception answer counts as present) logs one ERROR (`Device 'gw/ghost' (unit 7): no response since start`), shows `state: unreachable`, and is retried as Kepware/Ignition do; its first answer logs `responding`. Nothing is traced for it meanwhile.
+- **State**: `get_status` / `get_snapshot` / `list_devices` carry `state`: `unreachable` (no answer since start; `unreachable_since` and `error` say since when and why), `disconnected` (link down after it answered), `demoted` or `ok`.
 - **Illegal addresses** (Kepware "Deactivate Tags on Illegal Address"): block size is static (map `max_block_size` > Advanced > 125). A block answered with exception 02/03 logs one warning and is retried every 10 min, also across demotion; other blocks keep polling. `get_status` lists it under `refused` (`range`, `code`, `retry_in_s`). Run `verify` to find the bad registers, then fix the map or `max_block_size` (scan learns it). Other exception codes warn once per block and keep polling.
 - **Shutdown**: SIGTERM/SIGINT cancels every connection mid-request and disconnects; past 3 s the process exits anyway.
 
@@ -241,8 +243,8 @@ The extension provides actions accessible from the Zelos App (and to app extensi
 
 | Action | Description |
 |--------|-------------|
-| `list_devices` | One row per device: connection, unit ID, endpoint, trace path, map summary, `raw_writes` (raw write actions enabled), and health (`error`, `map_pending`, `refused`, demotion) |
-| `get_status` | Connection status, `successful_reads`/`failed_reads`, requested vs achieved rate (worst tier), demotion, and block-read settings |
+| `list_devices` | One row per device: connection, unit ID, endpoint, trace path, map summary, `raw_writes` (raw write actions enabled), and health (`state`, `error`, `map_pending`, `refused`, demotion) |
+| `get_status` | Connection status and `state`, `successful_reads`/`failed_reads`, requested vs achieved rate (worst tier), demotion, and block-read settings |
 | `get_snapshot` | Last value per `event/name` (value + timestamp) from the poll cache, no device I/O |
 | `read_register` | Read raw words/bits by address (map's base), register type, and count; each value is traced as a [raw register](#raw-registers), plus one DEBUG log line. A failed read traces nothing |
 | `write_single_register` | Write one holding register (FC 6): an integer 0-65535, or -32768..-1 as two's complement. Raw addresses, counts and values must be whole numbers |
