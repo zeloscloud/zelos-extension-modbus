@@ -979,7 +979,7 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
         connections = [DEFAULT_CONNECTION]
     quiet_pymodbus()
     deadline = time.monotonic() + AUTO_CONFIG_SECONDS
-    out, found, swept, seen, cut = [], 0, [], [], []
+    out, found, swept, seen, cut, unreachable = [], 0, [], [], [], []
     added = False  # a new unit without SunSpec: auto-scans at start
     for conn in connections:
         devices = [dict(d) for d in conn.get("devices") or [] if isinstance(d, dict)]
@@ -997,7 +997,10 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
                 max_seconds=left,
             )
         )
-        swept.append(result["endpoint"])
+        if result.get("error"):  # the link never opened
+            unreachable.append(result["endpoint"])
+        else:
+            swept.append(result["endpoint"])
         if result["cutoffs"]:
             cut.append(result["endpoint"])
         conn = dict(conn)
@@ -1022,22 +1025,21 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
         conn["devices"] = devices
         out.append(conn)
     partial = f" Not fully swept in {AUTO_CONFIG_SECONDS:g} s: {', '.join(cut)}." if cut else ""
+    failed = f" Couldn't connect to {', '.join(unreachable)}." if unreachable else ""
     if not found and probe:
         host, port = DEFAULT_CONNECTION["host"], DEFAULT_CONNECTION["port"]
         return {
             "status": "error",
-            "message": "No connection to scan. Add one (host and port, or a serial port) and "
-            f"press Auto-configure; nothing answered on {host}:{port}.",
+            "message": f"Nothing answered on {host}:{port}, the default. Add a connection "
+            "(host and port, or a serial port).",
         }
     if not found:
-        return {
-            "status": "error",
-            "message": f"No unit answered on {', '.join(swept) or 'any connection'}.{partial}",
-        }
+        silent = f"No unit answered on {', '.join(swept)}." if swept else ""
+        return {"status": "error", "message": f"{silent}{failed}{partial}".strip()}
     scans = " New units without SunSpec discover their registers at start (auto-scan)."
     return {
         "status": "success",
-        "message": f"Found {'; '.join(seen)}.{partial}{scans if added else ''}",
+        "message": f"Found {'; '.join(seen)}.{failed}{partial}{scans if added else ''}",
         "config": {"connections": out},
     }
 
