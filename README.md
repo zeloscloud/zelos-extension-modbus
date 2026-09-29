@@ -145,7 +145,7 @@ Addresses are 1-based by default, the Kepware/Ignition convention: holding regis
 | `byte_order` | No | `big` | `big`, `little`, `big_swap`, `little_swap` |
 | `writable` | No | `false` | `true` lets the write actions set this holding register or coil; everything else is read-only |
 | `length` | strings | | Registers a `string` spans |
-| `scale_ref` | No | | Name of an integer register in the same event holding a power-of-10 exponent, read in the same tick: value = raw x 10^exponent (null when the exponent is, or its read failed). Integer registers only, not with `scale`. The register and its exponent register are read-only (`writable: true` on either fails the load) |
+| `scale_ref` | No | | Name of an integer register in the same event holding a power-of-10 exponent, read in the same tick: value = raw x 10^exponent (null when the exponent is, or its read failed). Integer registers only, not with `scale`. The register and its exponent register are read-only (`writable: true` on either fails the load). The exponent register is read but not traced |
 | `invalid` | No | | Raw values that mean "not implemented", logged as null. Compared as the unsigned value of the words (int16 `-32768` is `32768`). On a string only `[0]`: all NUL bytes |
 | `values` | No | | Enum labels for an unscaled integer register, `{"0": "off", "1": "on"}`; shown in the trace |
 
@@ -197,7 +197,7 @@ Discovery only reads (FC 3). No marker, an exception answer for a model header, 
 | Model | Event `<name>_<id>` (`common_1`, `inverter_103`; a repeat gets `_2`) |
 | Point | Field named after the point, with its units; read-only |
 | Repeating group | `<group>_<n>_<point>`, count from the model length |
-| `sf` scale factor | `scale_ref` to the `*_SF` field; a fixed integer `sf` becomes `scale` |
+| `sf` scale factor | `scale_ref` to the `*_SF` field (read, not traced); a fixed integer `sf` becomes `scale` |
 | `enum16`/`enum32` | `values` from the symbols |
 | Not-implemented value | null (`0x8000`, `0xFFFF`, `0x80000000`, NaN, ...; `0` for accumulators and `ipaddr`, all NUL for strings) |
 | `bitfield*` | Raw integer |

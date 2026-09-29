@@ -33,7 +33,8 @@ the write actions set a holding register or coil), and:
   exponent; the value logs as raw * 10**exponent (null when the exponent is).
   Integer registers only, and not combined with scale. Both the register and
   its exponent register are read-only (a write could not know the exponent in
-  force, and changing the exponent rescales the other value).
+  force, and changing the exponent rescales the other value). The exponent
+  register is read but not traced.
 - invalid: raw values meaning "not implemented", logged as null. Compared
   against the unsigned value of the register's words (int16 -32768 is 32768).
   On a string only [0]: all NUL bytes.
@@ -168,6 +169,8 @@ class Register:
     base: int = 1
     # The scale_ref register, resolved by RegisterMap.from_dict
     ref: Register | None = field(default=None, init=False, repr=False, compare=False)
+    # Another register's scale_ref: read to scale it, not traced itself
+    is_exponent: bool = field(default=False, init=False, repr=False, compare=False)
 
     @property
     def map_address(self) -> int:
@@ -263,7 +266,7 @@ class Register:
 def _resolve_scale_refs(event_name: str, registers: list[Register]) -> None:
     """Point each scale_ref register at its exponent register in the same event.
 
-    The exponent is read-only: marking it writable is a load error.
+    The exponent is read-only (marking it writable is a load error) and not traced.
     """
     by_name = {r.name: r for r in registers}
     for reg in registers:
@@ -283,6 +286,7 @@ def _resolve_scale_refs(event_name: str, registers: list[Register]) -> None:
                 f"'{reg.name}', so it is read-only"
             )
         reg.ref = ref
+        ref.is_exponent = True
 
 
 def _not_found(path: Path) -> str:
