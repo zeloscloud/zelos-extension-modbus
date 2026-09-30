@@ -44,7 +44,7 @@ A connection is a TCP endpoint or a serial port. Its devices share the link and 
 | Unit ID | `1` | Modbus slave/unit ID; unique per connection |
 | Name | `unit<ID>` | Trace name; unique per connection |
 | Register Map | `file` | `file` or `sunspec` (see [SunSpec](#sunspec)) |
-| Register Map File | | JSON register map; empty = auto-scan. `file` only |
+| Register Map File | | JSON register map, as a path or inline (see [Register Map](#register-map)); empty = auto-scan. `file` only |
 | Auto-scan | on | Without a map file: discover and poll the device's registers (see [Auto-scan](#auto-scan)); off = nothing polled |
 | Rate | Advanced `default_rate`, else TCP 1 s / RTU 10 s | Poll rate (s) for registers without their own `rate`; `0` = not polled, no auto-scan (actions still work) |
 

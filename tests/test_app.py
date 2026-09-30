@@ -231,7 +231,7 @@ class TestLoadRegisterMap:
         assert _load_register_map("") is None
 
     @pytest.mark.parametrize("value", ["/nonexistent/path/to/register_map.json", '{"events": '])
-    def test_missing_file_exits(self, value):
+    def test_bad_map_exits(self, value):
         """A missing map file or malformed inline map exits rather than running mapless."""
         with pytest.raises(SystemExit) as exc:
             _load_register_map(value)
