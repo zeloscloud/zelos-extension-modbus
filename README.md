@@ -126,6 +126,8 @@ A register map file defines which registers to read and how to decode them. Even
 }
 ```
 
+A device's `register_map_file` is a path on the agent's host (absolute or `~`), or the map itself as JSON when it starts with `{`: `"register_map_file": "{\"events\": {\"power\": [{\"address\": 1}]}}"`.
+
 ### Addressing
 
 Addresses are 1-based by default, the common SCADA convention: holding register `40001` in a vendor sheet is `"type": "holding", "address": 40001`, sent as wire address 40000 (same for all four tables). Maps, default names (`r<address>`), `list_registers`, logs, verify reports, scan output and the raw actions (`read_register`, `write_*`) all use the map's base; a device without a map uses 1. A map numbered from wire address 0 sets `"device": {"address_base": 0}`.

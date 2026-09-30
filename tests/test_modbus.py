@@ -59,6 +59,7 @@ from zelos_extension_modbus.demo.simulator import (
 from zelos_extension_modbus.register_map import (
     Register,
     RegisterMap,
+    load_configured_map,
     map_output_path,
     resolve_map_file,
 )
@@ -195,14 +196,24 @@ class TestRegisterMap:
         Path(f.name).unlink()
 
     def test_resolve_map_file(self, tmp_path, monkeypatch):
-        """Configured paths: ~ expands, relative is refused, a typo gets a close name."""
+        """Configured maps: ~ expands, relative is refused, a typo gets a close name,
+        a value starting with `{` is the map itself."""
         monkeypatch.setenv("HOME", str(tmp_path))
-        (tmp_path / "meter.json").write_text("{}")
+        demo = Path(__file__).parents[1] / "zelos_extension_modbus/demo/power_meter.json"
+        shutil.copy(demo, tmp_path / "meter.json")
         assert resolve_map_file("~/meter.json") == tmp_path / "meter.json"
         with pytest.raises(ValueError, match="absolute or start with ~"):
             resolve_map_file("maps/meter.json")
         with pytest.raises(FileNotFoundError, match=r"did you mean meter\.json"):
             resolve_map_file("~/meters.json")
+        inline = load_configured_map(" \n" + demo.read_text())
+        assert inline == load_configured_map("~/meter.json")
+        with pytest.raises(ValueError, match=r"Invalid inline register map: .*line 1 column 12"):
+            load_configured_map('{"events": ')
+        with pytest.raises(ValueError, match="Invalid inline register map: .*'address'"):
+            load_configured_map('{"events": {"e": [{"name": "v"}]}}')
+        with pytest.raises(ValueError, match="absolute or start with ~"):
+            load_configured_map("maps/meter.json")
 
     @pytest.mark.parametrize(
         ("path", "overwrite", "error"),

@@ -230,10 +230,11 @@ class TestLoadRegisterMap:
         assert _load_register_map(None) is None
         assert _load_register_map("") is None
 
-    def test_missing_file_exits(self):
-        """A configured-but-missing map file exits rather than running mapless."""
+    @pytest.mark.parametrize("value", ["/nonexistent/path/to/register_map.json", '{"events": '])
+    def test_missing_file_exits(self, value):
+        """A missing map file or malformed inline map exits rather than running mapless."""
         with pytest.raises(SystemExit) as exc:
-            _load_register_map("/nonexistent/path/to/register_map.json")
+            _load_register_map(value)
         assert exc.value.code == 1
 
     def test_duplicate_name_map_exits(self, tmp_path):
