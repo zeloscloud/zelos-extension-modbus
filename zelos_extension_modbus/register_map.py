@@ -317,6 +317,17 @@ def resolve_map_file(value: str) -> Path:
     return path
 
 
+def load_configured_map(value: str) -> RegisterMap:
+    """A device's `register_map_file`: the map itself as JSON when it starts with
+    `{`, else a path (see ``resolve_map_file``)."""
+    if not value.lstrip().startswith("{"):
+        return RegisterMap.from_file(resolve_map_file(value.strip()))
+    try:
+        return RegisterMap.from_dict(json.loads(value))
+    except Exception as e:
+        raise ValueError(f"Invalid inline register map: {e}") from e
+
+
 def map_output_path(value: str, overwrite: bool = False) -> Path:
     """Where a map may be written: absolute or ~ (as for reading), in an existing
     directory; an existing file only with ``overwrite``. ValueError otherwise."""

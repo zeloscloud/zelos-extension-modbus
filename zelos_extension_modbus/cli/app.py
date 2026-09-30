@@ -29,7 +29,7 @@ from zelos_extension_modbus.constants import (
     Transport,
     name_error,
 )
-from zelos_extension_modbus.register_map import RegisterMap, resolve_map_file
+from zelos_extension_modbus.register_map import RegisterMap, load_configured_map
 from zelos_extension_modbus.sunspec import build_register_map
 
 logger = logging.getLogger(__name__)
@@ -172,19 +172,19 @@ def start_demo_server() -> threading.Thread:
     return thread
 
 
-def _load_register_map(path_str: str | None) -> RegisterMap | None:
-    """Load a register map from a file path string.
+def _load_register_map(value: str | None) -> RegisterMap | None:
+    """Load a device's configured map: a file path or inline JSON.
 
-    An unset/empty path returns None: the device auto-scans (or, with
+    An unset/empty value returns None: the device auto-scans (or, with
     auto_scan off, polls nothing). A configured-but-broken map (missing file,
     or a load/validation failure) is a config error and exits: silently
     degrading to no-data would hide a misconfiguration behind an empty signal
     tree.
     """
-    if not path_str:
+    if not value:
         return None
     try:
-        reg_map = RegisterMap.from_file(resolve_map_file(path_str))
+        reg_map = load_configured_map(value)
         logger.info(f"Loaded register map with {len(reg_map.registers)} registers")
         return reg_map
     except Exception as e:
