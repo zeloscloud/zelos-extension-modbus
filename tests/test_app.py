@@ -10,8 +10,10 @@ Covers the seams that turn config.json into running connections:
 
 import asyncio
 import importlib
+import importlib.util
 import json
 import tomllib
+from fnmatch import fnmatch
 from pathlib import Path
 
 import click
@@ -289,3 +291,15 @@ def test_console_script_in_package():
     module, attr = scripts["zelos-extension-modbus"].split(":")
     assert module.startswith("zelos_extension_modbus.")
     assert isinstance(getattr(importlib.import_module(module), attr), click.Group)
+
+
+def test_archive_named_from_pyproject(monkeypatch):
+    """`just package` names the archive from pyproject, not the directory, so
+    .gitignore covers it in any checkout or worktree."""
+    spec = importlib.util.spec_from_file_location("pkg", ROOT / "scripts/package_extension.py")
+    package = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(package)
+    monkeypatch.chdir(ROOT)
+    name = package.archive_file_name("9.9.9")
+    assert name == "zelos-extension-modbus-v9.9.9.tar.gz"
+    assert any(fnmatch(name, p) for p in (ROOT / ".gitignore").read_text().splitlines())
