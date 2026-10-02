@@ -76,7 +76,7 @@ Troubleshooting serial/USB connection failures: see [DEBUG.md](DEBUG.md).
 
 ### Polling
 
-Rate precedence: register `rate` > device Rate > `default_rate` > transport default; a map `min_rate` floors it. Transport default: TCP 1 s matches Modbus Poll/Kepware/Ignition; serial buses are shared and a large map cannot sweep at 1 s at 9600 baud, so RTU defaults to 10 s. Each connection runs one scheduler across its devices:
+Rate precedence: register `rate` > device Rate > `default_rate` > transport default; a map `min_rate` floors it. Transport default: TCP 1 s matches common SCADA and Modbus test tools; serial buses are shared and a large map cannot sweep at 1 s at 9600 baud, so RTU defaults to 10 s. Each connection runs one scheduler across its devices:
 
 - **Tick**: every due block at the connection's fastest rate first, then at most one other item, most overdue first: a due slower block, a demoted device's probe, or a SunSpec discovery. Slow work spreads over the ticks instead of bursting and stalling fast points; blocks never mix rates. A block holding a `scale_ref` exponent is read in the same tick as every block it scales.
 - **Requested vs achieved**: `get_status` / `get_snapshot` / `list_devices` report `requested_rate`, `achieved_rate` (smoothed read interval) and `overload_pct` (100 x mean lateness / rate) for the worst tier, and every tier under `tiers`. A tier over 100% for 30 s warns once, and logs its recovery.
