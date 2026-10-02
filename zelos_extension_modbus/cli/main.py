@@ -188,7 +188,7 @@ def trace(
     """
     import asyncio
 
-    from zelos_extension_modbus.cli.app import init_sdk, run_connections
+    from zelos_extension_modbus.cli.app import device_settings, init_sdk, run_connections
     from zelos_extension_modbus.client import ModbusConnection, ModbusDevice
     from zelos_extension_modbus.register_map import RegisterMap
     from zelos_extension_modbus.scan import endpoint
@@ -222,10 +222,16 @@ def trace(
         unit_id=unit_id,
         register_map=register_map,
         rate=rate,
-        block_reads=block_reads,
-        max_block_size=max_block_size,
-        max_read_gap=max_read_gap,
         name=device_name or None,
+        # A map `device` block overrides these, as in app mode.
+        **device_settings(
+            register_map,
+            {
+                "block_reads": block_reads,
+                "max_block_size": max_block_size,
+                "max_read_gap": max_read_gap,
+            },
+        ),
     )
 
     # Register devices and actions BEFORE init: init advertises them.

@@ -23,8 +23,10 @@ from zelos_extension_modbus.cli.app import (
     _create_connections,
     _load_register_map,
     _old_config_error,
+    device_settings,
     resolve_advanced,
 )
+from zelos_extension_modbus.register_map import RegisterMap
 
 ROOT = Path(__file__).parent.parent
 SCHEMA = ROOT / "config.schema.json"
@@ -116,12 +118,15 @@ class TestCreateConnections:
         ids=["map-device", "advanced", "default"],
     )
     def test_setting_precedence(self, tmp_path, device, advanced, expected):
-        """Per key: map device block > advanced > constructor default."""
+        """Per key: map device block > advanced > constructor default; the CLI
+        trace applies the same device_settings with its flags as `advanced`."""
         map_file = tmp_path / "map.json"
         map_file.write_text(json.dumps({"device": device, "events": {}}))
         config = {"connections": [_tcp(devices=[{"register_map_file": str(map_file)}])]}
         (conn,) = _create_connections(config, advanced)
         assert conn.devices[0].max_block_size == expected
+        settings = device_settings(RegisterMap.from_file(map_file), advanced)
+        assert settings.get("max_block_size", 125) == expected
 
     @pytest.mark.parametrize(
         ("transport", "register", "device", "advanced", "expected"),
