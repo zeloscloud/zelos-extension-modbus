@@ -9,9 +9,12 @@ Covers the seams that turn config.json into running connections:
 """
 
 import asyncio
+import importlib
 import json
+import tomllib
 from pathlib import Path
 
+import click
 import pytest
 from zelos_sdk.extensions.config import load_config
 
@@ -23,7 +26,8 @@ from zelos_extension_modbus.cli.app import (
     resolve_advanced,
 )
 
-SCHEMA = Path(__file__).parent.parent / "config.schema.json"
+ROOT = Path(__file__).parent.parent
+SCHEMA = ROOT / "config.schema.json"
 
 
 def _tcp(**conn):
@@ -272,3 +276,11 @@ def test_unreachable_server_at_start_exits(caplog):
     loop.close()
     assert exc.value.code == 1
     assert "Connection 'gw' (127.0.0.1:" in caplog.text and "cannot connect" in caplog.text
+
+
+def test_console_script_in_package():
+    """The installed script imports from the wheel's package, not the repo-root main.py."""
+    scripts = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["scripts"]
+    module, attr = scripts["zelos-extension-modbus"].split(":")
+    assert module.startswith("zelos_extension_modbus.")
+    assert isinstance(getattr(importlib.import_module(module), attr), click.Group)
