@@ -41,7 +41,7 @@ dev = [
 ]
 
 [project.scripts]
-zelos-extension-modbus = "main:cli"
+zelos-extension-modbus = "zelos_extension_modbus.cli.main:cli"
 
 [build-system]
 requires = ["hatchling"]
