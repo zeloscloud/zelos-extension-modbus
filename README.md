@@ -101,7 +101,7 @@ Each register is its own trace event, and the SDK holds roughly 0.75 MB per even
 
 ### Raw registers
 
-Registers polled or read without a map name (auto-scan, `read_register`) are traced one event per register, keyed by its address in the device's base, with one field `<address>_value`: holding register 123 is `Modbus/<connection>/<device>/registers/123`, field `123_value`. Input registers, coils and discrete inputs use `input_registers/`, `coils/` and `discrete_inputs/`, so the tables never share an event. Values are raw uint16 words, or booleans for bits.
+Registers polled or read without a map name (auto-scan, `read_register`) are traced one event per register, keyed by its address in the device's base, with one field `<address>_value`: holding register 123 is `Modbus/<connection>/<device>/holding_registers/123`, field `123_value`. Input registers, coils and discrete inputs use `input_registers/`, `coils/` and `discrete_inputs/` (the spec's table names), so the tables never share an event. Values are raw uint16 words, or booleans for bits.
 
 ## Register Map
 
@@ -254,7 +254,7 @@ The extension provides actions accessible from the Zelos App (and to app extensi
 | `write_named_register` | Write a mapped register by `event/name`; returns and caches the value actually written. A value the register cannot hold exactly (a fraction of a raw step) is refused; a coil takes only true/false or 0/1 |
 | `list_registers` | Register catalog (map or auto-scan): `event/name` path, address, datatype, scale, unit, effective `rate` (0 = not polled) |
 | `list_writable_registers` | Same catalog, writable registers only |
-| `save_map` | Write the device's current map to a JSON file: its loaded map, or for an auto-scanned device the registers found so far (uint16 words and bools, `writable: false`, its `address_base`, one event per register named as auto-scan traces it (`registers/123`, field `123_value`), so loading it keeps every signal path, `rate` = the auto-scan rate, ignored registers left out). Load it as the Register Map File. Path absolute or `~`, parent directory must exist; an existing file only with `overwrite` |
+| `save_map` | Write the device's current map to a JSON file: its loaded map, or for an auto-scanned device the registers found so far (uint16 words and bools, `writable: false`, its `address_base`, one event per register named as auto-scan traces it (`holding_registers/123`, field `123_value`), so loading it keeps every signal path, `rate` = the auto-scan rate, ignored registers left out). Load it as the Register Map File. Path absolute or `~`, parent directory must exist; an existing file only with `overwrite` |
 
 A failed request returns `success: false` with the reason in `error`: `no response from device`, `device refused: exception 02 (illegal data address)`, or `cannot connect to <endpoint>`.
 
