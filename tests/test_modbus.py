@@ -210,8 +210,9 @@ class TestRegisterMap:
         assert inline == load_configured_map("~/meter.json")
         with pytest.raises(ValueError, match=r"Invalid inline register map: .*line 1 column 12"):
             load_configured_map('{"events": ')
-        with pytest.raises(ValueError, match="Invalid inline register map: .*'address'"):
-            load_configured_map('{"events": {"e": [{"name": "v"}]}}')
+        missing = "Invalid inline register map: register 2 in event 'e' is missing 'address'"
+        with pytest.raises(ValueError, match=missing):
+            load_configured_map('{"events": {"e": [{"address": 1}, {"name": "v"}]}}')
         with pytest.raises(ValueError, match="absolute or start with ~"):
             load_configured_map("maps/meter.json")
 
