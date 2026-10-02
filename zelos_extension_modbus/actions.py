@@ -383,8 +383,8 @@ def get_snapshot(device: str) -> dict[str, Any]:
 @zelos_sdk.action(
     "Read Register",
     "Read registers by address, in the device map's base (default 1-based). Each value is "
-    "also traced as event registers/<address> (input_registers/, coils/, discrete_inputs/ "
-    "for the other tables), field <address>_value.",
+    "also traced as event holding_registers/<address>, field hr_<address> (input_registers/ "
+    "ir_, coils/ coil_, discrete_inputs/ di_ for the other tables).",
 )
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 @_address_field()
