@@ -103,7 +103,7 @@
                         "auto_scan": {
                           "type": "boolean",
                           "title": "Auto-scan",
-                          "description": "Without a register map file: at start, discover the device's valid registers with reads only (FC 01-04; holding, input, coils, discrete inputs) and poll each one as it is found at the device Rate, traced as registers/<address> (input_registers/, coils/, discrete_inputs/). Off: nothing is polled without a map. Save Map turns what it found into a map file.",
+                          "description": "Without a register map file: at start, discover the device's valid registers with reads only (FC 01-04; holding, input, coils, discrete inputs) and poll each one as it is found at the device Rate, traced as holding_registers/<address>, field hr_<address> (input_registers/ ir_, coils/ coil_, discrete_inputs/ di_). Off: nothing is polled without a map. Save Map turns what it found into a map file.",
                           "default": true,
                           "ui:widget": "toggle"
                         }
