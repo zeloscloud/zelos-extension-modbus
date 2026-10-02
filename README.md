@@ -84,8 +84,8 @@ Rate precedence: register `rate` > device Rate > `default_rate`; a map `min_rate
 - **Demotion**: after `demote_after` consecutive timeouts or gateway exceptions 0A/0B (polling or SunSpec discovery) a device is skipped and its fields are not logged; one single-attempt probe (no retries) of a due block after 10 s, doubling to `demote_max_s` (a device awaiting SunSpec discovery is probed with one read at 40001); any answer resumes it, and its achieved rate is null until a normal interval passes. `get_status` shows `demoted` and `retry_in_s`.
 - **Counters**: `successful_reads` and `failed_reads` per device (a timeout is a failed read). A failed read logs none of its block's fields that cycle.
 - **Link down**: every read that falls due counts in `failed_reads`, and `achieved_rate` / `overload_pct` are null until reads resume. Reconnects wait 3 s, doubling to 60 s; a poll that keeps the link resets it. The first failure is logged, then only when the wait grows.
-- **Unreachable at start**: a connection whose server cannot be reached at start stops the extension with `Connection 'gw' (10.0.0.99:502): cannot connect` (fix the endpoint and start again); once a link has been up, drops are retried on the schedules above. A device behind a reachable server with no answer since start (timeout or gateway 0A/0B; an exception answer counts as present) logs one ERROR (`Device 'gw/ghost' (unit 7): no response since start`), keeps its reason in `error`, and is retried as Kepware/Ignition do; its first answer logs `responding`. Nothing is traced for it meanwhile.
-- **Illegal addresses** (Kepware "Deactivate Tags on Illegal Address"): block size is static (map `max_block_size` > Advanced > 125). A block answered with exception 02/03 logs one warning and is retried every 10 min, also across demotion; other blocks keep polling. `get_status` lists it under `refused` (`range`, `code`, `retry_in_s`). Run `verify` to find the bad registers, then fix the map or `max_block_size` (scan learns it). Other exception codes warn once per block and keep polling.
+- **Unreachable at start**: a connection whose server cannot be reached at start stops the extension with `Connection 'gw' (10.0.0.99:502): cannot connect` (fix the endpoint and start again); once a link has been up, drops are retried on the schedules above. A device behind a reachable server with no answer since start (timeout or gateway 0A/0B; an exception answer counts as present) logs one ERROR (`Device 'gw/ghost' (unit 7): no response since start`), keeps its reason in `error`, and is retried as common SCADA tools do; its first answer logs `responding`. Nothing is traced for it meanwhile.
+- **Illegal addresses** (deactivated, as common SCADA tools do): block size is static (map `max_block_size` > Advanced > 125). A block answered with exception 02/03 logs one warning and is retried every 10 min, also across demotion; other blocks keep polling. `get_status` lists it under `refused` (`range`, `code`, `retry_in_s`). Run `verify` to find the bad registers, then fix the map or `max_block_size` (scan learns it). Other exception codes warn once per block and keep polling.
 - **Shutdown**: SIGTERM/SIGINT cancels every connection mid-request and disconnects; past 3 s the process exits anyway.
 
 ### Auto-scan
@@ -94,7 +94,7 @@ A device with no register map file (and not `sunspec`) discovers its registers a
 
 - **Discovery**: scan's range finder (see [Scan](#scan)) over holding registers, input registers, coils and discrete inputs, TCP 1-65536, RTU 1-10000, 30001-31000, 40001-41000, 50001-51000. Reads only (FC 01-04), through the connection's request path: one discovery read per scheduler tick, only when nothing else is overdue, so other devices keep their rates. It learns the device's largest read into `max_block_size` / `max_bit_block_size`. A read with no response is retried (and counts toward demotion); after `demote_after` in a row while the device answers other reads, that range counts as a hole.
 - **Polling**: each valid register polls from the moment it is found, at the device Rate or `auto_scan_rate` (10 s), traced as a raw register (below).
-- **Failed registers**: per block, as Kepware (no bisecting): a block that answers exception 02/03, or `demote_after` times nothing while the device answers others, is ignored whole, every register in it, and retried every 10 min.
+- **Failed registers**: per block, as common SCADA tools do (no bisecting): a block that answers exception 02/03, or `demote_after` times nothing while the device answers others, is ignored whole, every register in it, and retried every 10 min.
 - **Status**: `get_status` / `get_snapshot` / `list_devices` carry `auto_scan`: `state` (`scanning` / `done`), `table` being scanned, `found`, `ignored`. `list_registers` lists what was found.
 - **State**: in memory only; discovery re-runs on every start. `save_map` writes the finds as a map file to load instead, with the same trace paths and fields.
 
@@ -129,7 +129,7 @@ A register map file defines which registers to read and how to decode them. Even
 
 ### Addressing
 
-Addresses are 1-based by default, the Kepware/Ignition convention: holding register `40001` in a vendor sheet is `"type": "holding", "address": 40001`, sent as wire address 40000 (same for all four tables). Maps, default names (`r<address>`), `list_registers`, logs, verify reports, scan output and the raw actions (`read_register`, `write_*`) all use the map's base; a device without a map uses 1. A map numbered from wire address 0 sets `"device": {"address_base": 0}`.
+Addresses are 1-based by default, the common SCADA convention: holding register `40001` in a vendor sheet is `"type": "holding", "address": 40001`, sent as wire address 40000 (same for all four tables). Maps, default names (`r<address>`), `list_registers`, logs, verify reports, scan output and the raw actions (`read_register`, `write_*`) all use the map's base; a device without a map uses 1. A map numbered from wire address 0 sets `"device": {"address_base": 0}`.
 
 ### Register Fields
 
@@ -257,7 +257,7 @@ The extension provides actions accessible from the Zelos App (and to app extensi
 
 A failed request returns `success: false` with the reason in `error`: `no response from device`, `device refused: exception 02 (illegal data address)`, or `cannot connect to <endpoint>`.
 
-Every write result carries `outcome` (OPC UA Good/Bad/Uncertain): `ok`; `refused` (not written: read-only, raw writes disabled, bad value, device exception, cannot connect); or `unknown` (no response, or gateway exception 0B: the write may have landed, so read back before retrying). `success` is true only for `ok`. The raw write actions need `allow_raw_writes` and never write an address the map marks read-only. Writes retry like reads, `retries` extra attempts (Kepware "Attempts Before Timeout"); FC 5/6/15/16 write absolute values, so a repeat is idempotent.
+Every write result carries `outcome` (OPC UA Good/Bad/Uncertain): `ok`; `refused` (not written: read-only, raw writes disabled, bad value, device exception, cannot connect); or `unknown` (no response, or gateway exception 0B: the write may have landed, so read back before retrying). `success` is true only for `ok`. The raw write actions need `allow_raw_writes` and never write an address the map marks read-only. Writes retry like reads, `retries` extra attempts; FC 5/6/15/16 write absolute values, so a repeat is idempotent.
 
 ## Development
 

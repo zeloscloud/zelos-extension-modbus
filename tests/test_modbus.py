@@ -1267,7 +1267,7 @@ class TestPollScheduler:
         assert dev.failed_reads == 4 and dev.rate_status()["achieved_rate"] is None
 
     def test_refused_block_deactivated(self, caplog):
-        """Exception 02 deactivates its whole block (static size, Kepware): one warning in
+        """Exception 02 deactivates its whole block (static size): one warning in
         the map's base, its fields unlogged, the rest keep polling, retried every 10 min."""
         events = {"e": [{"name": f"v{a}", "address": a} for a in range(1, 9)]}
         dev, reads = _fake_device(events, bad={3}, max_block_size=4)  # wire 3 = map 4
