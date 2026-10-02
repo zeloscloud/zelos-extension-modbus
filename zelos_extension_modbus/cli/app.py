@@ -192,6 +192,14 @@ def _load_register_map(value: str | None) -> RegisterMap | None:
         sys.exit(1)
 
 
+def device_settings(register_map: RegisterMap | None, advanced: dict[str, Any]) -> dict[str, Any]:
+    """ModbusDevice tuning kwargs: the map `device` block over ``advanced``."""
+    map_device = register_map.device if register_map else {}
+    settings = {k: advanced[k] for k in DEVICE_KEYS if k in advanced}
+    settings.update({k: map_device[k] for k in DEVICE_KEYS + MAP_DEVICE_KEYS if k in map_device})
+    return settings
+
+
 def _map_source(dev_config: dict[str, Any]) -> dict[str, Any]:
     """`register_map` or `map_loader` kwargs for a device's configured map source."""
     source = dev_config.get("register_map", "file")
@@ -250,11 +258,6 @@ def _create_connections(config: dict[str, Any], advanced: dict[str, Any]) -> lis
                 register_map or "map_loader" in map_source
             )
             rate = advanced.get("default_rate", TRANSPORT_RATE[conn.transport])
-            map_device = register_map.device if register_map else {}
-            settings = {k: advanced[k] for k in DEVICE_KEYS if k in advanced}
-            settings.update(
-                {k: map_device[k] for k in DEVICE_KEYS + MAP_DEVICE_KEYS if k in map_device}
-            )
             dev = ModbusDevice(
                 conn,
                 **map_source,
@@ -264,7 +267,7 @@ def _create_connections(config: dict[str, Any], advanced: dict[str, Any]) -> lis
                 auto_scan=auto_scan,
                 # App config only: a map must not grant itself raw writes.
                 allow_raw_writes=advanced.get("allow_raw_writes", False),
-                **settings,
+                **device_settings(register_map, advanced),
             )
             for other in conn.devices[:-1]:
                 if dev.unit_id == other.unit_id:
