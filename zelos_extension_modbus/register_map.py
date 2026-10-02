@@ -46,7 +46,7 @@ override the Advanced settings; byte_order is the default for registers that
 don't set one. min_rate (s) floors every register's rate. close_after_sweep
 closes the connection whenever polling goes idle (single-slot devices).
 address_base (default 1) is the numbering of the map's addresses: 1 = the
-user-layer convention of Kepware, Ignition and most vendor sheets (holding
+user-layer convention of common SCADA tools and most vendor sheets (holding
 40001 is wire address 40000), 0 = raw wire addresses. Everything user-facing
 (names, catalog, logs, verify reports, raw actions) uses the map's base; only
 the wire is 0-based. Unknown keys or bad values raise a ValueError at load.

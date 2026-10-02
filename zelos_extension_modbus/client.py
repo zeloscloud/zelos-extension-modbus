@@ -55,7 +55,7 @@ MAP_PROBE_ADDRESS = 40000
 RECONNECT_INITIAL = 3.0
 RECONNECT_MAX = 60.0
 
-# Auto-demotion (Kepware): a demoted device is probed after this many seconds,
+# Auto-demotion, as common SCADA tools do: a demoted device is probed after this many seconds,
 # doubling per failed probe up to demote_max_s.
 DEMOTE_BACKOFF = 10.0
 
@@ -85,8 +85,8 @@ NO_RESPONSE = "no response from device"
 # A write that got no answer may still have landed.
 OUTCOME_UNKNOWN = " (the write may have landed; read back before retrying)"
 
-# A block the device refuses (illegal address) is retried this often (Kepware
-# "Deactivate Tags on Illegal Address").
+# A block the device refuses (illegal address) is retried this often, as common
+# SCADA tools do.
 REFUSED_RETRY = 600.0
 # Block error for an auto-scanned block that never answers while the device
 # answers others: deactivated like a refused block.
@@ -879,7 +879,7 @@ class ModbusDevice:
         self.demote_max_s = _clamped("demote_max_s", demote_max_s, DEMOTE_BACKOFF, float("inf"))
 
         self._poll_count = 0
-        # Kepware-style counters over poll reads; a timeout is a failed read.
+        # SCADA-style counters over poll reads; a timeout is a failed read.
         self.successful_reads = 0
         self.failed_reads = 0
         # Why the device is not polling (unreachable, map discovery failed), else None.
@@ -1373,7 +1373,8 @@ class ModbusDevice:
 
         A scale_ref register is read at the fastest rate of the registers it
         scales, and its block rides along whenever a block it scales is read.
-        Block size is static (Kepware): a refused block is retried, never split.
+        Block size is static, as in common SCADA tools: a refused block is
+        retried, never split.
         A block that survives a re-plan (auto-scan growth) keeps its state.
         """
         old = {(b.read.type, b.read.address, b.read.count, b.rate): b for b in self._blocks or []}
@@ -1474,10 +1475,10 @@ class ModbusDevice:
     def _failed(self, block: _Block, now: float, code: int) -> None:
         """An exception answer (or SILENT) for ``block``: warned once per code.
 
-        Illegal address or SILENT deactivates the block (Kepware): retried every
-        REFUSED_RETRY. Block size is static, so one bad address silences its
-        whole block; ``verify`` reads register by register to find it. Other
-        codes keep the block polled.
+        Illegal address or SILENT deactivates the block, as common SCADA tools
+        do: retried every REFUSED_RETRY. Block size is static, so one bad
+        address silences its whole block; ``verify`` reads register by register
+        to find it. Other codes keep the block polled.
         """
         if code in DEACTIVATED:
             block.next_due = now + REFUSED_RETRY
