@@ -22,7 +22,7 @@ dist/
 *.egg-info/
 pip-wheel-metadata/
 zelos_extension_modbus.egg-info/
-zelos-modbus-v*.tar.gz
+zelos-extension-modbus-v*.tar.gz
 actions.json
 scripts/__pycache__/
 
