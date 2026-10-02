@@ -1601,10 +1601,10 @@ class TestInitTraceSource:
     @pytest.mark.parametrize(
         ("reg_type", "reply", "event", "field"),
         [
-            ("holding", {"registers": [7, 8]}, "holding_registers/123", "123_value"),
-            ("input", {"registers": [7, 8]}, "input_registers/123", "123_value"),
-            ("coil", {"bits": [True, False]}, "coils/123", "123_value"),
-            ("discrete_input", {"bits": [True, False]}, "discrete_inputs/123", "123_value"),
+            ("holding", {"registers": [7, 8]}, "holding_registers/123", "hr_123"),
+            ("input", {"registers": [7, 8]}, "input_registers/123", "ir_123"),
+            ("coil", {"bits": [True, False]}, "coils/123", "coil_123"),
+            ("discrete_input", {"bits": [True, False]}, "discrete_inputs/123", "di_123"),
         ],
     )
     def test_raw_read_traced(self, reg_type, reply, event, field):
@@ -1627,10 +1627,10 @@ class TestInitTraceSource:
         values = next(iter(reply.values()))
         bits = reg_type in ("coil", "discrete_input")
         dtype = zelos_sdk.DataType.Boolean if bits else zelos_sdk.DataType.UInt16
-        second = event.replace("123", "124")
+        second, field2 = event.replace("123", "124"), field.replace("123", "124")
         assert logged == {
             f"c/unit1/{event}": [field, dtype, {field: values[0]}],
-            f"c/unit1/{second}": ["124_value", dtype, {"124_value": values[1]}],
+            f"c/unit1/{second}": [field2, dtype, {field2: values[1]}],
         }
         assert dev.last_values[f"{event}/{field}"][0] == values[0]
         dev.connection.request = AsyncMock(return_value=ExceptionResponse(3, 2))
@@ -2165,8 +2165,8 @@ class TestActionsUnit:
         assert {e: list(f) for e, f in values.items()} == {
             e: [r.field_name for r in regs] for e, regs in loaded.events.items()
         }
-        assert values["holding_registers/1006"] == {"1006_value": target["holding"][1005]}
-        assert values["coils/16"] == {"16_value": False}
+        assert values["holding_registers/1006"] == {"hr_1006": target["holding"][1005]}
+        assert values["coils/16"] == {"coil_16": False}
         assert len(polled_reads) == dev_reads and polled.failed_reads == 0
 
         mapped = tmp_path / "mapped.json"
