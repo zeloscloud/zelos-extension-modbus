@@ -1343,7 +1343,7 @@ class TestPollScheduler:
         want = {
             f"{prefix}/{a + 1}"
             for table, prefix in [
-                ("holding", "registers"),
+                ("holding", "holding_registers"),
                 ("input", "input_registers"),
                 ("coil", "coils"),
                 ("discrete_input", "discrete_inputs"),
@@ -1372,13 +1372,15 @@ class TestPollScheduler:
         run = asyncio.get_event_loop().run_until_complete
         for t in range(polls):
             values = run(poll_once(dev, now=10.0 + t))
-        assert "registers/1" in values and "registers/11" not in values
+        assert "holding_registers/1" in values and "holding_registers/11" not in values
         status = dev.auto_scan_status()
         assert (status["found"], status["ignored"]) == (10, 5)
         (row,) = dev.rate_status()["refused"]
         assert (row["range"], row["code"]) == ("holding 11-15", code)
         assert not dev.demoted
-        assert list(dev.discovered_map()["events"]) == [f"registers/{a}" for a in range(1, 6)]
+        assert list(dev.discovered_map()["events"]) == [
+            f"holding_registers/{a}" for a in range(1, 6)
+        ]
 
     @pytest.mark.parametrize(("code", "demoted", "warnings"), [(0x0B, True, 0), (0x04, False, 1)])
     def test_exception_answers(self, caplog, code, demoted, warnings):
@@ -1599,7 +1601,7 @@ class TestInitTraceSource:
     @pytest.mark.parametrize(
         ("reg_type", "reply", "event", "field"),
         [
-            ("holding", {"registers": [7, 8]}, "registers/123", "123_value"),
+            ("holding", {"registers": [7, 8]}, "holding_registers/123", "123_value"),
             ("input", {"registers": [7, 8]}, "input_registers/123", "123_value"),
             ("coil", {"bits": [True, False]}, "coils/123", "123_value"),
             ("discrete_input", {"bits": [True, False]}, "discrete_inputs/123", "123_value"),
@@ -2163,7 +2165,7 @@ class TestActionsUnit:
         assert {e: list(f) for e, f in values.items()} == {
             e: [r.field_name for r in regs] for e, regs in loaded.events.items()
         }
-        assert values["registers/1006"] == {"1006_value": target["holding"][1005]}
+        assert values["holding_registers/1006"] == {"1006_value": target["holding"][1005]}
         assert values["coils/16"] == {"16_value": False}
         assert len(polled_reads) == dev_reads and polled.failed_reads == 0
 
