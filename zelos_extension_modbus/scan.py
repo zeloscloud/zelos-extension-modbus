@@ -1,9 +1,11 @@
 """Read-only device discovery (scan) and register-map verification.
 
 Pipeline per device: S0 reach (unit sweep; RTU serial autodetect), S1 identify
-(FC 43/14, FC 17), SunSpec marker detection, S3 valid ranges per table, S4
-classify (sample and guess datatype/byte order), S5 emit a draft register map
-plus a report. ``verify_map`` reads every register of an existing map once.
+(FC 43/14, FC 17), SunSpec marker detection, S3 valid ranges per table, S5 emit
+a draft register map plus a report. ``verify_map`` reads every register of an
+existing map. Nothing is inferred from values: the draft lists each readable
+address as a raw uint16 word or bool, and the user sets datatypes, byte order
+and scaling from the datasheet, as common Modbus tools do.
 
 Safety: every request goes through ``ScanLink.request``, which only sends the
 function codes in ``ALLOWED``: 01-04 reads, 43/14 device identification and
@@ -18,9 +20,9 @@ only reads, FC 01-04).
 
 Internally addresses are 0-based wire addresses; everything user-facing
 (windows, report ranges, draft maps) is 1-based, the maps' default
-address_base. Register names carry the table and that address: ``hr40001`` is
-holding register 40001 (wire 40000), ``ir``/``co``/``di`` for input/coil/
-discrete input.
+address_base. Draft events and fields are ``raw_names``, as auto-scan traces
+them: holding register 40001 (wire 40000) is ``holding_registers/40001``,
+field ``hr_40001``.
 """
 
 from __future__ import annotations
@@ -44,17 +46,15 @@ from zelos_extension_modbus.client import (
     ModbusConnection,
     decode_register,
     decode_value,
-    encode_value,
     json_safe,
 )
 from zelos_extension_modbus.constants import (
     BIT_REGISTER_TYPES,
     MODBUS_MAX_BIT_READ_COUNT,
     MODBUS_MAX_READ_COUNT,
-    SLOW_RATE,
-    ByteOrder,
     RegisterType,
     Transport,
+    raw_names,
 )
 from zelos_extension_modbus.register_map import Register, RegisterMap
 from zelos_extension_modbus.serial_diag import diagnose_serial_port
@@ -73,13 +73,8 @@ ALLOWED: dict[str, int] = {
     "read_device_information": 0x2B,  # pymodbus only sends MEI type 14 here
 }
 
-#: Table -> register-name prefix, in scan order.
-TABLES: dict[str, str] = {
-    RegisterType.HOLDING: "hr",
-    RegisterType.INPUT: "ir",
-    RegisterType.COIL: "co",
-    RegisterType.DISCRETE_INPUT: "di",
-}
+#: Tables in scan order.
+TABLES: tuple[str, ...] = tuple(RegisterType)
 
 DEFAULT_TIMEOUT = 0.5
 #: Gap between requests on RTU (Chipkin); TCP devices pace themselves. Busy
@@ -91,8 +86,6 @@ GAP_STEP_MS = 10
 MAX_GAP_MS = 500
 SLOW_AFTER = 2
 SPEED_UP_AFTER = 20
-DEFAULT_SAMPLES = 10
-DEFAULT_PERIOD = 5.0
 #: Consecutive timeouts that mark a link (scan: with nothing heard yet) or unit silent.
 SILENT_AFTER = 16
 #: verify_map's default wall clock, the verify action's longest.
@@ -121,7 +114,6 @@ BUDGETS: dict[str, tuple[int, float]] = {
     "reach": (600, 300.0),
     "identify": (20, 15.0),
     "ranges": (30000, 900.0),
-    "classify": (20000, 600.0),
 }
 
 #: Hole probing: exact for the first 125 misses, then every 10th address,
@@ -142,12 +134,11 @@ DEVICE_ID_NAMES = {
 NOTES = [
     "Scan only reads, but some devices clear latched alarms or counters on read, "
     "or expose FIFO registers. Review before scanning production equipment.",
-    "Devices that answer unmapped addresses with 0 cannot be told apart from real "
-    "zeros; never-changing zero registers are marked low confidence.",
+    "Devices that answer unmapped addresses with 0 make every address look readable; "
+    "the draft then lists them all.",
+    "The draft lists raw uint16 words and bools. Set datatypes, byte order and scaling "
+    "from the device's datasheet.",
 ]
-
-# Preference order when byte orders decode identically.
-_ORDERS = (ByteOrder.BIG, ByteOrder.BIG_SWAP, ByteOrder.LITTLE, ByteOrder.LITTLE_SWAP)
 
 
 class BudgetExceeded(Exception):
@@ -662,236 +653,28 @@ class Discovery:
 
 
 # ---------------------------------------------------------------------------
-# S4 classify
-# ---------------------------------------------------------------------------
-
-
-def _changes(col: list[int]) -> int:
-    return sum(a != b for a, b in zip(col, col[1:], strict=False))
-
-
-def _word_class(col: list[int]) -> str:
-    if not col or _changes(col) == 0:
-        return "constant"
-    steps = [(b - a) & 0xFFFF for a, b in zip(col, col[1:], strict=False)]
-    if all(s < 0x8000 for s in steps):
-        return "counter"
-    if all(bin(a ^ b).count("1") <= 1 for a, b in zip(col, col[1:], strict=False)):
-        return "bitfield"
-    return "analog"
-
-
-def _plausible_float(x: float) -> bool:
-    return math.isfinite(x) and (x == 0 or 1e-6 <= abs(x) <= 1e9)
-
-
-#: Which of a 32-bit value's two words carries the high half, per order.
-_MS_INDEX = {o: encode_value(0xFFFF0000, "uint32", byte_order=o).index(0xFFFF) for o in _ORDERS}
-
-
-def _span(values: list[Any]) -> str:
-    lo, hi = min(values), max(values)
-    fmt = (lambda v: f"{v:.6g}") if isinstance(lo, float) else str
-    return fmt(lo) if lo == hi else f"{fmt(lo)}..{fmt(hi)}"
-
-
-def pair_verdict(w0: list[int], w1: list[int], order: str) -> dict[str, Any] | None:
-    """float32 / counter uint32 verdict for two adjacent word columns, or None."""
-    if not w0 or all(a == 0 and b == 0 for a, b in zip(w0, w1, strict=True)):
-        return None
-    ms, ls = (w0, w1) if _MS_INDEX[order] == 0 else (w1, w0)
-    ms_moves, ls_moves = _changes(ms), _changes(ls)
-    if ms_moves > ls_moves:
-        return None  # the high word moves more than the low: wrong order or not a pair
-    floats = [decode_value([a, b], "float32", 1, order) for a, b in zip(w0, w1, strict=True)]
-    if all(_plausible_float(f) for f in floats) and any(f != 0 for f in floats):
-        varying = ls_moves > 0
-        return {
-            "datatype": "float32",
-            "class": "analog" if varying else "constant",
-            "confidence": "high" if varying else "medium",
-            "evidence": f"float32 {order} {_span(floats)}",
-        }
-    ints = [decode_value([a, b], "uint32", 1, order) for a, b in zip(w0, w1, strict=True)]
-    rising = all(b >= a for a, b in zip(ints, ints[1:], strict=False)) and ints[-1] > ints[0]
-    if rising and ms[0] != 0:
-        carried = ms_moves > 0
-        return {
-            "datatype": "uint32",
-            "class": "counter",
-            "confidence": "high" if carried else "medium",
-            "evidence": f"uint32 {order} {_span(ints)}" + (", low word carried" if carried else ""),
-        }
-    return None
-
-
-def _string_at(cols: list[list[int]], i: int, order: str) -> int:
-    """Registers in the constant ASCII string starting at ``i``, or 0.
-
-    Words that are all plausible float32 pairs under ``order`` are not a
-    string: a float32's high word is printable for any magnitude 2..1e9, so
-    constant floats (a static device, or one sample) read as text.
-    """
-
-    def text(w: int, last: bool = False) -> bool:
-        hi, lo = w >> 8, w & 0xFF
-        return 32 <= hi < 127 and (32 <= lo < 127 or (last and lo == 0))
-
-    def const(col: list[int]) -> bool:
-        return bool(col) and _changes(col) == 0
-
-    j = i
-    while j < len(cols) and const(cols[j]) and text(cols[j][0]):
-        j += 1
-    if j < len(cols) and const(cols[j]) and text(cols[j][0], True):
-        j += 1  # odd-length text ends in a NUL low byte
-    chars = b"".join(c[0].to_bytes(2) for c in cols[i:j])
-    if j - i < 3 or sum(chr(b).isalpha() for b in chars) < 3:
-        return 0
-    pairs = [[cols[k][0], cols[k + 1][0]] for k in range(i, j - 1, 2)]
-    floats = [decode_value(p, "float32", 1, order) for p in pairs]
-    return 0 if all(_plausible_float(f) and f != 0 for f in floats) else j - i
-
-
-#: walk() verdict for a string run.
-STRING: dict[str, Any] = {"datatype": "string"}
-
-
-def classify_words(
-    table: str, start: int, cols: list[list[int]]
-) -> tuple[list[dict[str, Any]], str | None]:
-    """Draft registers for one contiguous word run and the byte order picked.
-
-    ``cols[i]`` holds the samples of wire address ``start + i``; the drafts are
-    1-based. The run is walked greedily, under the one byte order that
-    explains it best (devices rarely mix orders), for strings, then 32-bit
-    pairs, then single words. Float32 pairs rank orders first: a plausible
-    float needs its exponent byte in place, while a rising uint32 can pair any
-    two unrelated words, and shifting an aligned float block by one word pairs
-    every low word with the next high word, which also decodes plausibly.
-    """
-    prefix = TABLES[table]
-
-    def walk(order: str) -> list[tuple[int, int, dict[str, Any] | None]]:
-        out, i = [], 0
-        while i < len(cols):
-            if n := _string_at(cols, i, order):
-                out.append((i, n, STRING))
-                i += n
-                continue
-            v = pair_verdict(cols[i], cols[i + 1], order) if i + 1 < len(cols) else None
-            out.append((i, 2 if v else 1, v))
-            i += 2 if v else 1
-        return out
-
-    def score(order: str) -> tuple[int, int]:
-        """(float32 points, all points); a high-confidence pair is 2 points."""
-        points = [
-            (v["datatype"], 2 if v["confidence"] == "high" else 1)
-            for _, _, v in walk(order)
-            if v and v is not STRING
-        ]
-        return sum(p for t, p in points if t == "float32"), sum(p for _, p in points)
-
-    best = max(_ORDERS, key=lambda o: (*score(o), -_ORDERS.index(o)))
-    used_order = best if score(best)[1] else None
-    regs = []
-    for i, width, verdict in walk(best):
-        address = start + i + 1
-        reg: dict[str, Any] = {"name": f"{prefix}{address}", "type": table, "address": address}
-        col = cols[i]
-        if verdict is STRING:
-            text = b"".join(c[0].to_bytes(2) for c in cols[i : i + width])
-            text = text.split(b"\0", 1)[0].decode("ascii")
-            # Text is identity (model, serial, firmware): polled slowly. Numeric
-            # constants keep the device rate: a quiet alarm looks the same.
-            reg |= {"datatype": "string", "length": width, "rate": SLOW_RATE}
-            info = ("constant", "high" if width >= 4 else "medium", f"ascii {text!r}")
-        elif verdict:
-            reg |= {"datatype": verdict["datatype"], "byte_order": best}
-            info = (verdict["class"], verdict["confidence"], verdict["evidence"])
-        else:
-            reg["datatype"] = "uint16"
-            cls = _word_class(col)
-            if not col:
-                info = ("unsampled", "low", "not sampled")
-            elif cls == "constant" and col[0] == 0:
-                info = (cls, "low", "always 0 (unmapped on zero-fill devices?)")
-            else:
-                info = (cls, "medium", f"uint16 {_span(col)}")
-        cls, confidence, evidence = info
-        n = len(col)
-        reg |= {
-            "writable": False,
-            "confidence": confidence,
-            "description": f"{cls}; {evidence}" + (f" ({n} samples)" if n else ""),
-        }
-        regs.append(reg)
-    return regs, used_order
-
-
-def classify_bits(table: str, start: int, cols: list[list[bool]]) -> list[dict[str, Any]]:
-    """Draft registers (1-based) for one contiguous bit run from wire ``start``."""
-    prefix = TABLES[table]
-    regs = []
-    for i, col in enumerate(cols):
-        moves = _changes(col)
-        if not col:
-            confidence, desc = "low", "unsampled; not sampled"
-        elif moves:
-            confidence, desc = "high", f"toggling; {moves} changes"
-        elif not col[0]:
-            confidence, desc = "low", "constant; always off (unmapped on zero-fill devices?)"
-        else:
-            confidence, desc = "medium", "constant; always on"
-        regs.append(
-            {
-                "name": f"{prefix}{start + i + 1}",
-                "type": table,
-                "address": start + i + 1,
-                "datatype": "bool",
-                "writable": False,
-                "confidence": confidence,
-                "description": desc + (f" ({len(col)} samples)" if col else ""),
-            }
-        )
-    return regs
-
-
-async def sample_runs(
-    link: ScanLink,
-    unit: int,
-    table: str,
-    runs: list[tuple[int, int]],
-    block: int,
-    samples: int,
-    period: float,
-    cols: dict[int, list[Any]],
-) -> None:
-    """Read every valid address ``samples`` times over ``period`` seconds.
-
-    Fills ``cols`` (address -> samples), which keeps the samples taken before
-    a BudgetExceeded. A sample whose read failed is dropped for the whole run,
-    so columns within a run stay aligned.
-    """
-    for i in range(samples):
-        if i:
-            await link.sleep(period / max(1, samples - 1))
-        for lo, hi in runs:
-            values: list[Any] = []
-            for a in range(lo, hi, block):
-                reply = await link.read(table, unit, a, min(block, hi - a))
-                if not reply.ok or reply.values is None:
-                    break
-                values.extend(reply.values)
-            if len(values) == hi - lo:
-                for a, v in zip(range(lo, hi), values, strict=True):
-                    cols.setdefault(a, []).append(v)
-
-
-# ---------------------------------------------------------------------------
 # Orchestration + S5 emit
 # ---------------------------------------------------------------------------
+
+
+def draft_events(found: dict[str, list[tuple[int, int]]]) -> dict[str, list[dict[str, Any]]]:
+    """One raw read-only register per readable address, named as auto-scan traces it."""
+    events = {}
+    for table, runs in found.items():
+        datatype = "bool" if table in BIT_REGISTER_TYPES else "uint16"
+        for lo, hi in runs:
+            for wire in range(lo, hi):
+                event, field = raw_names(table, wire + 1)
+                events[event] = [
+                    {
+                        "name": field,
+                        "type": table,
+                        "address": wire + 1,
+                        "datatype": datatype,
+                        "writable": False,
+                    }
+                ]
+    return events
 
 
 async def scan_device(
@@ -899,14 +682,12 @@ async def scan_device(
     unit: int,
     tables: list[str],
     windows: list[tuple[int, int]],
-    samples: int,
-    period: float,
     cutoffs: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """S1-S5 for one present unit: (device report, draft map or None).
+    """Identify, ranges and draft for one present unit: (device report, draft map or None).
 
-    Past the global deadline no stage sends more requests; what was found and
-    sampled so far is still classified.
+    Past the global deadline no stage sends more requests; the ranges found so
+    far still make the draft.
     """
     device: dict[str, Any] = {"unit_id": unit}
     started = time.monotonic()
@@ -945,34 +726,10 @@ async def scan_device(
             found[table] = runs
             device["tables"][table] = {"status": status, "ranges": _ranges(runs)}
 
-    events: dict[str, list[dict[str, Any]]] = {}
-    orders: dict[str, str] = {}
-    with link.stage("classify"):
-        for table, runs in found.items():
-            cols: dict[int, list[Any]] = {}
-            block = (bits if table in BIT_REGISTER_TYPES else words).block
-            try:
-                if not link.expired:
-                    await sample_runs(link, unit, table, runs, block, samples, period, cols)
-            except BudgetExceeded as e:
-                cutoffs.append(
-                    {"stage": "classify", "unit_id": unit, "table": table, "reason": str(e)}
-                )
-            for lo, hi in runs:
-                run_cols = [cols.get(a, []) for a in range(lo, hi)]
-                if table in BIT_REGISTER_TYPES:
-                    regs = classify_bits(table, lo, run_cols)
-                else:
-                    regs, order = classify_words(table, lo, run_cols)
-                    if order:
-                        orders[f"{table}/b{lo + 1}"] = order
-                events[f"{table}/b{lo + 1}"] = regs
-
     device["max_block_size"] = words.learned_block
     device["max_bit_block_size"] = bits.learned_block
-    device["word_orders"] = orders
-    device["confidence"] = dict(Counter(r["confidence"] for regs in events.values() for r in regs))
     device["elapsed_s"] = round(time.monotonic() - started, 2)
+    events = draft_events(found)
     if not events:
         return device, None
     product = device["identity"].get("device_id", {}).get("ProductCode")
@@ -981,7 +738,8 @@ async def scan_device(
         "description": (
             f"Draft from scan of {link.label} unit {unit} at "
             f"{datetime.now(UTC).isoformat(timespec='seconds')}. "
-            "Review names, types and scaling before use."
+            "Raw uint16 words and bools, read-only: set names, datatypes, byte order "
+            "and scaling from the datasheet before use."
         ),
     }
     limits = {"max_block_size": words.learned_block, "max_bit_block_size": bits.learned_block}
@@ -1058,8 +816,6 @@ async def scan(
     units: list[int] | None = None,
     tables: list[str] | None = None,
     windows: list[tuple[int, int]] | None = None,
-    samples: int = DEFAULT_SAMPLES,
-    period: float = DEFAULT_PERIOD,
     timeout: float = DEFAULT_TIMEOUT,
     delay_ms: int | None = None,
     max_seconds: float | None = None,
@@ -1087,8 +843,6 @@ async def scan(
                 unit,
                 tables or list(TABLES),
                 windows or list(RTU_WINDOWS if rtu else TCP_WINDOWS),
-                samples,
-                period,
                 cutoffs,
             )
             report.setdefault("devices", []).append(device)
@@ -1142,36 +896,18 @@ async def sweep(
 
 
 def _issues(reg: Register, raws: list[list[Any]]) -> list[str]:
-    """What looks wrong about one register's reads; no inference beyond the datatype."""
-    out = []
+    """Facts about one register's reads under its declared datatype; nothing inferred."""
     if reg.type in BIT_REGISTER_TYPES:
-        return out
-    if all(not any(r) for r in raws):
-        out.append("always 0 (unmapped on zero-fill devices?)")
+        return []
     if reg.datatype in ("float32", "float64"):
         floats = [decode_value(r, reg.datatype, 1, reg.byte_order) for r in raws]
-        if bad := [f for f in floats if not _plausible_float(f)]:
-            out.append(f"implausible {reg.datatype} {json_safe(bad[0])}")
-            if reg.datatype == "float32":
-                good = [
-                    o
-                    for o in _ORDERS
-                    if o != reg.byte_order
-                    and all(_plausible_float(decode_value(r, "float32", 1, o)) for r in raws)
-                ]
-                if good:
-                    out.append(f"plausible as byte_order {good[0]}")
+        if bad := [f for f in floats if not math.isfinite(f)]:
+            return [f"non-finite {reg.datatype} ({bad[0]})"]
     elif reg.datatype == "string":
-        data = b"".join(w.to_bytes(2) for w in raws[0]).split(b"\0", 1)[0]
+        data = b"".join(w.to_bytes(2) for w in raws[-1]).split(b"\0", 1)[0]
         if any(not 32 <= b < 127 for b in data):
-            out.append("non-ASCII bytes in string")
-    elif reg.invalid:
-        pass  # the map already names its sentinels
-    elif all(all(w == 0xFFFF for w in r) for r in raws):
-        out.append("all ones (not-implemented sentinel?)")
-    elif reg.datatype.startswith("int") and all(r[0] == 0x8000 for r in raws):
-        out.append("0x8000 (not-implemented sentinel?)")
-    return out
+            return ["non-ASCII bytes in string"]
+    return []
 
 
 async def verify_map(
@@ -1187,10 +923,11 @@ async def verify_map(
 ) -> dict[str, Any]:
     """Read every register of ``register_map`` ``samples`` times; report problems.
 
-    Each register is read on its own, so an exception names its register. A
-    cutoff (max_seconds, default VERIFY_MAX_SECONDS, or SILENT_AFTER requests
-    in a row with no response, whatever answered before) leaves the registers
-    not read yet out of ``ok``, counted in ``unchecked``.
+    ``values`` holds each register's last decoded value by path. Each register
+    is read on its own, so an exception names its register. A cutoff
+    (max_seconds, default VERIFY_MAX_SECONDS, or SILENT_AFTER requests in a
+    row with no response, whatever answered before) leaves the registers not
+    read yet out of ``ok``, counted in ``unchecked``.
     """
     max_seconds = max_seconds or VERIFY_MAX_SECONDS
     link = ScanLink(endpoint, timeout=timeout, delay_ms=delay_ms, max_seconds=max_seconds)
@@ -1202,6 +939,7 @@ async def verify_map(
         "registers": len(register_map.registers),
     }
     problems: list[dict[str, Any]] = []
+    values: dict[str, Any] = {}
     reads: dict[tuple[str, str], list[Reply]] = {}
     try:
         if not await link.open():
@@ -1235,13 +973,14 @@ async def verify_map(
                 problems.append(row | {"issues": [issue]})
                 continue
             raws = [r.values for r in replies]
+            values[row["path"]] = value = json_safe(decode_register(reg, raws[-1]))
             if issues := _issues(reg, raws):
-                value = json_safe(decode_register(reg, raws[-1]))
                 problems.append(row | {"value": value, "issues": issues})
     report |= {
         "ok": len(reads) - len(problems),
         "unchecked": report["registers"] - len(reads),
         "problems": problems,
+        "values": values,
         "requests": link.requests,
         "request_gap_ms": link.delay_ms,
         "elapsed_s": round(time.monotonic() - started, 2),

@@ -107,7 +107,7 @@ MODBUS_MAX_WRITE_COUNT = 123
 # Fastest poll rate (seconds) we accept; below this a rate is almost certainly a mistake.
 MIN_RATE = 0.01
 
-#: Rate (s) for identity, nameplate and settings points (SunSpec, scan drafts).
+#: Rate (s) for SunSpec identity, nameplate and settings points.
 SLOW_RATE = 60.0
 
 
