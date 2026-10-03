@@ -327,8 +327,6 @@ def _link_options(fn: Callable) -> Callable:
 @click.option(
     "--range", "ranges", default="", help="1-based address windows, e.g. 1-10000,40001-41000"
 )
-@click.option("--samples", type=click.IntRange(1, 100), default=10, show_default=True)
-@click.option("--period", type=float, default=5.0, show_default=True, help="Sampling seconds")
 @click.option("--out", type=click.Path(dir_okay=False), help="Write the draft map here")
 def scan(
     target: str,
@@ -341,8 +339,6 @@ def scan(
     units: str,
     tables: str,
     ranges: str,
-    samples: int,
-    period: float,
     out: str | None,
     **serial: str,
 ) -> None:
@@ -355,8 +351,10 @@ def scan(
     gateway reply or no answer sweeps 1-247 (a silent link stops after 16
     timeouts). RTU sweeps 1-247 (use --units to go faster).
 
-    The draft map (1-based, every register writable: false) is written only to
-    --out; several devices write <out>_unit<id>.json.
+    The draft map lists every readable address as a raw uint16 word or bool
+    (1-based, writable: false, named holding_registers/<a> hr_<a> as auto-scan
+    traces it); set datatypes, byte order and scaling from the datasheet. It
+    is written only to --out; several devices write <out>_unit<id>.json.
 
     \b
     Examples:
@@ -390,8 +388,6 @@ def scan(
             units=unit_list or None,
             tables=table_list,
             windows=windows or None,
-            samples=samples,
-            period=period,
             timeout=timeout,
             delay_ms=delay_ms,
             max_seconds=max_seconds,
@@ -430,9 +426,10 @@ def verify(
 ) -> None:
     """Read every register of a map; print a JSON report of problems.
 
-    Flags exceptions, registers that read 0 on every sample, implausible
-    floats and not-implemented sentinels. Reads only. Exits 1 on any problem
-    or a cutoff (--max-seconds, default 840; or 16 requests in a row unanswered).
+    Flags exceptions and no responses, NaN/Inf in a declared float and
+    non-ASCII bytes in a declared string; lists every decoded value. Reads
+    only. Exits 1 on any problem or a cutoff (--max-seconds, default 840; or
+    16 requests in a row unanswered).
 
     \b
     Example:
@@ -504,9 +501,8 @@ def demo_server(
     extension.
 
     --scan-target serves a sparse read-only device for testing scan: holes
-    (exception 02), a 60-register read limit, FC 43/14 identification, float32
-    runs in all four byte orders, a counter and an ASCII string. It answers
-    every unit id.
+    (exception 02), a 60-register read limit, FC 43/14 identification and
+    moving values. It answers every unit id.
 
     \b
     Example:
