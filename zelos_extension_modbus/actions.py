@@ -150,7 +150,7 @@ def _resolve_register(dev: Any, path: str) -> tuple[str | None, Any, str | None]
         return ("No register map loaded", None, None)
 
     if "/" in path:
-        # Event names may contain "/" (e.g. a scan draft's "holding/b1"), so match
+        # Event names may contain "/" (e.g. "holding_registers/40"), so match
         # the map's own events rather than splitting at a fixed slash.
         for event_name, regs in events.items():
             if path.startswith(f"{event_name}/"):
@@ -383,8 +383,8 @@ def get_snapshot(device: str) -> dict[str, Any]:
 @zelos_sdk.action(
     "Read Register",
     "Read registers by address, in the device map's base (default 1-based). Each value is "
-    "also traced as event registers/<address> (input_registers/, coils/, discrete_inputs/ "
-    "for the other tables), field <address>_value.",
+    "also traced as event holding_registers/<address>, field hr_<address> (input_registers/ "
+    "ir_, coils/ coil_, discrete_inputs/ di_ for the other tables).",
 )
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 @_address_field()
@@ -775,7 +775,8 @@ def _link_fields(fn: Any) -> Any:
     "Scan Device",
     "Comprehensive, slow (tens of seconds to minutes): discover an unknown device with "
     "reads only (FC 01-04, 43/14, 17) and return its units, identity, valid address ranges "
-    "and a draft register map (every register read-only) inline, for review before use. "
+    "and a draft register map inline: every readable address as a raw uint16 word or bool, "
+    "read-only, with no datatype or byte order guessed; set those from the datasheet. "
     "For just finding devices use Auto-configure; to check an existing map use Verify Map. "
     "Run with the extension stopped; writes nothing to the device. With out_path, also "
     "writes the draft map there (several units: <name>_unit<id>.json).",
@@ -883,9 +884,9 @@ def scan_device(
 
 @zelos_sdk.action(
     "Verify Map",
-    "Check an existing register map against the device: read every register once or "
-    "twice and report exceptions, always-zero registers, implausible floats and "
-    "sentinels. Reads only; run with the extension stopped.",
+    "Check an existing register map against the device: read every register twice and "
+    "report exceptions, no responses, NaN/Inf in a declared float and non-ASCII bytes in "
+    "a declared string, plus every decoded value. Reads only; run with the extension stopped.",
     timeout=VERIFY_TIMEOUT,
     standalone=True,
 )

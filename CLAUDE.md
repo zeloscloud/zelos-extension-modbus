@@ -18,7 +18,7 @@ just package      # Build .tar.gz for marketplace
 
 ## Key Files
 
-- `main.py` - CLI entry point (app mode, trace subcommand)
+- `main.py` - extension entry; the CLI (app mode, trace, scan, verify, sims) is `zelos_extension_modbus/cli/main.py`
 - `zelos_extension_modbus/client.py` - `ModbusConnection` (one link, serialized requests, per-connection scheduler: fastest-rate blocks + one slower block per tick) and `ModbusDevice` (unit ID + map + trace events, rate tiers, demotion, refused-block deactivation)
 - `zelos_extension_modbus/constants.py` - `trace_layout` (the one trace-naming rule), `raw_names` (per-register raw events) and `name_error`
 - `zelos_extension_modbus/scan.py` - Read-only scan and verify; `Discovery` drives its range finder one read per tick for auto-scan (`ModbusDevice._discover`)

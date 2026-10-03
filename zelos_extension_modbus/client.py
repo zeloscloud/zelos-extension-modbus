@@ -1110,7 +1110,7 @@ class ModbusDevice:
         """The auto-scanned registers as a register map, ignored ones left out.
 
         Each register is its own event, named as auto-scan traces it
-        (`registers/123`, field `123_value`), read-only, at its polled rate.
+        (`holding_registers/123`, field `hr_123`), read-only, at its polled rate.
         """
         ignored = {id(r) for b in list(self._blocks or []) if b.refused for r in b.read.registers}
         order = list(RegisterType)

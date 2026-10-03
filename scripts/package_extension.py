@@ -107,6 +107,13 @@ def generate_actions_inventory(manifest: dict) -> str | None:
     return ACTIONS_FILE
 
 
+def archive_file_name(version: str) -> str:
+    """`<package>-v<version>.tar.gz`, named from pyproject so a worktree or clone
+    directory name never leaks into it (and .gitignore always covers it)."""
+    with Path("pyproject.toml").open("rb") as f:
+        return f"{tomllib.load(f)['project']['name']}-v{version}.tar.gz"
+
+
 def main() -> None:
     """Package the extension."""
     # Load manifest
@@ -179,8 +186,7 @@ def main() -> None:
         files.append(inventory)
 
     # Create archive
-    project_name = Path.cwd().name
-    archive_name = f"{project_name}-v{version}.tar.gz"
+    archive_name = archive_file_name(version)
 
     print(f"Creating {archive_name}...")
     print("Packaging files for Zelos marketplace...")

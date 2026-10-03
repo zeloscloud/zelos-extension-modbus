@@ -9,9 +9,14 @@ Covers the seams that turn config.json into running connections:
 """
 
 import asyncio
+import importlib
+import importlib.util
 import json
+import tomllib
+from fnmatch import fnmatch
 from pathlib import Path
 
+import click
 import pytest
 from zelos_sdk.extensions.config import load_config
 
@@ -20,10 +25,13 @@ from zelos_extension_modbus.cli.app import (
     _create_connections,
     _load_register_map,
     _old_config_error,
+    device_settings,
     resolve_advanced,
 )
+from zelos_extension_modbus.register_map import RegisterMap
 
-SCHEMA = Path(__file__).parent.parent / "config.schema.json"
+ROOT = Path(__file__).parent.parent
+SCHEMA = ROOT / "config.schema.json"
 
 
 def _tcp(**conn):
@@ -112,12 +120,15 @@ class TestCreateConnections:
         ids=["map-device", "advanced", "default"],
     )
     def test_setting_precedence(self, tmp_path, device, advanced, expected):
-        """Per key: map device block > advanced > constructor default."""
+        """Per key: map device block > advanced > constructor default; the CLI
+        trace applies the same device_settings with its flags as `advanced`."""
         map_file = tmp_path / "map.json"
         map_file.write_text(json.dumps({"device": device, "events": {}}))
         config = {"connections": [_tcp(devices=[{"register_map_file": str(map_file)}])]}
         (conn,) = _create_connections(config, advanced)
         assert conn.devices[0].max_block_size == expected
+        settings = device_settings(RegisterMap.from_file(map_file), advanced)
+        assert settings.get("max_block_size", 125) == expected
 
     @pytest.mark.parametrize(
         ("transport", "register", "device", "advanced", "expected"),
@@ -272,3 +283,23 @@ def test_unreachable_server_at_start_exits(caplog):
     loop.close()
     assert exc.value.code == 1
     assert "Connection 'gw' (127.0.0.1:" in caplog.text and "cannot connect" in caplog.text
+
+
+def test_console_script_in_package():
+    """The installed script imports from the wheel's package, not the repo-root main.py."""
+    scripts = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["scripts"]
+    module, attr = scripts["zelos-extension-modbus"].split(":")
+    assert module.startswith("zelos_extension_modbus.")
+    assert isinstance(getattr(importlib.import_module(module), attr), click.Group)
+
+
+def test_archive_named_from_pyproject(monkeypatch):
+    """`just package` names the archive from pyproject, not the directory, so
+    .gitignore covers it in any checkout or worktree."""
+    spec = importlib.util.spec_from_file_location("pkg", ROOT / "scripts/package_extension.py")
+    package = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(package)
+    monkeypatch.chdir(ROOT)
+    name = package.archive_file_name("9.9.9")
+    assert name == "zelos-extension-modbus-v9.9.9.tar.gz"
+    assert any(fnmatch(name, p) for p in (ROOT / ".gitignore").read_text().splitlines())

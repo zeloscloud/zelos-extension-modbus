@@ -210,8 +210,9 @@ class TestRegisterMap:
         assert inline == load_configured_map("~/meter.json")
         with pytest.raises(ValueError, match=r"Invalid inline register map: .*line 1 column 12"):
             load_configured_map('{"events": ')
-        with pytest.raises(ValueError, match="Invalid inline register map: .*'address'"):
-            load_configured_map('{"events": {"e": [{"name": "v"}]}}')
+        missing = "Invalid inline register map: register 2 in event 'e' is missing 'address'"
+        with pytest.raises(ValueError, match=missing):
+            load_configured_map('{"events": {"e": [{"address": 1}, {"name": "v"}]}}')
         with pytest.raises(ValueError, match="absolute or start with ~"):
             load_configured_map("maps/meter.json")
 
@@ -1342,7 +1343,7 @@ class TestPollScheduler:
         want = {
             f"{prefix}/{a + 1}"
             for table, prefix in [
-                ("holding", "registers"),
+                ("holding", "holding_registers"),
                 ("input", "input_registers"),
                 ("coil", "coils"),
                 ("discrete_input", "discrete_inputs"),
@@ -1371,13 +1372,15 @@ class TestPollScheduler:
         run = asyncio.get_event_loop().run_until_complete
         for t in range(polls):
             values = run(poll_once(dev, now=10.0 + t))
-        assert "registers/1" in values and "registers/11" not in values
+        assert "holding_registers/1" in values and "holding_registers/11" not in values
         status = dev.auto_scan_status()
         assert (status["found"], status["ignored"]) == (10, 5)
         (row,) = dev.rate_status()["refused"]
         assert (row["range"], row["code"]) == ("holding 11-15", code)
         assert not dev.demoted
-        assert list(dev.discovered_map()["events"]) == [f"registers/{a}" for a in range(1, 6)]
+        assert list(dev.discovered_map()["events"]) == [
+            f"holding_registers/{a}" for a in range(1, 6)
+        ]
 
     @pytest.mark.parametrize(("code", "demoted", "warnings"), [(0x0B, True, 0), (0x04, False, 1)])
     def test_exception_answers(self, caplog, code, demoted, warnings):
@@ -1598,10 +1601,10 @@ class TestInitTraceSource:
     @pytest.mark.parametrize(
         ("reg_type", "reply", "event", "field"),
         [
-            ("holding", {"registers": [7, 8]}, "registers/123", "123_value"),
-            ("input", {"registers": [7, 8]}, "input_registers/123", "123_value"),
-            ("coil", {"bits": [True, False]}, "coils/123", "123_value"),
-            ("discrete_input", {"bits": [True, False]}, "discrete_inputs/123", "123_value"),
+            ("holding", {"registers": [7, 8]}, "holding_registers/123", "hr_123"),
+            ("input", {"registers": [7, 8]}, "input_registers/123", "ir_123"),
+            ("coil", {"bits": [True, False]}, "coils/123", "coil_123"),
+            ("discrete_input", {"bits": [True, False]}, "discrete_inputs/123", "di_123"),
         ],
     )
     def test_raw_read_traced(self, reg_type, reply, event, field):
@@ -1624,10 +1627,10 @@ class TestInitTraceSource:
         values = next(iter(reply.values()))
         bits = reg_type in ("coil", "discrete_input")
         dtype = zelos_sdk.DataType.Boolean if bits else zelos_sdk.DataType.UInt16
-        second = event.replace("123", "124")
+        second, field2 = event.replace("123", "124"), field.replace("123", "124")
         assert logged == {
             f"c/unit1/{event}": [field, dtype, {field: values[0]}],
-            f"c/unit1/{second}": ["124_value", dtype, {"124_value": values[1]}],
+            f"c/unit1/{second}": [field2, dtype, {field2: values[1]}],
         }
         assert dev.last_values[f"{event}/{field}"][0] == values[0]
         dev.connection.request = AsyncMock(return_value=ExceptionResponse(3, 2))
@@ -2162,8 +2165,8 @@ class TestActionsUnit:
         assert {e: list(f) for e, f in values.items()} == {
             e: [r.field_name for r in regs] for e, regs in loaded.events.items()
         }
-        assert values["registers/1006"] == {"1006_value": target["holding"][1005]}
-        assert values["coils/16"] == {"16_value": False}
+        assert values["holding_registers/1006"] == {"hr_1006": target["holding"][1005]}
+        assert values["coils/16"] == {"coil_16": False}
         assert len(polled_reads) == dev_reads and polled.failed_reads == 0
 
         mapped = tmp_path / "mapped.json"

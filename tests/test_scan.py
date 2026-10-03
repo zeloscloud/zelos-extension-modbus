@@ -15,20 +15,15 @@ from pymodbus.client import AsyncModbusTcpClient
 from pymodbus.client.mixin import ModbusClientMixin
 from pymodbus.exceptions import ModbusIOException
 
-from zelos_extension_modbus.demo.simulator import (
-    SCAN_TARGET_COUNTER,
-    SCAN_TARGET_FLOATS,
-    SCAN_TARGET_RANGES,
-    SCAN_TARGET_STRING,
-    run_demo_server,
-)
+from zelos_extension_modbus.constants import raw_names
+from zelos_extension_modbus.demo.simulator import SCAN_TARGET_RANGES, run_demo_server
 from zelos_extension_modbus.register_map import RegisterMap
 from zelos_extension_modbus.scan import (
     ALLOWED,
     SILENT_AFTER,
     RangeFinder,
     ScanLink,
-    classify_words,
+    _issues,
     scan,
     verify_map,
 )
@@ -95,7 +90,7 @@ class TestAllowlist:
         assert sent[-1].sub_function_code == 0x0E
 
 
-class TestInference:
+class TestRanges:
     def test_run_start_learns_the_read_limit(self):
         """A run found past a long hole, before any read hit the size limit, keeps its start."""
 
@@ -107,25 +102,10 @@ class TestInference:
         _run(finder.window("holding", 0, 2000, runs))
         assert (runs, finder.learned_block) == ([(1005, 2000)], 60)
 
-    def test_constant_words(self):
-        """One sample: float32 words that print as text stay floats; real text is a string."""
-        floats = [0x4366, 0x4142, 0x4148, 0x4344]  # 'CfABAHCD' = float32 230.3, 12.5
-        raw = b"ZELOS SCAN TARGET\0"
-        text = [int.from_bytes(raw[i : i + 2]) for i in range(0, len(raw), 2)]
-
-        def kinds(words: list[int]) -> list[tuple[str, int | None]]:
-            regs, _ = classify_words("holding", 0, [[w] for w in words])
-            return [(r["datatype"], r.get("length")) for r in regs]
-
-        assert kinds(floats) == [("float32", None), ("float32", None)]
-        assert kinds(text) == [("string", 9)]
-
 
 class TestScanTarget:
     def test_scan_recovers_the_seeded_device(self):
-        result = _run(
-            _with_sim(lambda ep: scan(ep, windows=[(0, 1999)], samples=4, period=1.5, delay_ms=0))
-        )
+        result = _run(_with_sim(lambda ep: scan(ep, windows=[(0, 1999)], delay_ms=0)))
         device = result["report"]["devices"][0]
         assert device["max_block_size"] == 60
         assert device["identity"]["device_id"]["ProductCode"] == "ZSCAN-1"
@@ -134,21 +114,23 @@ class TestScanTarget:
             t: [(lo + 1, hi + 1) for lo, hi in runs] for t, runs in SCAN_TARGET_RANGES.items()
         }
 
+        # Every readable address, raw and read-only, named as auto-scan traces it.
         draft = result["maps"][1]
-        loaded = RegisterMap.from_dict(draft)
-        assert loaded.device == {"max_block_size": 60}
-        regs = {r.address: r for r in loaded.registers if r.type == "holding"}
-        assert not any(r.writable for r in loaded.registers)
-        for base, seeded in SCAN_TARGET_FLOATS.items():
-            for k in range(10):
-                reg = regs[base + 2 * k]
-                assert (reg.datatype, reg.byte_order) == ("float32", seeded)
-        assert regs[SCAN_TARGET_COUNTER].datatype == "uint32"
-        start, text = SCAN_TARGET_STRING
-        assert (regs[start].datatype, regs[start].length, regs[start].rate) == ("string", 9, 60)
-        assert (regs[start].name, regs[start].map_address) == (f"hr{start + 1}", start + 1)
-        assert regs[SCAN_TARGET_COUNTER].rate is None
-        assert text in regs[start].description
+        assert draft["device"] == {"max_block_size": 60}
+        expected = [
+            (raw_names(t, a + 1), t, a + 1, "bool" if t in ("coil", "discrete_input") else "uint16")
+            for t, runs in SCAN_TARGET_RANGES.items()
+            for lo, hi in runs
+            for a in range(lo, hi + 1)
+        ]
+        got = [
+            ((event, reg["name"]), reg["type"], reg["address"], reg["datatype"])
+            for event, [reg] in draft["events"].items()
+        ]
+        assert got == expected
+        regs = [reg for [reg] in draft["events"].values()]
+        assert all(set(reg) == {"name", "type", "address", "datatype", "writable"} for reg in regs)
+        assert not any(r.writable for r in RegisterMap.from_dict(draft).registers)
 
     def test_verify_map_flags_only_the_broken_registers(self):
         reg_map = RegisterMap.from_dict(
@@ -164,12 +146,24 @@ class TestScanTarget:
             }
         )
         report = _run(_with_sim(lambda ep: verify_map(ep, reg_map, samples=1, delay_ms=0)))
-        assert (report["ok"], report["unchecked"]) == (1, 0)
-        issues = {p["path"]: p["issues"] for p in report["problems"]}
-        assert {p["path"]: p["address"] for p in report["problems"]}["e/hole"] == 171
-        assert set(issues) == {"e/counter", "e/zero", "e/hole"}
-        assert issues["e/hole"] == ["exception 02"]
-        assert issues["e/counter"][0].startswith("implausible float32")  # a uint32 read as float
+        assert (report["ok"], report["unchecked"]) == (3, 0)
+        # Only facts: a uint32 read as float32 and a zero word are values, not problems.
+        assert report["problems"] == [
+            {"path": "e/hole", "type": "holding", "address": 171, "issues": ["exception 02"]}
+        ]
+        assert set(report["values"]) == {"e/ok", "e/counter", "e/zero"}
+        assert report["values"]["e/zero"] == 0
+
+    def test_issues_are_facts_of_the_declared_datatype(self):
+        def issues(words: list[int], **reg: Any) -> list[str]:
+            regs = RegisterMap.from_dict({"events": {"e": [{"address": 1, **reg}]}}).registers
+            return _issues(regs[0], [words])
+
+        assert issues([0x7FC0, 0], datatype="float32") == ["non-finite float32 (nan)"]
+        assert issues([0x7149, 0xF2CA], datatype="float32") == []  # 1e30: odd, but finite
+        assert issues([0x4142, 0x0100], datatype="string", length=2) == [
+            "non-ASCII bytes in string"
+        ]
 
     def test_verify_cuts_off_a_unit_that_goes_silent(self, monkeypatch):
         """A unit that answers once and then goes silent is cut off, not read to the end."""
@@ -197,7 +191,8 @@ class TestScanTarget:
     def test_budget_abort_is_bounded(self):
         async def timed(ep):
             started = time.monotonic()
-            result = await scan(ep, max_seconds=1.0)
+            # Paced so the full scan (~4000 requests) far outlasts the deadline.
+            result = await scan(ep, max_seconds=1.0, delay_ms=20)
             return result, time.monotonic() - started
 
         result, elapsed = _run(_with_sim(timed))

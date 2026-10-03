@@ -404,7 +404,9 @@ class RegisterMap:
             # trace layer collapses reserved characters and clobbers colliding
             # rows on log. Reject both raw and post-sanitization collisions here.
             seen_fields: dict[str, str] = {}
-            for reg_data in registers_data:
+            for i, reg_data in enumerate(registers_data, 1):
+                if "address" not in reg_data:
+                    raise ValueError(f"register {i} in event '{event_name}' is missing 'address'")
                 # Explicit JSON null means not polled (same as 0); an absent key
                 # keeps the device rate (None).
                 rate = reg_data.get("rate")
