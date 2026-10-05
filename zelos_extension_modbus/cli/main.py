@@ -128,20 +128,26 @@ def cli(ctx: click.Context, demo: bool) -> None:
 )
 @click.option(
     "--block-reads/--no-block-reads",
-    default=True,
-    help="Coalesce contiguous registers into range reads (default: on)",
+    default=None,
+    help="Coalesce contiguous registers into range reads (default: map device block, else on)",
 )
 @click.option(
     "--max-block-size",
     type=click.IntRange(1, MODBUS_MAX_READ_COUNT),
-    default=MODBUS_MAX_READ_COUNT,
-    help="Maximum registers per range read",
+    default=None,
+    help=(
+        "Maximum registers per range read "
+        f"(default: map device block, else {MODBUS_MAX_READ_COUNT})"
+    ),
 )
 @click.option(
     "--max-read-gap",
     type=click.IntRange(min=0),
-    default=0,
-    help="Maximum uncovered registers to bridge within a block (0 = strictly contiguous)",
+    default=None,
+    help=(
+        "Maximum uncovered registers to bridge within a block "
+        "(default: map device block, else 0 = strictly contiguous)"
+    ),
 )
 @click.pass_context
 def trace(
@@ -161,9 +167,9 @@ def trace(
     timeout: float,
     retries: int,
     request_delay_ms: int,
-    block_reads: bool,
-    max_block_size: int,
-    max_read_gap: int,
+    block_reads: bool | None,
+    max_block_size: int | None,
+    max_read_gap: int | None,
 ) -> None:
     """Trace Modbus registers from command line.
 
@@ -188,7 +194,7 @@ def trace(
     """
     import asyncio
 
-    from zelos_extension_modbus.cli.app import device_settings, init_sdk, run_connections
+    from zelos_extension_modbus.cli.app import init_sdk, run_connections, trace_settings
     from zelos_extension_modbus.client import ModbusConnection, ModbusDevice
     from zelos_extension_modbus.register_map import RegisterMap
     from zelos_extension_modbus.scan import endpoint
@@ -223,8 +229,7 @@ def trace(
         register_map=register_map,
         rate=rate,
         name=device_name or None,
-        # A map `device` block overrides these, as in app mode.
-        **device_settings(
+        **trace_settings(
             register_map,
             {
                 "block_reads": block_reads,
