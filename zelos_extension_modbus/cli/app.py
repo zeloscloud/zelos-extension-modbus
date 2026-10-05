@@ -200,6 +200,11 @@ def device_settings(register_map: RegisterMap | None, advanced: dict[str, Any]) 
     return settings
 
 
+def trace_settings(register_map: RegisterMap | None, flags: dict[str, Any]) -> dict[str, Any]:
+    """`trace` tuning: typed flags (non-None) > map `device` block > default."""
+    return device_settings(register_map, {}) | {k: v for k, v in flags.items() if v is not None}
+
+
 def _map_source(dev_config: dict[str, Any]) -> dict[str, Any]:
     """`register_map` or `map_loader` kwargs for a device's configured map source."""
     source = dev_config.get("register_map", "file")
