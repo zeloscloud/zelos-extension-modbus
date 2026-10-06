@@ -10,10 +10,20 @@ A Zelos extension for the Modbus protocol. Read, write, and monitor registers fr
 - ☀️ **SunSpec discovery**: Inverters, meters and batteries map themselves at connect ([SUNSPEC.md](SUNSPEC.md))
 - 🔍 **Auto-scan**: A device without a map finds its registers at start and streams them
 - ✏️ **Read & write actions**: Interactive register access from the Zelos App
-- 🔢 **Flexible data types**: 16/32/64-bit integers, floats, booleans
-- 🔄 **Byte order options**: Big/little endian with word-swap variants
 
 ## Quick Start
+
+From the CLI, on the agent that can reach the device:
+
+```bash
+zelos extensions install zeloscloud/zelos-extension-modbus
+zelos extensions start zeloscloud.zelos-extension-modbus \
+  --config '{"connections": [{"transport": "tcp", "host": "192.168.1.100", "port": 502, "devices": [{"unit_id": 1}]}]}'
+```
+
+A device without a register map is [auto-scanned](#auto-scan).
+
+In the app:
 
 1. **Install** the extension from the Zelos App
 2. **Configure** a connection (TCP or RTU) and its devices (unit ID; a register map file, SunSpec, or nothing: auto-scan)
