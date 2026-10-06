@@ -7,7 +7,7 @@ A Zelos extension for the Modbus protocol. Read, write, and monitor registers fr
 - 📡 **Modbus TCP & RTU**: Connect over Ethernet or RS232/RS485 serial
 - 📊 **All register types**: Holding, input, coils, and discrete inputs
 - 📄 **Register map files**: Define your device layout in a simple JSON file
-- ☀️ **SunSpec discovery**: Inverters, meters and batteries map themselves at connect
+- ☀️ **SunSpec discovery**: Inverters, meters and batteries map themselves at connect ([SUNSPEC.md](SUNSPEC.md))
 - 🔍 **Auto-scan**: A device without a map finds its registers at start and streams them
 - ✏️ **Read & write actions**: Interactive register access from the Zelos App
 - 🔢 **Flexible data types**: 16/32/64-bit integers, floats, booleans
@@ -22,16 +22,14 @@ A Zelos extension for the Modbus protocol. Read, write, and monitor registers fr
 
 ## Configuration
 
-All configuration is managed through the Zelos App settings interface.
-
 ### Connections
 
-A connection is a TCP endpoint or a serial port. Its devices share the link and are polled one request at a time (RS485 is half-duplex; many TCP gateways accept few connections).
+A connection is a TCP endpoint or a serial port. Its devices share the link and are polled one request at a time.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Transport | `tcp` | `tcp` or `rtu`; picks the connection fields below |
-| Name | endpoint | Trace name; defaults to the sanitized host or serial port (`10_0_0_5`, `dev_ttyUSB0`), plus `_<port>` when two unnamed TCP connections share a host |
+| Transport | `tcp` | `tcp` or `rtu` |
+| Name | endpoint | Trace name; defaults to the sanitized host or serial port (`10_0_0_5`, `dev_ttyUSB0`) |
 | Host / Port | `127.0.0.1` / `502` | TCP only |
 | Serial Port | | RTU only (`/dev/ttyUSB0`, `COM3`) |
 | Baudrate / Parity / Stop Bits / Data Bits | `9600` / `N` / `1` / `8` | RTU only; must match the devices |
@@ -41,67 +39,58 @@ A connection is a TCP endpoint or a serial port. Its devices share the link and 
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Unit ID | `1` | Modbus slave/unit ID; unique per connection |
+| Unit ID | `1` | Modbus unit ID; unique per connection |
 | Name | `unit<ID>` | Trace name; unique per connection |
-| Register Map | `file` | `file` or `sunspec` (see [SunSpec](#sunspec)) |
-| Register Map File | | JSON register map, as a path or inline (see [Register Map](#register-map)); empty = auto-scan. `file` only |
-| Auto-scan | on | Without a map file: discover and poll the device's registers (see [Auto-scan](#auto-scan)); off = nothing polled |
-| Rate | Advanced `default_rate`, else TCP 1 s / RTU 10 s | Poll rate (s) for registers without their own `rate`; `0` = not polled, no auto-scan (actions still work) |
+| Register Map | `file` | `file` or `sunspec` (see [SUNSPEC.md](SUNSPEC.md)) |
+| Register Map File | | JSON [register map](#register-map), path or inline; empty = [auto-scan](#auto-scan) |
+| Auto-scan | on | Without a map file, discover and poll the device's registers; off = nothing polled |
+| Rate | TCP 1 s / RTU 10 s | Poll rate (s) for registers without their own `rate`; `0` = not polled |
 
-Names are letters, digits, space, `_` or `-`; anything else is rejected at start. `log` and `modbus_log` are reserved connection names.
+Names are letters, digits, space, `_` or `-`.
 
-### Advanced (collapsed, applies to every connection and device)
+### Advanced
+
+Applies to every connection and device; a register map `device` block overrides it per key.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `prefix` | `Modbus` | Trace source every connection publishes under: `Modbus/10_0_0_5/unit1/voltage`, logs at `Modbus/log`. Cleared: one source per connection (`10_0_0_5/unit1/voltage`) and logs under `modbus_log` |
-| `default_rate` | TCP `1.0`, RTU `10.0` | Poll rate (s) when neither the register nor the device sets one; empty = the transport default (see [Polling](#polling)) |
+| `prefix` | `Modbus` | Trace source: `Modbus/10_0_0_5/unit1/voltage`; cleared = one source per connection |
+| `default_rate` | TCP `1.0`, RTU `10.0` | Poll rate (s) when neither register nor device sets one |
 | `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `timeout` | `3.0` | Seconds to wait for each response |
-| `retries` | `1` | Extra attempts per request; a failed request costs `timeout x (1 + retries)` |
-| `request_delay_ms` | `0` | Minimum gap between requests on a connection (RS485 gateways, slow RTU devices) |
-| `connect_delay_ms` | `0` | Pause after each (re)connect before the first request |
-| `demote_after` | `3` | Consecutive timeouts before a device is demoted (see [Polling](#polling)) |
+| `retries` | `1` | Extra attempts per request |
+| `request_delay_ms` | `0` | Minimum gap between requests (RS485 gateways, slow RTU devices) |
+| `connect_delay_ms` | `0` | Pause after each (re)connect |
+| `demote_after` | `3` | Consecutive timeouts before a device is demoted |
 | `demote_max_s` | `300` | Longest wait between probes of a demoted device |
 | `block_reads` | on | Coalesce contiguous registers into range reads |
 | `max_block_size` | `125` | Max registers per range read |
 | `max_bit_block_size` | `2000` | Max coils / discrete inputs per range read |
-| `max_read_gap` | `0` | Max uncovered registers bridged within a block |
-| `write_mode` | `auto` | `auto` (FC 6 single / FC 16 multi) or `fc16` (always FC 16) |
-| `allow_raw_writes` | off | Enable the raw write actions (`write_single_register`, `write_registers`, `write_coil`); addresses the map marks read-only stay refused. App config only |
+| `max_read_gap` | `0` | Max unmapped registers bridged within a block |
+| `write_mode` | `auto` | `auto` (FC 6 single / FC 16 multi) or `fc16` |
+| `allow_raw_writes` | off | Enable the raw write actions; read-only map addresses stay refused |
 
-Per key, a register map `device` block overrides Advanced. A config from 0.1.x (`interfaces`, per-interface unit ID/map, top-level `log_level`) fails at start: set the connections up again in the config form.
-
-Troubleshooting serial/USB connection failures: see [DEBUG.md](DEBUG.md).
+Serial/USB troubleshooting: [DEBUG.md](DEBUG.md).
 
 ### Polling
 
-Rate precedence: register `rate` > device Rate > `default_rate` > transport default; a map `min_rate` floors it. Transport default: TCP 1 s matches common SCADA and Modbus test tools; serial buses are shared and a large map cannot sweep at 1 s at 9600 baud, so RTU defaults to 10 s. Each connection runs one scheduler across its devices:
+Rate precedence: register `rate` > device Rate > `default_rate`; a map `min_rate` floors it.
 
-- **Tick**: every due block at the connection's fastest rate first, then at most one other item, most overdue first: a due slower block, a demoted device's probe, or a SunSpec discovery. Slow work spreads over the ticks instead of bursting and stalling fast points; blocks never mix rates. A block holding a `scale_ref` exponent is read in the same tick as every block it scales.
-- **Requested vs achieved**: `get_status` / `get_snapshot` / `list_devices` report `requested_rate`, `achieved_rate` (smoothed read interval) and `overload_pct` (100 x mean lateness / rate) for the worst tier, and every tier under `tiers`. A tier over 100% for 30 s warns once, and logs its recovery.
-- **Demotion**: after `demote_after` consecutive timeouts or gateway exceptions 0A/0B (polling or SunSpec discovery) a device is skipped and its fields are not logged; one single-attempt probe (no retries) of a due block after 10 s, doubling to `demote_max_s` (a device awaiting SunSpec discovery is probed with one read at 40001); any answer resumes it, and its achieved rate is null until a normal interval passes. `get_status` shows `demoted` and `retry_in_s`.
-- **Counters**: `successful_reads` and `failed_reads` per device (a timeout is a failed read). A failed read logs none of its block's fields that cycle.
-- **Link down**: every read that falls due counts in `failed_reads`, and `achieved_rate` / `overload_pct` are null until reads resume. Reconnects wait 3 s, doubling to 60 s; a poll that keeps the link resets it. The first failure is logged, then only when the wait grows.
-- **Unreachable at start**: a connection whose server cannot be reached at start stops the extension with `Connection 'gw' (10.0.0.99:502): cannot connect` (fix the endpoint and start again); once a link has been up, drops are retried on the schedules above. A device behind a reachable server with no answer since start (timeout or gateway 0A/0B; an exception answer counts as present) logs one ERROR (`Device 'gw/ghost' (unit 7): no response since start`), keeps its reason in `error`, and is retried as common SCADA tools do; its first answer logs `responding`. Nothing is traced for it meanwhile.
-- **Illegal addresses** (deactivated, as common SCADA tools do): block size is static (map `max_block_size` > Advanced > 125). A block answered with exception 02/03 logs one warning and is retried every 10 min, also across demotion; other blocks keep polling. `get_status` lists it under `refused` (`range`, `code`, `retry_in_s`). Run `verify` to find the bad registers, then fix the map or `max_block_size` (scan learns it). Other exception codes warn once per block and keep polling.
-- **Shutdown**: SIGTERM/SIGINT cancels every connection mid-request and disconnects; past 3 s the process exits anyway.
+| Condition | Behavior |
+|-----------|----------|
+| Rate not met | `get_status` reports requested vs achieved rate; over 100% for 30 s warns once |
+| Device not answering | Demoted after `demote_after` timeouts: skipped, probed from 10 s doubling to `demote_max_s` |
+| Link down | Reconnect from 3 s doubling to 60 s |
+| Unreachable at start | Extension stops with an ERROR naming the connection |
+| Exception 02/03 | Block skipped, retried every 10 min; `verify` finds the bad registers |
 
 ### Auto-scan
 
-A device with no register map file (and not `sunspec`) discovers its registers at start, unless its Auto-scan toggle is off:
-
-- **Discovery**: scan's range finder (see [Scan](#scan)) over holding registers, input registers, coils and discrete inputs, TCP 1-65536, RTU 1-10000, 30001-31000, 40001-41000, 50001-51000. Reads only (FC 01-04), through the connection's request path: one discovery read per scheduler tick, only when nothing else is overdue, so other devices keep their rates. It learns the device's largest read into `max_block_size` / `max_bit_block_size`. A read with no response is retried (and counts toward demotion); after `demote_after` in a row while the device answers other reads, that range counts as a hole.
-- **Polling**: each valid register polls from the moment it is found, at the device's rate (same precedence as mapped devices), traced as a raw register (below).
-- **Failed registers**: per block, as common SCADA tools do (no bisecting): a block that answers exception 02/03, or `demote_after` times nothing while the device answers others, is ignored whole, every register in it, and retried every 10 min.
-- **Status**: `get_status` / `get_snapshot` / `list_devices` carry `auto_scan`: `state` (`scanning` / `done`), `table` being scanned, `found`, `ignored`. `list_registers` lists what was found.
-- **State**: in memory only; discovery re-runs on every start. `save_map` writes the finds as a map file to load instead, with the same trace paths and fields.
-
-Each register is its own trace event, and the SDK holds roughly 0.75 MB per event: a device with hundreds of registers costs hundreds of MB. For a large device, save the map and trim it.
+A device without a register map file discovers its registers at start (reads only) and polls each as it is found, as a [raw register](#raw-registers). It reruns on every start; `save_map` writes the finds as a map file. Each register is its own trace event (~0.75 MB each), so save and trim the map for large devices.
 
 ### Raw registers
 
-Registers polled or read without a map name (auto-scan, `read_register`) are traced one event per register, keyed by its address in the device's base, with one field named for its table: holding register 123 is `Modbus/<connection>/<device>/holding_registers/123`, field `hr_123`. Input registers, coils and discrete inputs use `input_registers/` `ir_123`, `coils/` `coil_123` and `discrete_inputs/` `di_123` (the spec's table names), so the tables never share an event and a plot names the table. Values are raw uint16 words, or booleans for bits.
+Unmapped registers trace one event per register: holding register 123 is `holding_registers/123`, field `hr_123` (likewise `input_registers/` `ir_`, `coils/` `coil_`, `discrete_inputs/` `di_`), as raw uint16 or bool.
 
 ## Register Map
 
@@ -126,39 +115,39 @@ A register map file defines which registers to read and how to decode them. Even
 }
 ```
 
-A device's `register_map_file` is a path on the agent's host (absolute or `~`), or the map itself as JSON when it starts with `{`: `"register_map_file": "{\"events\": {\"power\": [{\"address\": 1}]}}"`.
+`register_map_file` is a path on the agent's host, or the map JSON inline (starting with `{`).
 
 ### Addressing
 
-Addresses are 1-based by default, the common SCADA convention: holding register `40001` in a vendor sheet is `"type": "holding", "address": 40001`, sent as wire address 40000 (same for all four tables). Maps, default names (`r<address>`), `list_registers`, logs, verify reports, scan output and the raw actions (`read_register`, `write_*`) all use the map's base; a device without a map uses 1. A map numbered from wire address 0 sets `"device": {"address_base": 0}`.
+Addresses are 1-based, as in vendor sheets: holding register `40001` is sent as wire address 40000. A map numbered from wire 0 sets `"device": {"address_base": 0}`.
 
 ### Register Fields
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `address` | Yes | | Register address in the map's base (1–65536; 0–65535 with `address_base` 0) |
-| `name` | No | `r<address>` | Field name in Zelos event (unique per event; duplicates fail at load) |
+| `address` | Yes | | Register address |
+| `name` | No | `r<address>` | Field name, unique per event |
 | `type` | No | `holding` | `holding`, `input`, `coil`, `discrete_input` |
-| `datatype` | No | `uint16` | See data types below |
+| `datatype` | No | `uint16` | See [Data Types](#data-types) |
 | `unit` | No | | Display unit |
-| `scale` | No | `1.0` | Scale factor (finite, non-zero); a scaled integer decodes to a float. A write the register cannot hold exactly is refused, naming the nearest writable value |
-| `rate` | No | device rate | Poll rate (seconds); `0` or `null` = not polled, actions still read/write it |
-| `byte_order` | No | `big` | `big`, `little`, `big_swap`, `little_swap` |
-| `writable` | No | `false` | `true` lets the write actions set this holding register or coil; everything else is read-only |
+| `scale` | No | `1.0` | Scale factor; a scaled integer decodes to a float |
+| `rate` | No | device rate | Poll rate (s); `0` = not polled |
+| `byte_order` | No | `big` | See [Byte Order](#byte-order) |
+| `writable` | No | `false` | Allow writes (holding registers and coils) |
 | `length` | strings | | Registers a `string` spans |
-| `scale_ref` | No | | Name of an integer register in the same event holding a power-of-10 exponent, read in the same tick: value = raw x 10^exponent (null when the exponent is, or its read failed). Integer registers only, not with `scale`. The register and its exponent register are read-only (`writable: true` on either fails the load). The exponent register is read but not traced |
-| `invalid` | No | | Raw values that mean "not implemented", logged as null. Compared as the unsigned value of the words (int16 `-32768` is `32768`). On a string only `[0]`: all NUL bytes |
-| `values` | No | | Enum labels for an unscaled integer register, `{"0": "off", "1": "on"}`; shown in the trace |
+| `scale_ref` | No | | Integer register in the same event holding a power-of-10 exponent |
+| `invalid` | No | | Raw values meaning "not implemented", logged as null |
+| `values` | No | | Enum labels, `{"0": "off", "1": "on"}` |
 
-An optional top-level `device` block carries device-model quirks, e.g. `"device": {"max_block_size": 60, "byte_order": "big_swap"}`. Unknown keys or bad values fail the load.
+An optional top-level `device` block carries device quirks, e.g. `"device": {"max_block_size": 60, "byte_order": "big_swap"}`:
 
 | Key | Description |
 |-----|-------------|
 | `max_block_size`, `max_bit_block_size`, `max_read_gap`, `write_mode` | Override Advanced |
 | `byte_order` | Default for registers without one |
-| `min_rate` | Floor (s) on every register's rate: the device is never polled faster |
-| `close_after_sweep` | Close the connection whenever polling goes idle, reopen on the next read (devices with one connection slot). Only when every device on the connection sets it |
-| `address_base` | `1` (default) or `0`: how the map numbers addresses (see [Addressing](#addressing)) |
+| `min_rate` | Floor (s) on every register's rate |
+| `close_after_sweep` | Close the connection between sweeps (single-connection devices) |
+| `address_base` | `1` (default) or `0` |
 
 ### Data Types
 
@@ -170,44 +159,22 @@ An optional top-level `device` block carries device-model quirks, e.g. `"device"
 | `uint64` | 4 | `int64` | 4 |
 | `float64` | 4 | `string` | `length` |
 
-Strings decode 2 ASCII bytes per register, high byte first (`byte_order` does not apply), end at the first NUL, drop trailing spaces, and are never writable.
+Strings are ASCII, 2 bytes per register, read-only.
 
 ### Byte Order
 
-Bytes of a 32-bit value as they arrive on the wire, A = most significant; 64-bit extends the same way (`little` = HGFEDCBA). Single-register values are never reordered.
+Wire order of a 32-bit value, A = most significant byte.
 
-| Order | Wire bytes | Description | Common in |
-|-------|------------|-------------|-----------|
-| `big` | AB CD | Standard Modbus | Most devices |
-| `little` | DC BA | Full byte reversal | |
-| `big_swap` | CD AB | Word-swapped, bytes within a word kept | Modicon/Schneider PLCs |
-| `little_swap` | BA DC | Bytes swapped within each word, word order kept | |
-
-## SunSpec
-
-Set a device's Register Map to `sunspec` (`"register_map": "sunspec"`, instead of `register_map_file`) and the map is built at connect:
-
-1. Find the `SunS` marker at holding register 40001, then 1, then 50001 (1-based, as SunSpec documents it; wire 40000, 0, 50000).
-2. Walk the model chain (model ID, length) to the `0xFFFF` end marker.
-3. Map every model with a [pysunspec2](https://github.com/sunspec/pysunspec2) definition.
-
-Discovery only reads (FC 3). No marker, an exception answer for a model header, or a chain without the end marker is a device error (logged, `error` in `get_status`, `map_pending` stays true) retried every 30 s; a partial map is never used; a silent device is demoted like a polled one. The connection keeps polling its other devices. Identity, nameplate and settings models (1, 120, 121, 702) poll every 60 s; the rest at the device rate.
-
-| SunSpec | Becomes |
-|---------|---------|
-| Model | Event `<name>_<id>` (`common_1`, `inverter_103`; a repeat gets `_2`) |
-| Point | Field named after the point, with its units; read-only |
-| Repeating group | `<group>_<n>_<point>`, count from the model length |
-| `sf` scale factor | `scale_ref` to the `*_SF` field (read, not traced); a fixed integer `sf` becomes `scale` |
-| `enum16`/`enum32` | `values` from the symbols |
-| Not-implemented value | null (`0x8000`, `0xFFFF`, `0x80000000`, NaN, ...; `0` for accumulators and `ipaddr`, all NUL for strings) |
-| `bitfield*` | Raw integer |
-
-Skipped with a warning: models without a definition, point types `eui48`/`ipv6addr`, and repeating groups whose count needs a device read (nested or not last).
+| Order | Wire bytes | Common in |
+|-------|------------|-----------|
+| `big` | AB CD | Most devices |
+| `little` | DC BA | |
+| `big_swap` | CD AB | Modicon/Schneider PLCs |
+| `little_swap` | BA DC | |
 
 ## Scan
 
-Point scan at an unknown device to get its unit IDs, identity, valid address ranges and a draft register map. Scan only reads: function codes 01-04, 43/14 (device identification) and 17 (server ID), one request at a time, back to back on TCP and 50 ms apart on RTU (`--delay-ms`). A busy reply (06), or a unit that answered going silent (timeout, 0B), doubles the gap up to 500 ms; the report gives the settled `request_gap_ms`. Some devices clear latched alarms or counters on read; review before scanning production equipment.
+Point scan at an unknown device to find its unit IDs, identity, valid address ranges, and a draft register map. Scan only reads (FC 01-04, 43/14, 17). Some devices clear latched alarms or counters on read; review before scanning production equipment.
 
 ```bash
 uv run main.py scan 192.168.1.100 --out draft.json         # JSON report on stdout
@@ -215,49 +182,37 @@ uv run main.py scan /dev/ttyUSB0 -t rtu --autodetect --units 1-10
 uv run main.py verify 192.168.1.100 registers.json --unit 3  # exits 1 on any problem
 ```
 
-| Step | What it does |
-|------|--------------|
-| Units | TCP: the first of 1, 0, 255 to answer; a gateway (exception 0A/0B), or no answer, is swept. RTU is swept. A sweep covers 1-247 (`--units` to narrow it). 16 timeouts with no reply end it (RTU adds serial diagnostics) |
-| Serial autodetect | The given settings, then 9600/19200 8N1/8E1, 38400 and 115200 8N1 |
-| Identify | FC 43/14 objects and FC 17; a `SunS` marker reports "set register_map to sunspec" and skips the draft |
-| Ranges | Per table over TCP 1-65536, or RTU 1-10000, 30001-31000, 40001-41000, 50001-51000 (`--range`, 1-based); learns the device's largest register and bit reads into the draft's `max_block_size` / `max_bit_block_size` |
-| Draft map | 1-based. Every readable address as a raw register: `uint16` for holding/input, `bool` for coils/discrete inputs, `writable: false`, no `byte_order`, `rate` or `scale`. Named as auto-scan traces it (one event per register: `holding_registers/40001` field `hr_40001`; also `input_registers/` `ir_`, `coils/` `coil_`, `discrete_inputs/` `di_`), so a draft, a `save_map` file and an auto-scan trace share paths; trim a large draft, as each event costs memory (see [Auto-scan](#auto-scan)). The learned read limits go in its `device` block |
+The draft lists every readable address as a raw `uint16` / `bool`, read-only; set datatypes, byte order and scaling from the datasheet.
 
-Scan infers nothing from values, as common Modbus tools do: set datatypes, byte order and scaling in the draft from the datasheet. Stage budgets and `--max-seconds` cut a scan short with a `cutoffs` entry in the report; past `--max-seconds` every stage stops and the ranges found so far still make the draft. Devices that read 0 at unmapped addresses make every address look valid, so the draft lists them all. Islands shorter than 10 (100) addresses deep inside a hole of 125 (1000) or more can be missed.
-
-With the extension stopped, the same runs as actions. They return the report and draft maps inline; `scan_device` with `out_path` also writes the draft map there (several units: `<name>_unit<id>.json`, as the CLI's `--out`), with the `save_map` path rules below.
+With the extension stopped, the same runs as actions:
 
 | Action | Description |
 |--------|-------------|
-| `auto_config` | Quick, the config form's Auto-configure: sweeps each connection in the form (unsaved edits included; older apps: the saved config) for its configured unit, 1-10 and 247 (RTU: also serial settings), identifies them, keeps its devices and adds one per new unit, `register_map: sunspec` where the marker is found (also on a configured unit, unless it sets `register_map_file`); the other new units [auto-scan](#auto-scan) at start. No connection: probes 127.0.0.1:502 only. One 25 s budget across connections; what did not fit is named in the message |
-| `scan_device` | Comprehensive, slow: scan a host or serial port (empty: the first configured connection); units as in the CLI unless `units` is given. Time limit up to 1740 s |
-| `verify_map` | Check a map file against the device register by register (empty: the one configured for that unit). `problems` names each register that raised an exception, got no response, read NaN/Inf as a declared float or non-ASCII bytes as a declared string; `values` has every decoded value to compare with the device's own display. `ok` counts registers checked clean, `unchecked` those a cutoff (time limit, default 840 s; or 16 requests in a row unanswered) skipped; the CLI exits 1 on any problem or a cutoff |
-| `list_serial_ports` | Serial ports on the agent's machine, as choices |
+| `auto_config` | The config form's Auto-configure: finds units on each connection and adds them, SunSpec where detected |
+| `scan_device` | Full scan of a host or serial port; slow |
+| `verify_map` | Check a map file against the device register by register |
+| `list_serial_ports` | Serial ports on the agent's machine |
 
 ## Actions
 
-The extension provides actions accessible from the Zelos App (and to app extensions as
-`Modbus/<action>`, whatever the trace prefix). Every action but `list_devices` takes a
-`device` selector, `<connection>/<device>` (e.g. `10_0_0_5/unit1`).
+Actions are available from the Zelos App and to app extensions as `Modbus/<action>`. Every action but `list_devices` takes a `device` selector, `<connection>/<device>` (e.g. `10_0_0_5/unit1`).
 
 | Action | Description |
 |--------|-------------|
-| `list_devices` | One row per device: connection, unit ID, endpoint, trace path, map summary, `raw_writes` (raw write actions enabled), and health (`connected`, `error`, `map_pending`, `refused`, demotion) |
-| `get_status` | Connection status, `error`, `successful_reads`/`failed_reads`, requested vs achieved rate (worst tier), demotion, and block-read settings |
-| `get_snapshot` | Last value per `event/name` (value + timestamp) from the poll cache, no device I/O |
-| `read_register` | Read raw words/bits by address (map's base), register type, and count; each value is traced as a [raw register](#raw-registers), plus one DEBUG log line. A failed read traces nothing |
-| `write_single_register` | Write one holding register (FC 6): an integer 0-65535, or -32768..-1 as two's complement. Raw addresses, counts and values must be whole numbers |
-| `write_registers` | Write 1-123 holding registers (FC 16), values as for FC 6 |
-| `write_coil` | Write `ON`/`OFF` (or true/false, 0/1) to a coil address (FC 5); anything else is refused |
-| `read_named_register` | Read a mapped register by `event/name` (a bare name only if one event has it) |
-| `write_named_register` | Write a mapped register by `event/name`; returns and caches the value actually written. A value the register cannot hold exactly (a fraction of a raw step) is refused; a coil takes only true/false or 0/1 |
-| `list_registers` | Register catalog (map or auto-scan): `event/name` path, address, datatype, scale, unit, effective `rate` (0 = not polled) |
+| `list_devices` | Every device with its endpoint, trace path, map, and health |
+| `get_status` | Connection health, read counters, requested vs achieved rate |
+| `get_snapshot` | Last polled value per `event/name`, no device I/O |
+| `read_register` | Read raw registers or bits by address, type, and count |
+| `write_single_register` | Write one holding register (FC 6) |
+| `write_registers` | Write 1-123 holding registers (FC 16) |
+| `write_coil` | Write `ON`/`OFF` to a coil (FC 5) |
+| `read_named_register` | Read a mapped register by `event/name` |
+| `write_named_register` | Write a mapped register by `event/name`, in engineering units |
+| `list_registers` | Register catalog: path, address, datatype, scale, unit, rate |
 | `list_writable_registers` | Same catalog, writable registers only |
-| `save_map` | Write the device's current map to a JSON file: its loaded map, or for an auto-scanned device the registers found so far (uint16 words and bools, `writable: false`, its `address_base`, one event per register named as auto-scan traces it (`holding_registers/123`, field `hr_123`), so loading it keeps every signal path, `rate` = the auto-scan rate, ignored registers left out). Load it as the Register Map File. Path absolute or `~`, parent directory must exist; an existing file only with `overwrite` |
+| `save_map` | Write the device's current map (loaded or auto-scanned) to a JSON file |
 
-A failed request returns `success: false` with the reason in `error`: `no response from device`, `device refused: exception 02 (illegal data address)`, or `cannot connect to <endpoint>`.
-
-Every write result carries `outcome` (OPC UA Good/Bad/Uncertain): `ok`; `refused` (not written: read-only, raw writes disabled, bad value, device exception, cannot connect); or `unknown` (no response, or gateway exception 0B: the write may have landed, so read back before retrying). `success` is true only for `ok`. The raw write actions need `allow_raw_writes` and never write an address the map marks read-only. Writes retry like reads, `retries` extra attempts; FC 5/6/15/16 write absolute values, so a repeat is idempotent.
+Raw writes need `allow_raw_writes` and never touch an address the map marks read-only. Every write returns `outcome`: `ok`, `refused` (not written), or `unknown` (no response: the write may have landed, read back before retrying).
 
 ## Development
 
