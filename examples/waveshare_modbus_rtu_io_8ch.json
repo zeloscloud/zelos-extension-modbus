@@ -1,0 +1,252 @@
+{
+  "name": "waveshare_modbus_rtu_io_8ch",
+  "description": "Waveshare Modbus RTU IO 8CH: 8 digital outputs (coils), 8 digital inputs, RS485 9600 8N1, unit 1 by default. Addresses are the wire addresses from the vendor wiki.",
+  "device": {
+    "address_base": 0,
+    "max_block_size": 8,
+    "max_bit_block_size": 8
+  },
+  "events": {
+    "outputs": [
+      {
+        "name": "do_1",
+        "type": "coil",
+        "address": 0,
+        "datatype": "bool",
+        "writable": true,
+        "description": "Output channel 1"
+      },
+      {
+        "name": "do_2",
+        "type": "coil",
+        "address": 1,
+        "datatype": "bool",
+        "writable": true,
+        "description": "Output channel 2"
+      },
+      {
+        "name": "do_3",
+        "type": "coil",
+        "address": 2,
+        "datatype": "bool",
+        "writable": true,
+        "description": "Output channel 3"
+      },
+      {
+        "name": "do_4",
+        "type": "coil",
+        "address": 3,
+        "datatype": "bool",
+        "writable": true,
+        "description": "Output channel 4"
+      },
+      {
+        "name": "do_5",
+        "type": "coil",
+        "address": 4,
+        "datatype": "bool",
+        "writable": true,
+        "description": "Output channel 5"
+      },
+      {
+        "name": "do_6",
+        "type": "coil",
+        "address": 5,
+        "datatype": "bool",
+        "writable": true,
+        "description": "Output channel 6"
+      },
+      {
+        "name": "do_7",
+        "type": "coil",
+        "address": 6,
+        "datatype": "bool",
+        "writable": true,
+        "description": "Output channel 7"
+      },
+      {
+        "name": "do_8",
+        "type": "coil",
+        "address": 7,
+        "datatype": "bool",
+        "writable": true,
+        "description": "Output channel 8"
+      }
+    ],
+    "inputs": [
+      {
+        "name": "di_1",
+        "type": "discrete_input",
+        "address": 0,
+        "datatype": "bool",
+        "description": "Input channel 1"
+      },
+      {
+        "name": "di_2",
+        "type": "discrete_input",
+        "address": 1,
+        "datatype": "bool",
+        "description": "Input channel 2"
+      },
+      {
+        "name": "di_3",
+        "type": "discrete_input",
+        "address": 2,
+        "datatype": "bool",
+        "description": "Input channel 3"
+      },
+      {
+        "name": "di_4",
+        "type": "discrete_input",
+        "address": 3,
+        "datatype": "bool",
+        "description": "Input channel 4"
+      },
+      {
+        "name": "di_5",
+        "type": "discrete_input",
+        "address": 4,
+        "datatype": "bool",
+        "description": "Input channel 5"
+      },
+      {
+        "name": "di_6",
+        "type": "discrete_input",
+        "address": 5,
+        "datatype": "bool",
+        "description": "Input channel 6"
+      },
+      {
+        "name": "di_7",
+        "type": "discrete_input",
+        "address": 6,
+        "datatype": "bool",
+        "description": "Input channel 7"
+      },
+      {
+        "name": "di_8",
+        "type": "discrete_input",
+        "address": 7,
+        "datatype": "bool",
+        "description": "Input channel 8"
+      }
+    ],
+    "config": [
+      {
+        "name": "mode_1",
+        "address": 4096,
+        "rate": 60,
+        "values": {
+          "0": "normal",
+          "1": "linkage",
+          "2": "toggle",
+          "3": "edge"
+        },
+        "description": "Output 1 control mode; non-normal modes drive the output from its input"
+      },
+      {
+        "name": "mode_2",
+        "address": 4097,
+        "rate": 60,
+        "values": {
+          "0": "normal",
+          "1": "linkage",
+          "2": "toggle",
+          "3": "edge"
+        },
+        "description": "Output 2 control mode; non-normal modes drive the output from its input"
+      },
+      {
+        "name": "mode_3",
+        "address": 4098,
+        "rate": 60,
+        "values": {
+          "0": "normal",
+          "1": "linkage",
+          "2": "toggle",
+          "3": "edge"
+        },
+        "description": "Output 3 control mode; non-normal modes drive the output from its input"
+      },
+      {
+        "name": "mode_4",
+        "address": 4099,
+        "rate": 60,
+        "values": {
+          "0": "normal",
+          "1": "linkage",
+          "2": "toggle",
+          "3": "edge"
+        },
+        "description": "Output 4 control mode; non-normal modes drive the output from its input"
+      },
+      {
+        "name": "mode_5",
+        "address": 4100,
+        "rate": 60,
+        "values": {
+          "0": "normal",
+          "1": "linkage",
+          "2": "toggle",
+          "3": "edge"
+        },
+        "description": "Output 5 control mode; non-normal modes drive the output from its input"
+      },
+      {
+        "name": "mode_6",
+        "address": 4101,
+        "rate": 60,
+        "values": {
+          "0": "normal",
+          "1": "linkage",
+          "2": "toggle",
+          "3": "edge"
+        },
+        "description": "Output 6 control mode; non-normal modes drive the output from its input"
+      },
+      {
+        "name": "mode_7",
+        "address": 4102,
+        "rate": 60,
+        "values": {
+          "0": "normal",
+          "1": "linkage",
+          "2": "toggle",
+          "3": "edge"
+        },
+        "description": "Output 7 control mode; non-normal modes drive the output from its input"
+      },
+      {
+        "name": "mode_8",
+        "address": 4103,
+        "rate": 60,
+        "values": {
+          "0": "normal",
+          "1": "linkage",
+          "2": "toggle",
+          "3": "edge"
+        },
+        "description": "Output 8 control mode; non-normal modes drive the output from its input"
+      },
+      {
+        "name": "uart",
+        "address": 8192,
+        "rate": 60,
+        "description": "Serial settings: high byte parity (0 none), low byte baud (0 4800, 1 9600, 2 19200, 3 38400, 4 57600, 5 115200, 6 128000, 7 256000)"
+      },
+      {
+        "name": "address",
+        "address": 16384,
+        "rate": 60,
+        "description": "Modbus unit ID"
+      },
+      {
+        "name": "firmware",
+        "address": 32768,
+        "rate": 60,
+        "scale": 0.01,
+        "description": "Firmware version (200 = V2.00)"
+      }
+    ]
+  }
+}
