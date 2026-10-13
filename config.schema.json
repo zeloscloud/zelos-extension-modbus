@@ -314,6 +314,13 @@
           "minimum": 0,
           "maximum": 10000
         },
+        "retry_unreachable_at_start": {
+          "type": "boolean",
+          "title": "Retry Unreachable at Start",
+          "description": "Off: a connection that cannot connect at start stops the extension. On: it logs an ERROR and is retried like a dropped link while the other connections poll.",
+          "default": false,
+          "ui:widget": "toggle"
+        },
         "demote_after": {
           "type": "integer",
           "title": "Demote After (timeouts)",
