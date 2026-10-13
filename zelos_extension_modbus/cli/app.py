@@ -300,7 +300,9 @@ def init_sdk(prefix: str) -> zelos_sdk.TraceSource | None:
     return source if prefix else None
 
 
-async def run_connections(connections: list[ModbusConnection]) -> None:
+async def run_connections(
+    connections: list[ModbusConnection], retry_unreachable: bool = False
+) -> None:
     """Run every connection's poll loop until SIGTERM/SIGINT.
 
     A stop cancels the loops mid-request; each disconnects on the way out.
@@ -308,16 +310,19 @@ async def run_connections(connections: list[ModbusConnection]) -> None:
     """
     # First contact is a hard requirement: a server that is not there at start is
     # a config error. Once a link has been up, drops go through the retry cycle.
-    up = await asyncio.gather(*(conn.ensure_connected() for conn in connections))
-    down = [conn for conn, ok in zip(connections, up, strict=True) if not ok]
-    if down:
-        for conn in down:
-            logger.error(
-                f"Connection '{conn.name}' ({conn.endpoint}): cannot connect{conn.connect_error}"
-            )
-        for conn in connections:
-            await conn.disconnect()
-        raise SystemExit(1)
+    # retry_unreachable skips the gate; run_async logs and retries a never-up link.
+    if not retry_unreachable:
+        up = await asyncio.gather(*(conn.ensure_connected() for conn in connections))
+        down = [conn for conn, ok in zip(connections, up, strict=True) if not ok]
+        if down:
+            for conn in down:
+                logger.error(
+                    f"Connection '{conn.name}' ({conn.endpoint}): cannot connect"
+                    f"{conn.connect_error}"
+                )
+            for conn in connections:
+                await conn.disconnect()
+            raise SystemExit(1)
 
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
@@ -402,4 +407,4 @@ def run_app_mode(demo: bool = False) -> None:
 
     for conn in connections:
         conn.start(prefix, source)
-    asyncio.run(run_connections(connections))
+    asyncio.run(run_connections(connections, advanced.get("retry_unreachable_at_start", False)))

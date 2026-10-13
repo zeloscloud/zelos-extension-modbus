@@ -73,6 +73,7 @@ Applies to every connection and device; a register map `device` block overrides 
 | `retries` | `1` | Extra attempts per request |
 | `request_delay_ms` | `0` | Minimum gap between requests (RS485 gateways, slow RTU devices) |
 | `connect_delay_ms` | `0` | Pause after each (re)connect |
+| `retry_unreachable_at_start` | off | A connection unreachable at start is retried instead of stopping the extension |
 | `demote_after` | `3` | Consecutive timeouts before a device is demoted |
 | `demote_max_s` | `300` | Longest wait between probes of a demoted device |
 | `block_reads` | on | Coalesce contiguous registers into range reads |
@@ -93,7 +94,7 @@ Rate precedence: register `rate` > device Rate > `default_rate`; a map `min_rate
 | Rate not met | `get_status` reports requested vs achieved rate; over 100% for 30 s warns once |
 | Device not answering | Demoted after `demote_after` timeouts: skipped, probed from 10 s doubling to `demote_max_s` |
 | Link down | Reconnect from 3 s doubling to 60 s |
-| Unreachable at start | Extension stops with an ERROR naming the connection |
+| Unreachable at start | Extension stops with an ERROR naming the connection; with `retry_unreachable_at_start`, retried as a link down while the others poll |
 | Exception 02/03 | Block skipped, retried every 10 min; `verify` finds the bad registers |
 
 ### Auto-scan

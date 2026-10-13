@@ -12,6 +12,8 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import os
+import signal
 import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
@@ -287,6 +289,23 @@ def test_unreachable_server_at_start_exits(caplog):
     loop.close()
     assert exc.value.code == 1
     assert "Connection 'gw' (127.0.0.1:" in caplog.text and "cannot connect" in caplog.text
+
+
+def test_unreachable_server_at_start_retries_when_enabled(caplog):
+    """retry_unreachable: the absent server is retried while the extension runs."""
+    from conftest import free_port
+
+    from zelos_extension_modbus.cli.app import run_connections
+    from zelos_extension_modbus.client import ModbusConnection
+
+    conn = ModbusConnection(name="gw", host="127.0.0.1", port=free_port(), timeout=0.5, retries=0)
+    conn.start("", None)
+    loop = asyncio.new_event_loop()
+    loop.call_later(1.0, os.kill, os.getpid(), signal.SIGINT)
+    loop.run_until_complete(run_connections([conn], retry_unreachable=True))
+    loop.close()
+    assert "Connection 'gw' (127.0.0.1:" in caplog.text and "retrying in" in caplog.text
+    assert not conn.ever_connected
 
 
 def test_console_script_in_package():
