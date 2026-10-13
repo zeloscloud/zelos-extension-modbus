@@ -1,6 +1,6 @@
 {
-  "name": "codesys_modbus_tcp_server",
-  "description": "CODESYS ModbusTCP Server Device (port 502, unit 1): Input Registers[0..9] <- PLC_PRG.mb_in, Holding Registers[0..9] <- PLC_PRG.mb_hold. Wire addresses (address_base 0). The PLC packs the arrays in ST.",
+  "name": "zelos_revpi_codesys",
+  "description": "CODESYS ModbusTCP Server Device on zelos-revpi: PLC_PRG.mb_hold (holding) / PLC_PRG.mb_in (input)",
   "device": {
     "address_base": 0
   },
@@ -19,29 +19,27 @@
         "type": "input",
         "address": 2,
         "datatype": "int16",
-        "scale": 0.01,
-        "description": "Test sine x100"
+        "scale": 0.01
       },
       {
         "name": "heartbeat",
         "type": "input",
         "address": 3,
-        "datatype": "uint16",
-        "description": "Toggles every PLC cycle"
+        "datatype": "uint16"
       },
       {
         "name": "input_state",
         "type": "input",
         "address": 4,
         "datatype": "uint16",
-        "description": "Digital inputs of a CANopen node (TPDO1) read by the PLC's CANopen manager"
+        "description": "pdu TPDO1 inputs via CODESYS CANopen"
       },
       {
         "name": "relay_cmd",
         "type": "input",
         "address": 5,
         "datatype": "uint16",
-        "description": "Relay command the PLC sends to the CANopen node (RPDO1)"
+        "description": "PLC relay command (RPDO1)"
       },
       {
         "name": "engine_rpm",
@@ -49,7 +47,7 @@
         "address": 6,
         "datatype": "uint16",
         "unit": "rpm",
-        "description": "J1939 EngineSpeed (SPN 190) decoded by the PLC's J1939 manager"
+        "description": "J1939 SPN 190 via CODESYS"
       },
       {
         "name": "engine_coolant_c",
@@ -57,7 +55,7 @@
         "address": 7,
         "datatype": "int16",
         "unit": "degC",
-        "description": "J1939 EngineCoolantTemp (SPN 110) decoded by the PLC's J1939 manager"
+        "description": "J1939 SPN 110 via CODESYS"
       },
       {
         "name": "vcu_mode",
@@ -69,15 +67,13 @@
           "1": "Drive",
           "2": "Charge",
           "3": "Fault"
-        },
-        "description": "Mode the PLC's CAN TX cycle is in"
+        }
       },
       {
         "name": "vcu_tx_count",
         "type": "input",
         "address": 9,
-        "datatype": "uint16",
-        "description": "Frames the PLC has sent on its CAN TX cycle"
+        "datatype": "uint16"
       }
     ],
     "setpoints": [
@@ -115,7 +111,7 @@
           "0": "Live",
           "1": "Quiet"
         },
-        "description": "1 = PLC stops its CAN TX cycle and relay walk; default 0"
+        "description": "1 = PLC stops VCU TX and relay walk; default 0"
       }
     ]
   }
