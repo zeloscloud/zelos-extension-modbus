@@ -1,5 +1,5 @@
 {
-  "name": "zelos_revpi_codesys",
+  "name": "zelos-revpi",
   "description": "CODESYS ModbusTCP Server Device on zelos-revpi: PLC_PRG.mb_hold (holding) / PLC_PRG.mb_in (input)",
   "device": {
     "address_base": 0
