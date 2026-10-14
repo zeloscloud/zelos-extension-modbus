@@ -220,9 +220,11 @@ class TestAutoConfig:
             ),
             # Older app hosts pass nothing: the saved config.
             (None, [1], ["saved"], [{**SAVED[0], "devices": [{"unit_id": 1}]}]),
+            # A config without connections is the saved config too.
+            ({}, [1], ["saved"], [{**SAVED[0], "devices": [{"unit_id": 1}]}]),
             # No connection anywhere: probe 127.0.0.1:502 only.
             (
-                {},
+                {"connections": []},
                 [1],
                 ["127.0.0.1"],
                 [
@@ -234,7 +236,7 @@ class TestAutoConfig:
                     }
                 ],
             ),
-            ({}, [], ["127.0.0.1"], None),
+            ({"connections": []}, [], ["127.0.0.1"], None),
         ],
     )
     def test_connections_source(self, monkeypatch, config, answer, swept, connections):
@@ -265,6 +267,30 @@ class TestAutoConfig:
             }
         else:
             assert result["config"]["connections"] == connections
+
+    def test_target_sweeps_that_host(self, monkeypatch):
+        from zelos_extension_modbus import actions, scan
+
+        endpoints = []
+
+        async def fake_sweep(endpoint, **kwargs):
+            endpoints.append(endpoint)
+            return {
+                "endpoint": f"{endpoint['host']}:{endpoint['port']}",
+                "units": {"present": [1]},
+                "identity": {},
+                "sunspec": {},
+                "cutoffs": [],
+            }
+
+        monkeypatch.setattr(scan, "sweep", fake_sweep)
+        monkeypatch.setattr(actions, "_configured_connections", lambda: list(self.SAVED))
+        monkeypatch.setattr(actions, "_refuse_if_running", lambda: None)
+        result = actions.auto_config(config=self.FORM, target="192.0.2.10", port=1502)
+        assert endpoints == [{"transport": "tcp", "host": "192.0.2.10", "port": 1502}]
+        assert result["config"]["connections"] == [
+            {"transport": "tcp", "host": "192.0.2.10", "port": 1502, "devices": [{"unit_id": 1}]}
+        ]
 
     @pytest.mark.parametrize(
         ("answers", "result"),

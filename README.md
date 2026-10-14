@@ -198,7 +198,7 @@ With the extension stopped, the same runs as actions:
 
 | Action | Description |
 |--------|-------------|
-| `auto_config` | The config form's Auto-configure: finds units on each connection and adds them, SunSpec where detected |
+| `auto_config` | The config form's Auto-configure: finds units on each connection, or on a given host or serial port, and adds them, SunSpec where detected |
 | `scan_device` | Full scan of a host or serial port; slow |
 | `verify_map` | Check a map file against the device register by register |
 | `list_serial_ports` | Serial ports on the agent's machine |

@@ -736,13 +736,33 @@ def _endpoint(
     return link_kwargs(connections[0]), connections[0]
 
 
-def _link_fields(fn: Any) -> Any:
-    """Target fields shared by Scan Device and Verify Map."""
+def _target_connection(
+    target: str, transport: str, port: float, baudrate: float, parity: str, stopbits: float
+) -> dict[str, Any]:
+    """The config connection an action's target names."""
+    if transport == Transport.RTU:
+        return {
+            "transport": Transport.RTU,
+            "serial_port": target,
+            "baudrate": int(baudrate),
+            "parity": parity,
+            "stopbits": int(stopbits),
+        }
+    return {"transport": Transport.TCP, "host": target, "port": int(port)}
+
+
+def _link_fields(empty_target: str) -> Any:
+    """Target fields shared by Scan Device, Verify Map and Auto-configure; ``empty_target``
+    says what an empty target means for the action."""
+    return functools.partial(_with_link_fields, empty_target)
+
+
+def _with_link_fields(empty_target: str, fn: Any) -> Any:
     fields = [
         zelos_sdk.action.text(
             "target",
             title="Host or serial port",
-            description="Empty: the first configured connection",
+            description=empty_target,
             required=False,
             default="",
         ),
@@ -783,7 +803,7 @@ def _link_fields(fn: Any) -> Any:
     timeout=SCAN_TIMEOUT,
     standalone=True,
 )
-@_link_fields
+@_link_fields("Empty: the first configured connection")
 @zelos_sdk.action.boolean(
     "autodetect",
     title="Autodetect serial settings",
@@ -890,7 +910,7 @@ def scan_device(
     timeout=VERIFY_TIMEOUT,
     standalone=True,
 )
-@_link_fields
+@_link_fields("Empty: the first configured connection")
 @zelos_sdk.action.number(
     "unit_id", minimum=0, maximum=255, default=1, title="Unit ID", required=False
 )
@@ -952,12 +972,13 @@ DEFAULT_CONNECTION: dict[str, Any] = {"transport": Transport.TCP, "host": "127.0
     "settings), read their identity, and add a device per new unit. Where the SunSpec "
     "marker is found, register_map is set to sunspec (new or existing units; an existing "
     "unit with a register_map_file keeps it). Existing devices are kept. Returns the "
-    "config; review, then save and start. Sweeps the form's connections (older apps: the "
-    "saved config's); with none, probes 127.0.0.1:502. All within 25 s; what did not fit "
-    "is reported. For a register map use Scan Device.",
+    "config; review, then save and start. Sweeps the target when one is given, else the "
+    "form's connections (older apps: the saved config's); with none, probes 127.0.0.1:502. "
+    "All within 25 s; what did not fit is reported. For a register map use Scan Device.",
     timeout=900.0,
     standalone=True,
 )
+@_link_fields("Empty: the config's connections")
 @zelos_sdk.action.object(
     "config",
     properties={},
@@ -965,16 +986,27 @@ DEFAULT_CONNECTION: dict[str, Any] = {"transport": Transport.TCP, "host": "127.0
     description="The config form's current (possibly unsaved) data. Empty: the saved config",
     required=False,
 )
-def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+def auto_config(
+    config: dict[str, Any] | None = None,
+    target: str = "",
+    transport: str = Transport.TCP,
+    port: float = 502,
+    baudrate: float = 9600,
+    parity: str = "N",
+    stopbits: float = 1,
+) -> dict[str, Any]:
     """The app's auto-configure contract: ``config.connections`` replaces the form's."""
     from zelos_extension_modbus.cli.app import link_kwargs
     from zelos_extension_modbus.scan import ScanLink, quiet_pymodbus, sweep
 
     _refuse_if_running()
-    if config is None:
+    if target.strip():
+        link = (target.strip(), transport, port, baudrate, parity, stopbits)
+        connections = [_target_connection(*link)]
+    elif config is None or "connections" not in config:
         connections = _configured_connections()
     else:
-        connections = [c for c in config.get("connections") or [] if isinstance(c, dict)]
+        connections = [c for c in config["connections"] or [] if isinstance(c, dict)]
     probe = not connections
     if probe:
         connections = [DEFAULT_CONNECTION]
