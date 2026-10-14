@@ -16,7 +16,7 @@ import pytest
 
 from zelos_extension_modbus import client as client_module
 from zelos_extension_modbus.client import ModbusConnection
-from zelos_extension_modbus.serial_diag import diagnose_serial_port
+from zelos_extension_modbus.serial_diag import diagnose_serial_port, open_error
 
 
 @pytest.fixture
@@ -172,6 +172,7 @@ class TestConnectDiagnosticsThrottle:
             return ["fake finding"]
 
         monkeypatch.setattr(client_module, "diagnose_serial_port", fake_diag)
+        monkeypatch.setattr(client_module, "open_error", lambda port: "fake cause")
 
         client = ModbusConnection(transport="rtu", serial_port="/dev/ttyUSB0")
 
@@ -206,3 +207,30 @@ class TestConnectDiagnosticsThrottle:
 
         asyncio.run(scenario())
         assert calls == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="serial ports are not paths on Windows")
+class TestOpenError:
+    """The one-line cause a failed RTU connect reports."""
+
+    def test_missing_port(self, tmp_path):
+        port = str(tmp_path / "ttyUSB9")
+        assert open_error(port) == f"{port} does not exist"
+
+    def test_permission(self, tmp_path):
+        if os.getuid() == 0:
+            pytest.skip("root bypasses permission bits")
+        node = tmp_path / "ttyUSB0"
+        node.write_text("")
+        node.chmod(0o000)
+        assert open_error(str(node), dev_root=str(tmp_path)).startswith("open failed (EACCES)")
+
+    def test_opens(self, pty_slave_name):
+        assert open_error(pty_slave_name) == ""
+
+    def test_connect_names_the_cause(self, tmp_path):
+        """A failed RTU connect carries the cause into the cannot-connect line."""
+        port = str(tmp_path / "ttyUSB9")
+        conn = ModbusConnection(transport="rtu", serial_port=port)
+        assert not asyncio.run(conn.connect())
+        assert conn.connect_error == f": {port} does not exist"

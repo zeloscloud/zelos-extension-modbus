@@ -9,6 +9,7 @@ Tests core functionality:
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import math
@@ -40,6 +41,7 @@ from zelos_extension_modbus.client import (
     _is_connection_error,
     _reorder_registers,
     coil_state,
+    connect_failure,
     decode_block,
     decode_value,
     encode_register,
@@ -1436,6 +1438,15 @@ class TestFieldSanitization:
 # =============================================================================
 
 
+def _connect(conn: ModbusConnection) -> bool:
+    """``conn.connect()`` on a private loop; the suite relies on the default one."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(conn.connect())
+    finally:
+        loop.close()
+
+
 class TestReconnection:
     """Tests for connection error detection."""
 
@@ -1458,6 +1469,47 @@ class TestReconnection:
     )
     def test_is_connection_error(self, error, expected):
         assert _is_connection_error(error) is expected
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (None, "no answer within 3 s"),
+            (TimeoutError(), "no answer within 3 s"),
+            (
+                ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"),
+                "connection refused",
+            ),
+            (OSError(errno.EHOSTUNREACH, "No route to host"), "host unreachable"),
+            (OSError(errno.ENETUNREACH, "Network is unreachable"), "network unreachable"),
+            (socket.gaierror(socket.EAI_NONAME, "nodename nor servname"), "host name not found"),
+            (socket.gaierror(socket.EAI_AGAIN, "temporary failure"), "host lookup failed"),
+            (OSError(errno.EPIPE, "Broken pipe"), "broken pipe"),
+        ],
+    )
+    def test_connect_failure_words(self, error, expected):
+        assert connect_failure(error, 3.0) == expected
+
+    def test_refused_connect_names_the_cause(self):
+        conn = ModbusConnection(port=free_port(), name="c", timeout=2.0)
+        assert not _connect(conn)
+        assert conn.connect_error == ": connection refused"
+
+    def test_silent_host_names_the_timeout(self, monkeypatch):
+        """pymodbus reports a connect timeout as a bare False; the line says how long,
+        without a second wait to find out."""
+
+        class Silent:
+            connected = False
+
+            async def connect(self):
+                await asyncio.sleep(0.2)
+                return False
+
+        conn = ModbusConnection(host="192.0.2.1", name="c", timeout=0.2, retries=3)
+        conn._create_client = Silent
+        monkeypatch.setattr(asyncio, "open_connection", AsyncMock(side_effect=AssertionError))
+        assert not _connect(conn)
+        assert conn.connect_error == ": no answer within 0.2 s"
 
     def test_dropped_link_never_reconnects_inside_pymodbus(self):
         """A link that drops after the connect check is marked down; pymodbus never

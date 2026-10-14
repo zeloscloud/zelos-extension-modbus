@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import logging
 import math
+import socket
 import struct
 import sys
 import time
@@ -36,7 +38,7 @@ from zelos_extension_modbus.constants import (
     trace_layout,
 )
 from zelos_extension_modbus.register_map import Register, RegisterMap
-from zelos_extension_modbus.serial_diag import diagnose_serial_port
+from zelos_extension_modbus.serial_diag import diagnose_serial_port, open_error
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +372,30 @@ def refused(code: int) -> str:
     return f"device refused: exception {code:02X} ({EXCEPTION_NAMES.get(code, 'unknown code')})"
 
 
+_CONNECT_ERRNOS = {
+    errno.ECONNREFUSED: "connection refused",
+    errno.ECONNRESET: "connection reset",
+    errno.EHOSTUNREACH: "host unreachable",
+    errno.ENETUNREACH: "network unreachable",
+}
+_NAME_NOT_FOUND = {socket.EAI_NONAME, getattr(socket, "EAI_NODATA", socket.EAI_NONAME)}
+
+
+def connect_failure(error: BaseException | None, timeout: float) -> str:
+    """Why a TCP connect failed, in plain words; None or a timeout is no answer."""
+    if error is None or isinstance(error, TimeoutError):
+        return f"no answer within {timeout:g} s"
+    if isinstance(error, socket.gaierror):
+        return "host name not found" if error.errno in _NAME_NOT_FOUND else "host lookup failed"
+    if isinstance(error, ConnectionRefusedError):
+        return _CONNECT_ERRNOS[errno.ECONNREFUSED]
+    if isinstance(error, OSError) and error.errno in _CONNECT_ERRNOS:
+        return _CONNECT_ERRNOS[error.errno]
+    if isinstance(error, OSError) and error.strerror:
+        return error.strerror.lower()
+    return str(error) or type(error).__name__
+
+
 def _is_connection_error(error: Exception) -> bool:
     """Check if an exception indicates a connection problem."""
     if isinstance(error, (ConnectionError, ConnectionException, TimeoutError, OSError)):
@@ -504,6 +530,7 @@ class ModbusConnection:
         exc: Exception | None = None
         self.connected = False
         up = False
+        started = time.monotonic()
         try:
             self._client = self._create_client()
             await self._client.connect()
@@ -523,12 +550,34 @@ class ModbusConnection:
             self.connected = True
             return True
 
-        # pymodbus tends to swallow the underlying errno; keep it when we have it.
         # run_async logs it on its backoff cadence.
         self._connect_failures += 1
-        self.connect_error = f": {exc!r}" if exc is not None else ""
+        self.connect_error = f": {await self._connect_cause(exc, time.monotonic() - started)}"
         await self._run_serial_diagnostics()
         return False
+
+    async def _connect_cause(self, exc: Exception | None, elapsed: float) -> str:
+        """Why connect failed. pymodbus returns False without the OSError, so a
+        failure faster than the timeout is probed again to learn it."""
+        if self.transport == Transport.RTU:
+            if exc is not None:
+                return str(exc)
+            return (
+                await asyncio.to_thread(open_error, self.serial_port) or "serial port did not open"
+            )
+        if exc is None and elapsed < self.timeout:
+            try:
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.host, self.port), self.timeout
+                )
+            except OSError as e:  # includes TimeoutError and DNS failures
+                exc = e
+            else:
+                writer.close()
+                with contextlib.suppress(OSError):
+                    await writer.wait_closed()
+                return "the device closed the connection"
+        return connect_failure(exc, self.timeout)
 
     async def _run_serial_diagnostics(self) -> None:
         """Emit serial-port diagnostics for RTU, throttled to 1st + every Nth failure."""
@@ -608,7 +657,7 @@ class ModbusConnection:
             if wait > 0:
                 await asyncio.sleep(wait)
             if not await self._ensure_connected():
-                raise ConnectionException(f"cannot connect to {self.endpoint}")
+                raise ConnectionException(f"cannot connect to {self.endpoint}{self.connect_error}")
             if not self._client.connected:
                 # Dropped during connect_delay_ms: pymodbus would reconnect on its own
                 # (no backoff, no delay); reconnect through connect() instead.
@@ -1290,7 +1339,7 @@ class ModbusDevice:
         try:
             result = await self.connection.request(method, self.unit_id, address=address, **kwargs)
         except ConnectionException:  # raised before anything is sent
-            reason = f"cannot connect to {self.connection.endpoint}"
+            reason = f"cannot connect to {self.connection.endpoint}{self.connection.connect_error}"
         except ModbusIOException:
             reason, unknown = NO_RESPONSE, write
         except ModbusException as e:

@@ -106,6 +106,19 @@ def diagnose_serial_port(port: str, *, dev_root: str = "/dev", sys_root: str = "
     return findings
 
 
+def open_error(port: str, *, dev_root: str = "/dev") -> str:
+    """Why ``port`` does not open, in one line; empty when it opens or there is no way
+    to tell (Windows ports are not paths)."""
+    if sys.platform == "win32":
+        return ""
+    if not Path(port).exists():
+        return f"{port} does not exist"
+    findings: list[str] = []
+    with contextlib.suppress(Exception):
+        _probe_open(port, dev_root, findings)
+    return findings[0] if findings else ""
+
+
 # ---------------------------------------------------------------------------
 # Node existence + candidate listing
 # ---------------------------------------------------------------------------

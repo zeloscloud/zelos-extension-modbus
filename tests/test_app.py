@@ -280,13 +280,14 @@ def test_unreachable_server_at_start_exits(caplog):
     from zelos_extension_modbus.cli.app import run_connections
     from zelos_extension_modbus.client import ModbusConnection
 
-    conn = ModbusConnection(name="gw", host="127.0.0.1", port=free_port(), timeout=0.5, retries=0)
+    port = free_port()
+    conn = ModbusConnection(name="gw", host="127.0.0.1", port=port, timeout=0.5, retries=0)
     loop = asyncio.new_event_loop()  # private: later tests use the default loop
     with pytest.raises(SystemExit) as exc:
         loop.run_until_complete(run_connections([conn]))
     loop.close()
     assert exc.value.code == 1
-    assert "Connection 'gw' (127.0.0.1:" in caplog.text and "cannot connect" in caplog.text
+    assert f"Connection 'gw' (127.0.0.1:{port}): cannot connect: connection refused" in caplog.text
 
 
 def test_console_script_in_package():
