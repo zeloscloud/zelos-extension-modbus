@@ -957,6 +957,7 @@ DEFAULT_CONNECTION: dict[str, Any] = {"transport": Transport.TCP, "host": "127.0
     "is reported. For a register map use Scan Device.",
     timeout=900.0,
     standalone=True,
+    hidden=True,
 )
 @zelos_sdk.action.object(
     "config",
@@ -1069,6 +1070,7 @@ def _found(endpoint: str, units: list[tuple[int, list[str]]], added: list[int]) 
     "Serial ports on the machine running the agent, as choices for an RTU connection's "
     "Serial Port field, which also accepts a path typed by hand.",
     standalone=True,
+    hidden=True,
 )
 def list_serial_ports() -> dict[str, Any]:
     """The app's `action-choices` contract: `choices` in the order to show."""
