@@ -1,0 +1,168 @@
+{
+  "name": "waveshare_modbus_rtu_analog_input_8ch",
+  "description": "Waveshare Modbus RTU Analog Input 8CH: 8 analog inputs (FC04 0x0000-0x0007, value in mV or uA per the channel's type), per-channel type (0x1000-0x1007: 0 0-5V, 1 1-5V, 2 0-20mA, 3 4-20mA, 4 raw 12-bit), device address 0x4000, baud/parity 0x2000, version 0x8000. RS485 9600 8N1, unit 1 by default.",
+  "device": {
+    "address_base": 0,
+    "max_block_size": 8
+  },
+  "events": {
+    "inputs": [
+      {
+        "name": "ai_1",
+        "type": "input",
+        "address": 0,
+        "datatype": "uint16",
+        "description": "Channel 1: mV (voltage types) or uA (current types), raw code for type 4"
+      },
+      {
+        "name": "ai_2",
+        "type": "input",
+        "address": 1,
+        "datatype": "uint16",
+        "description": "Channel 2: mV (voltage types) or uA (current types), raw code for type 4"
+      },
+      {
+        "name": "ai_3",
+        "type": "input",
+        "address": 2,
+        "datatype": "uint16",
+        "description": "Channel 3: mV (voltage types) or uA (current types), raw code for type 4"
+      },
+      {
+        "name": "ai_4",
+        "type": "input",
+        "address": 3,
+        "datatype": "uint16",
+        "description": "Channel 4: mV (voltage types) or uA (current types), raw code for type 4"
+      },
+      {
+        "name": "ai_5",
+        "type": "input",
+        "address": 4,
+        "datatype": "uint16",
+        "description": "Channel 5: mV (voltage types) or uA (current types), raw code for type 4"
+      },
+      {
+        "name": "ai_6",
+        "type": "input",
+        "address": 5,
+        "datatype": "uint16",
+        "description": "Channel 6: mV (voltage types) or uA (current types), raw code for type 4"
+      },
+      {
+        "name": "ai_7",
+        "type": "input",
+        "address": 6,
+        "datatype": "uint16",
+        "description": "Channel 7: mV (voltage types) or uA (current types), raw code for type 4"
+      },
+      {
+        "name": "ai_8",
+        "type": "input",
+        "address": 7,
+        "datatype": "uint16",
+        "description": "Channel 8: mV (voltage types) or uA (current types), raw code for type 4"
+      }
+    ],
+    "config": [
+      {
+        "name": "type_1",
+        "type": "holding",
+        "address": 4096,
+        "datatype": "uint16",
+        "writable": true,
+        "rate": 60,
+        "description": "Channel 1 input type: 0 0-5V, 1 1-5V, 2 0-20mA, 3 4-20mA, 4 raw"
+      },
+      {
+        "name": "type_2",
+        "type": "holding",
+        "address": 4097,
+        "datatype": "uint16",
+        "writable": true,
+        "rate": 60,
+        "description": "Channel 2 input type: 0 0-5V, 1 1-5V, 2 0-20mA, 3 4-20mA, 4 raw"
+      },
+      {
+        "name": "type_3",
+        "type": "holding",
+        "address": 4098,
+        "datatype": "uint16",
+        "writable": true,
+        "rate": 60,
+        "description": "Channel 3 input type: 0 0-5V, 1 1-5V, 2 0-20mA, 3 4-20mA, 4 raw"
+      },
+      {
+        "name": "type_4",
+        "type": "holding",
+        "address": 4099,
+        "datatype": "uint16",
+        "writable": true,
+        "rate": 60,
+        "description": "Channel 4 input type: 0 0-5V, 1 1-5V, 2 0-20mA, 3 4-20mA, 4 raw"
+      },
+      {
+        "name": "type_5",
+        "type": "holding",
+        "address": 4100,
+        "datatype": "uint16",
+        "writable": true,
+        "rate": 60,
+        "description": "Channel 5 input type: 0 0-5V, 1 1-5V, 2 0-20mA, 3 4-20mA, 4 raw"
+      },
+      {
+        "name": "type_6",
+        "type": "holding",
+        "address": 4101,
+        "datatype": "uint16",
+        "writable": true,
+        "rate": 60,
+        "description": "Channel 6 input type: 0 0-5V, 1 1-5V, 2 0-20mA, 3 4-20mA, 4 raw"
+      },
+      {
+        "name": "type_7",
+        "type": "holding",
+        "address": 4102,
+        "datatype": "uint16",
+        "writable": true,
+        "rate": 60,
+        "description": "Channel 7 input type: 0 0-5V, 1 1-5V, 2 0-20mA, 3 4-20mA, 4 raw"
+      },
+      {
+        "name": "type_8",
+        "type": "holding",
+        "address": 4103,
+        "datatype": "uint16",
+        "writable": true,
+        "rate": 60,
+        "description": "Channel 8 input type: 0 0-5V, 1 1-5V, 2 0-20mA, 3 4-20mA, 4 raw"
+      },
+      {
+        "name": "address",
+        "type": "holding",
+        "address": 16384,
+        "datatype": "uint16",
+        "writable": true,
+        "rate": 60,
+        "description": "Device address 1-255"
+      },
+      {
+        "name": "baud_parity",
+        "type": "holding",
+        "address": 8192,
+        "datatype": "uint16",
+        "writable": true,
+        "rate": 60,
+        "description": "High byte parity (0 N,1 E,2 O), low byte baud code (1 = 9600)"
+      },
+      {
+        "name": "version",
+        "type": "holding",
+        "address": 32768,
+        "datatype": "uint16",
+        "rate": 60,
+        "description": "Firmware version x100"
+      }
+    ]
+  }
+}
