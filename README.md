@@ -13,6 +13,8 @@ A Zelos extension for the Modbus protocol. Read, write, and monitor registers fr
 
 ## Quick Start
 
+[![Install the Modbus extension, add a device by its address, start it and plot an auto-scanned register](assets/howto/quickstart/quickstart.avif)](assets/howto/quickstart/quickstart.mp4)
+
 From the CLI, on the agent that can reach the device:
 
 ```bash
