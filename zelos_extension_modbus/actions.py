@@ -958,6 +958,7 @@ DEFAULT_CONNECTION: dict[str, Any] = {"transport": Transport.TCP, "host": "127.0
     timeout=900.0,
     standalone=True,
     hidden=True,
+    read_only=True,
 )
 @zelos_sdk.action.object(
     "config",
@@ -1071,6 +1072,7 @@ def _found(endpoint: str, units: list[tuple[int, list[str]]], added: list[int]) 
     "Serial Port field, which also accepts a path typed by hand.",
     standalone=True,
     hidden=True,
+    read_only=True,
 )
 def list_serial_ports() -> dict[str, Any]:
     """The app's `action-choices` contract: `choices` in the order to show."""

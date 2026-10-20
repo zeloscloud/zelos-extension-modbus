@@ -356,3 +356,16 @@ class TestAutoConfig:
         devices = [{"unit_id": u} for u in known]
         conn = {"transport": "tcp", "host": "a", "port": 502, "devices": devices}
         assert actions.auto_config(config={"connections": [conn]})["message"] == message
+
+
+def test_only_discovery_actions_are_declared_read_only():
+    """Zelos AI runs a read-only action without asking, so the set is pinned: listing
+    serial ports opens none, and auto-configure only reads and returns a config."""
+    from zelos_sdk.actions import Action
+
+    from zelos_extension_modbus import actions
+
+    if "read_only" not in Action.__slots__:
+        pytest.skip("this zelos-sdk predates read_only and ignores the declaration")
+    declared = {a.__name__ for a in actions.ALL_ACTIONS if a._action.read_only}
+    assert declared == {"auto_config", "list_serial_ports"}
