@@ -519,7 +519,7 @@ class ModbusConnection:
             self._client = self._create_client()
             await self._client.connect()
             up = bool(self._client.connected)
-            if not up and self.transport == Transport.TCP and self._diagnose_due:
+            if not up and self.transport == Transport.TCP:
                 # pymodbus drops the OSError and connects within timeout; a plain
                 # connect recovers the cause, or rides out a lost SYN and we retry.
                 self.connect_error = await self._tcp_cause()
@@ -554,11 +554,6 @@ class ModbusConnection:
         self._connect_failures += 1
         return False
 
-    @property
-    def _diagnose_due(self) -> bool:
-        """On the 1st failure in a row, then every Nth."""
-        return self._connect_failures % _DIAG_EVERY == 0
-
     async def _tcp_cause(self) -> str:
         """Why a plain TCP connect fails (``": connection refused ..."``); "" if it connects."""
         try:
@@ -572,8 +567,8 @@ class ModbusConnection:
             )
         except ConnectionRefusedError:
             return (
-                f": connection refused (host up, nothing accepting on port {self.port}, "
-                "or the device's client connections are all in use)"
+                f": connection refused (nothing accepting on port {self.port}, the device's "
+                "client connections all in use, or a firewall rejecting it)"
             )
         except OSError as e:
             unreachable = e.errno == errno.EHOSTUNREACH and sys.platform == "darwin"
@@ -588,7 +583,7 @@ class ModbusConnection:
         # Fail closed: only RTU has a serial port to probe; any other transport skips.
         if self.transport != Transport.RTU:
             return
-        if not self._diagnose_due:
+        if self._connect_failures % _DIAG_EVERY != 0:
             return
         try:
             # Probes can block (filesystem, subprocess): keep them off the event loop.
