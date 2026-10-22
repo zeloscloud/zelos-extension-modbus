@@ -299,7 +299,7 @@ class TestAutoConfig:
                 "cutoffs": [],
             }
             if present is None:
-                return report | {"error": "cannot open", "units": {}}
+                return report | {"error": f"cannot open {endpoint['host']}:502", "units": {}}
             return report | {"units": {"present": present}}
 
         monkeypatch.setattr(scan, "sweep", fake_sweep)
@@ -307,6 +307,20 @@ class TestAutoConfig:
         conns = [{"transport": "tcp", "host": h, "port": 502} for h in answers]
         got = actions.auto_config(config={"connections": conns})
         assert {k: got[k] for k in ("status", "message")} == result
+
+    def test_refused_names_the_cause(self, monkeypatch):
+        import socket
+
+        from zelos_extension_modbus import actions
+
+        with socket.socket() as s:  # a port nothing listens on once closed
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        monkeypatch.setattr(actions, "_refuse_if_running", lambda: None)
+        conn = {"transport": "tcp", "host": "127.0.0.1", "port": port, "devices": []}
+        got = actions.auto_config(config={"connections": [conn]})
+        assert got["status"] == "error"
+        assert f"Couldn't connect to 127.0.0.1:{port}: connection refused" in got["message"]
 
     def test_rtu_without_a_port_asks_for_one(self, monkeypatch):
         from zelos_extension_modbus import actions

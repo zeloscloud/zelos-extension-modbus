@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import logging
 import math
 import struct
@@ -43,6 +44,12 @@ logger = logging.getLogger(__name__)
 # Run full serial diagnostics on the 1st connect failure, then every Nth
 # consecutive failure. A success resets.
 _DIAG_EVERY = 10
+# macOS answers EHOSTUNREACH for an absent LAN host, and also when the app lacks
+# Local Network access.
+_LOCAL_NETWORK_HINT = (
+    " (nothing answered at that address, or Zelos lacks access under System Settings >"
+    " Privacy & Security > Local Network)"
+)
 
 # Seconds between attempts to build a device's register map when the device
 # answered but discovery failed (a timeout follows the demotion schedule).
@@ -413,6 +420,7 @@ class ModbusConnection:
         request_delay_ms: int = 0,
         connect_delay_ms: int = 0,
         name: str | None = None,
+        connect_timeout: float | None = None,
     ) -> None:
         """Initialize a connection.
 
@@ -434,6 +442,8 @@ class ModbusConnection:
                 request (clamped to >= 0)
             name: Trace/action name; defaults to the sanitized endpoint
                 (``10_0_0_5``, ``dev_ttyUSB0``)
+            connect_timeout: Timeout of the plain TCP connect that follows a
+                failed one; defaults to timeout
         """
         self.transport = transport
         self.host = host
@@ -444,6 +454,7 @@ class ModbusConnection:
         self.stopbits = stopbits
         self.bytesize = bytesize
         self.timeout = timeout
+        self.connect_timeout = connect_timeout or timeout
         self.retries = int(_clamped("retries", retries, 0, float("inf")))
         self.request_delay_ms = int(_clamped("request_delay_ms", request_delay_ms, 0, float("inf")))
         self.connect_delay_ms = int(_clamped("connect_delay_ms", connect_delay_ms, 0, float("inf")))
@@ -508,6 +519,16 @@ class ModbusConnection:
             self._client = self._create_client()
             await self._client.connect()
             up = bool(self._client.connected)
+            if not up and self.transport == Transport.TCP and self._diagnose_due:
+                # pymodbus drops the OSError and connects within timeout; a plain
+                # connect recovers the cause, or rides out a lost SYN and we retry.
+                self.connect_error = await self._tcp_cause()
+                if not self.connect_error:
+                    await self._client.connect()
+                    up = bool(self._client.connected)
+                    self.connect_error = (
+                        "" if up else ": plain TCP connects, Modbus client's does not"
+                    )
         except Exception as e:
             exc = e
 
@@ -525,17 +546,49 @@ class ModbusConnection:
 
         # pymodbus tends to swallow the underlying errno; keep it when we have it.
         # run_async logs it on its backoff cadence.
-        self._connect_failures += 1
-        self.connect_error = f": {exc!r}" if exc is not None else ""
+        if exc is not None:
+            self.connect_error = f": {exc!r}"
+        elif self.transport != Transport.TCP:
+            self.connect_error = ""
         await self._run_serial_diagnostics()
+        self._connect_failures += 1
         return False
+
+    @property
+    def _diagnose_due(self) -> bool:
+        """On the 1st failure in a row, then every Nth."""
+        return self._connect_failures % _DIAG_EVERY == 0
+
+    async def _tcp_cause(self) -> str:
+        """Why a plain TCP connect fails (``": connection refused ..."``); "" if it connects."""
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, self.port), self.connect_timeout
+            )
+        except TimeoutError:
+            return (
+                f": no answer in {self.connect_timeout:g} s "
+                "(host down or unreachable, wrong address, or a firewall)"
+            )
+        except ConnectionRefusedError:
+            return (
+                f": connection refused (host up, nothing accepting on port {self.port}, "
+                "or the device's client connections are all in use)"
+            )
+        except OSError as e:
+            unreachable = e.errno == errno.EHOSTUNREACH and sys.platform == "darwin"
+            return f": {e.strerror or e}{_LOCAL_NETWORK_HINT if unreachable else ''}"
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+        return ""
 
     async def _run_serial_diagnostics(self) -> None:
         """Emit serial-port diagnostics for RTU, throttled to 1st + every Nth failure."""
         # Fail closed: only RTU has a serial port to probe; any other transport skips.
         if self.transport != Transport.RTU:
             return
-        if (self._connect_failures - 1) % _DIAG_EVERY != 0:
+        if not self._diagnose_due:
             return
         try:
             # Probes can block (filesystem, subprocess): keep them off the event loop.

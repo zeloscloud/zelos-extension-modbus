@@ -1009,7 +1009,7 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
             if rtu:
                 unopened.append(conn["serial_port"])
             else:
-                unreachable.append(result["endpoint"])
+                unreachable.append(result["error"].removeprefix("cannot open "))
         else:
             swept.append(result["endpoint"])
         if result["cutoffs"]:
@@ -1039,7 +1039,7 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
         conn["devices"] = devices
         out.append(conn)
     partial = f" Not fully swept in {AUTO_CONFIG_SECONDS:g} s: {', '.join(cut)}." if cut else ""
-    failed = f" Couldn't connect to {', '.join(unreachable)}." if unreachable else ""
+    failed = f" Couldn't connect to {'; '.join(unreachable)}." if unreachable else ""
     failed += f" Couldn't open {', '.join(unopened)}." if unopened else ""
     failed += " Choose a Serial Port to scan." if no_port else ""
     if not found and probe:

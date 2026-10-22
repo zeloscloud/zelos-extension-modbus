@@ -77,6 +77,9 @@ ALLOWED: dict[str, int] = {
 TABLES: tuple[str, ...] = tuple(RegisterType)
 
 DEFAULT_TIMEOUT = 0.5
+#: Plain TCP connect after a failed one: rides out a lost SYN or a slow first ARP
+#: (capped by the deadline).
+CONNECT_TIMEOUT = 3.0
 #: Gap between requests on RTU (Chipkin); TCP devices pace themselves. Busy
 #: (06), or SLOW_AFTER no-replies in a row from a unit that answered, doubles it
 #: (from at least GAP_STEP_MS) up to MAX_GAP_MS; SPEED_UP_AFTER replies in a
@@ -207,8 +210,15 @@ class ScanLink:
         """(Re)open the link, optionally with changed serial settings."""
         await self.close()
         self.endpoint.update(changes)
+        connect = CONNECT_TIMEOUT
+        if self.deadline is not None:
+            connect = max(min(connect, self.deadline - time.monotonic()), self.timeout)
         self.conn = ModbusConnection(
-            **self.endpoint, timeout=self.timeout, retries=0, request_delay_ms=self.delay_ms
+            **self.endpoint,
+            timeout=self.timeout,
+            retries=0,
+            request_delay_ms=self.delay_ms,
+            connect_timeout=connect,
         )
         return await self.conn.connect()
 
@@ -777,7 +787,7 @@ async def _reach(
         if not report["serial"]:
             return []
     elif not await link.open():
-        report["error"] = f"cannot open {link.label}"
+        report["error"] = f"cannot open {link.label}{link.conn.connect_error}"
         return []
     report["endpoint"] = link.label
     wide = list(dict.fromkeys(first + list(QUICK_UNITS if quick else RTU_UNITS)))
