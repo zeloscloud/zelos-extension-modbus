@@ -94,6 +94,7 @@ Rate precedence: register `rate` > device Rate > `default_rate`; a map `min_rate
 | Rate not met | `get_status` reports requested vs achieved rate; over 100% for 30 s warns once |
 | Device not answering | Demoted after `demote_after` timeouts: skipped, probed from 10 s doubling to `demote_max_s` |
 | Link down | Reconnect from 3 s doubling to 60 s |
+| TCP connect fails | Error names the cause (refused, no answer, OS error); a plain TCP connect that succeeds gets one retry |
 | Unreachable at start | Extension stops with an ERROR naming the connection; with `retry_unreachable_at_start`, retried as a link down while the others poll |
 | Exception 02/03 | Block skipped, retried every 10 min; `verify` finds the bad registers |
 
