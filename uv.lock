@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 
 [[package]]
@@ -570,7 +570,7 @@ wheels = [
 
 [[package]]
 name = "zelos-extension-modbus"
-version = "0.2.2"
+version = "0.2.3"
 source = { editable = "." }
 dependencies = [
     { name = "pymodbus" },
