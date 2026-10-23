@@ -50,6 +50,10 @@ _LOCAL_NETWORK_HINT = (
     " (nothing answered at that address, or Zelos lacks access under System Settings >"
     " Privacy & Security > Local Network)"
 )
+#: Floor for the plain TCP connect. Windows retries the SYN after an RST, so a
+#: refused port takes ~2-2.7 s to report (measured, Windows 11); under that it
+#: reads as "no answer".
+MIN_CONNECT_TIMEOUT = 3.5 if sys.platform == "win32" else 0.0
 
 # Seconds between attempts to build a device's register map when the device
 # answered but discovery failed (a timeout follows the demotion schedule).
@@ -443,7 +447,7 @@ class ModbusConnection:
             name: Trace/action name; defaults to the sanitized endpoint
                 (``10_0_0_5``, ``dev_ttyUSB0``)
             connect_timeout: Timeout of the plain TCP connect that follows a
-                failed one; defaults to timeout
+                failed one; defaults to timeout, at least MIN_CONNECT_TIMEOUT
         """
         self.transport = transport
         self.host = host
@@ -454,7 +458,7 @@ class ModbusConnection:
         self.stopbits = stopbits
         self.bytesize = bytesize
         self.timeout = timeout
-        self.connect_timeout = connect_timeout or timeout
+        self.connect_timeout = connect_timeout or max(timeout, MIN_CONNECT_TIMEOUT)
         self.retries = int(_clamped("retries", retries, 0, float("inf")))
         self.request_delay_ms = int(_clamped("request_delay_ms", request_delay_ms, 0, float("inf")))
         self.connect_delay_ms = int(_clamped("connect_delay_ms", connect_delay_ms, 0, float("inf")))
@@ -517,9 +521,15 @@ class ModbusConnection:
         up = False
         try:
             self._client = self._create_client()
-            await self._client.connect()
+            opened = await self._client.connect()
             up = bool(self._client.connected)
-            if not up and self.transport == Transport.TCP:
+            if not up and self.transport == Transport.TCP and opened:
+                # TCP connected, then the device closed it: no retry, one session.
+                self.connect_error = (
+                    ": the device accepted then closed the connection "
+                    "(its client connections all in use?)"
+                )
+            elif not up and self.transport == Transport.TCP:
                 # pymodbus drops the OSError and connects within timeout; a plain
                 # connect recovers the cause, or rides out a lost SYN and we retry.
                 self.connect_error = await self._tcp_cause()
@@ -562,7 +572,7 @@ class ModbusConnection:
             )
         except TimeoutError:
             return (
-                f": no answer in {self.connect_timeout:g} s "
+                f": no answer in {self.connect_timeout:.2g} s "
                 "(host down or unreachable, wrong address, or a firewall)"
             )
         except ConnectionRefusedError:

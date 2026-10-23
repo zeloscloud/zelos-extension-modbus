@@ -42,6 +42,7 @@ from pymodbus.exceptions import ModbusException
 
 from zelos_extension_modbus.client import (
     GATEWAY_ABSENT,
+    MIN_CONNECT_TIMEOUT,
     READ_METHODS,
     ModbusConnection,
     decode_register,
@@ -79,7 +80,7 @@ TABLES: tuple[str, ...] = tuple(RegisterType)
 DEFAULT_TIMEOUT = 0.5
 #: Plain TCP connect after a failed one: rides out a lost SYN or a slow first ARP
 #: (capped by the deadline).
-CONNECT_TIMEOUT = 3.0
+CONNECT_TIMEOUT = max(3.0, MIN_CONNECT_TIMEOUT)
 #: Gap between requests on RTU (Chipkin); TCP devices pace themselves. Busy
 #: (06), or SLOW_AFTER no-replies in a row from a unit that answered, doubles it
 #: (from at least GAP_STEP_MS) up to MAX_GAP_MS; SPEED_UP_AFTER replies in a
@@ -210,17 +211,20 @@ class ScanLink:
         """(Re)open the link, optionally with changed serial settings."""
         await self.close()
         self.endpoint.update(changes)
-        connect = CONNECT_TIMEOUT
-        if self.deadline is not None:
-            connect = max(min(connect, self.deadline - time.monotonic()), self.timeout)
         self.conn = ModbusConnection(
             **self.endpoint,
             timeout=self.timeout,
             retries=0,
             request_delay_ms=self.delay_ms,
-            connect_timeout=connect,
+            connect_timeout=self._connect_timeout(),
         )
         return await self.conn.connect()
+
+    def _connect_timeout(self) -> float:
+        """CONNECT_TIMEOUT, capped by the deadline (never below the request timeout)."""
+        if self.deadline is None:
+            return CONNECT_TIMEOUT
+        return max(min(CONNECT_TIMEOUT, self.deadline - time.monotonic()), self.timeout)
 
     async def close(self) -> None:
         if self.conn:
@@ -270,6 +274,7 @@ class ScanLink:
             self._stage[1] -= 1
         self.requests += 1
         self.by_fc[fc] += 1
+        self.conn.connect_timeout = self._connect_timeout()  # a reconnect inside
         try:
             response = await self.conn.request(method, unit, **kwargs)
         except (ModbusException, OSError):
@@ -953,7 +958,7 @@ async def verify_map(
     reads: dict[tuple[str, str], list[Reply]] = {}
     try:
         if not await link.open():
-            report["error"] = f"cannot open {link.label}"
+            report["error"] = f"cannot open {link.label}{link.conn.connect_error}"
             return report
         for i in range(samples):
             if i:
