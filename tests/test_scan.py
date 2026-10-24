@@ -372,14 +372,27 @@ class TestAutoConfig:
         assert actions.auto_config(config={"connections": [conn]})["message"] == message
 
 
-def test_only_discovery_actions_are_declared_read_only():
-    """Zelos AI runs a read-only action without asking, so the set is pinned: listing
-    serial ports opens none, and auto-configure only reads and returns a config."""
-    from zelos_sdk.actions import Action
-
+def test_action_flags_are_pinned():
+    """Pins each action's flags, so a new action or a changed flag is a deliberate choice."""
     from zelos_extension_modbus import actions
 
-    if "read_only" not in Action.__slots__:
-        pytest.skip("this zelos-sdk predates read_only and ignores the declaration")
-    declared = {a.__name__ for a in actions.ALL_ACTIONS if a._action.read_only}
-    assert declared == {"auto_config", "list_serial_ports"}
+    expected = {
+        "list_devices": (True, True),
+        "get_status": (True, True),
+        "get_snapshot": (True, True),
+        "read_register": (True, False),
+        "write_single_register": (False, False),
+        "write_registers": (False, False),
+        "read_named_register": (True, False),
+        "write_named_register": (False, False),
+        "write_coil": (False, False),
+        "list_registers": (True, True),
+        "list_writable_registers": (True, True),
+        "save_map": (False, False),
+        "scan_device": (False, False),
+        "verify_map": (False, False),
+        "auto_config": (True, True),
+        "list_serial_ports": (True, True),
+    }
+    actual = {a.__name__: (a._action.read_only, a._action.hidden) for a in actions.ALL_ACTIONS}
+    assert actual == expected
