@@ -293,6 +293,8 @@ def _register_row(dev: Any, event: str, reg: Any) -> dict[str, Any]:
 @zelos_sdk.action(
     "List Devices",
     "List every configured Modbus device: the names the other actions accept",
+    hidden=True,
+    read_only=True,
 )
 def list_devices() -> dict[str, Any]:
     """List all registered devices with their connection and register-map summary."""
@@ -326,7 +328,7 @@ def list_devices() -> dict[str, Any]:
     return {"devices": devices, "count": len(devices), "success": True}
 
 
-@zelos_sdk.action("Get Status", "Get connection and polling status")
+@zelos_sdk.action("Get Status", "Get connection and polling status", hidden=True, read_only=True)
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 def get_status(device: str) -> dict[str, Any]:
     """Get current device status."""
@@ -350,6 +352,8 @@ def get_status(device: str) -> dict[str, Any]:
 @zelos_sdk.action(
     "Get Snapshot",
     "Cached status and last register values for one device, no device I/O",
+    hidden=True,
+    read_only=True,
 )
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 def get_snapshot(device: str) -> dict[str, Any]:
@@ -385,6 +389,7 @@ def get_snapshot(device: str) -> dict[str, Any]:
     "Read registers by address, in the device map's base (default 1-based). Each value is "
     "also traced as event holding_registers/<address>, field hr_<address> (input_registers/ "
     "ir_, coils/ coil_, discrete_inputs/ di_ for the other tables).",
+    read_only=True,
 )
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 @_address_field()
@@ -496,7 +501,9 @@ def write_registers(device: str, address: int, values: str) -> dict[str, Any]:
     }
 
 
-@zelos_sdk.action("Read Named Register", "Read a register by event/name (e.g. voltage/L1)")
+@zelos_sdk.action(
+    "Read Named Register", "Read a register by event/name (e.g. voltage/L1)", read_only=True
+)
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 @zelos_sdk.action.select("name", choices=device_registers, depends_on="device", title="Register")
 def read_named_register(device: str, name: str) -> dict[str, Any]:
@@ -629,14 +636,21 @@ def _register_list(device: str, writable_only: bool) -> dict[str, Any]:
     }
 
 
-@zelos_sdk.action("List Registers", "List all registers in the map, or found by auto-scan")
+@zelos_sdk.action(
+    "List Registers",
+    "List all registers in the map, or found by auto-scan",
+    hidden=True,
+    read_only=True,
+)
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 def list_registers(device: str) -> dict[str, Any]:
     """List all registers in the register map."""
     return _register_list(device, writable_only=False)
 
 
-@zelos_sdk.action("List Writable Registers", "List all writable registers")
+@zelos_sdk.action(
+    "List Writable Registers", "List all writable registers", hidden=True, read_only=True
+)
 @zelos_sdk.action.select("device", choices=all_devices, title="Device")
 def list_writable_registers(device: str) -> dict[str, Any]:
     """List all writable registers in the register map."""
