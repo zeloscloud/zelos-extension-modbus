@@ -46,8 +46,6 @@ ADDR_ENERGY_TOTAL = 18  # uint32 (2 registers) - Wh
 ADDR_TEMPERATURE = 20  # int16 (scaled by 10)
 
 # Coil addresses
-ADDR_COIL_RELAY1 = 0
-ADDR_COIL_RELAY2 = 1
 ADDR_COIL_ALARM = 2
 
 # Input register addresses (read-only)
@@ -109,7 +107,6 @@ class PowerMeterSimulator:
 
         # Simulated load profile
         self.base_load = 50.0  # Base current in amps
-        self.load_variation = 20.0  # Random variation
 
         # Accumulated energy (Wh)
         self.energy_total = 0.0
@@ -473,7 +470,8 @@ class ScanTarget:
             for k, nominal in enumerate(_FLOAT_BASES):
                 value = nominal * (1 + 0.02 * math.sin(0.7 * t + k + base))
                 hr[base + 2 * k], hr[base + 2 * k + 1] = encode_value(value, "float32", 1, order)
-        hr[20], hr[21] = encode_value(3_000_000 + int(20_000 * t), "uint32")
+        c = SCAN_TARGET_COUNTER
+        hr[c], hr[c + 1] = encode_value(3_000_000 + int(20_000 * t), "uint32")
         hr[22] = 1000 + int(50 * math.sin(t))  # analog uint16
         hr[23] = 1 << (int(t) % 4)  # one status bit at a time
         for k in range(5):
@@ -504,7 +502,6 @@ class ScanTarget:
 async def run_demo_server(
     host: str = "127.0.0.1",
     port: int = 5020,
-    running_flag: asyncio.Event | None = None,
     unit_ids: Sequence[int] = (),
     scan_target: bool = False,
     zero_fill: bool = False,
@@ -516,7 +513,6 @@ async def run_demo_server(
     Args:
         host: Server bind address
         port: Server port
-        running_flag: Optional event to signal shutdown
         unit_ids: One meter per id (see create_demo_context); empty = one for all
         scan_target: Serve the scan target instead of the power meter
         zero_fill: Scan target answers unmapped addresses with 0, not exception 02

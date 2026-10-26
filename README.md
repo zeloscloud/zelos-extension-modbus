@@ -232,7 +232,7 @@ Raw writes need `allow_raw_writes` and never touch an address the map marks read
 
 ```bash
 just install   # Install dependencies
-just check     # Run linting
+just check     # Check formatting and lint
 just format    # Auto-format code
 just test      # Run tests
 just sim       # Power-meter simulator to point a connection at (127.0.0.1:5020)
@@ -250,8 +250,8 @@ set it via the Zelos App config dialog or by hand).
 ## Links
 
 - [Zelos Documentation](https://docs.zeloscloud.io)
-- [Zelos SDK Guide](https://docs.zeloscloud.io/sdk)
-- [Modbus Specification](https://modbus.org/specs.php)
+- [Zelos SDK Guide](https://docs.zeloscloud.io/latest/sdk/)
+- [Modbus Specification](https://www.modbus.org/modbus-specifications)
 
 ## CLI Usage
 
