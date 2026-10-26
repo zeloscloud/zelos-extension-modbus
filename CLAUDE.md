@@ -4,15 +4,17 @@
 
 ```bash
 just install      # Install deps + pre-commit hooks
-just check        # Run ruff linter
+just check        # Check formatting and lint
 just format       # Auto-format code
 just test         # Run pytest
+just ci           # Install from the lockfile, check, test, package
 just package      # Build .tar.gz for marketplace
+just sim          # Power-meter simulator on 127.0.0.1:5020
 ```
 
 ## Code Style
 
-- **Linter**: ruff (strict, Python 3.11+, 100 char line length)
+- **Linter**: ruff (Python 3.11+, 100 char line length)
 - **Pre-commit**: Runs ruff-check + ruff-format on commit
 - Imports must be sorted (ruff handles this)
 
@@ -23,14 +25,16 @@ just package      # Build .tar.gz for marketplace
 - `zelos_extension_modbus/constants.py` - `trace_layout` (the one trace-naming rule), `raw_names` (per-register raw events) and `name_error`
 - `zelos_extension_modbus/scan.py` - Read-only scan and verify; `Discovery` drives its range finder one read per tick for auto-scan (`ModbusDevice._discover`)
 - `zelos_extension_modbus/actions.py` - SDK actions, `Modbus/<action>` with a `<connection>/<device>` selector
+- `zelos_extension_modbus/registry.py` - Running devices by `<connection>/<device>`, and the actions' dropdown choices
 - `zelos_extension_modbus/blocks.py` - Block-read planner (coalesce contiguous registers)
 - `zelos_extension_modbus/serial_diag.py` - RTU connect-failure diagnostics (stale node, perms, holders)
 - `zelos_extension_modbus/register_map.py` - Register definitions and JSON parsing
 - `zelos_extension_modbus/sunspec.py` - SunSpec discovery: model chain -> RegisterMap (`"register_map": "sunspec"`)
 - `zelos_extension_modbus/demo/sunspec_sim.py` - SunSpec simulator (models 1, 103, 160)
+- `zelos_extension_modbus/demo/mock_server.py` - Serves any register map (`main.py mock-server`)
 - `scripts/xlsx_to_register_map.py` - Convert a register-map spreadsheet to JSON
 - `zelos_extension_modbus/cli/app.py` - App mode runner (config loading, demo server)
-- `zelos_extension_modbus/demo/simulator.py` - Power meter simulator for testing
+- `zelos_extension_modbus/demo/simulator.py` - Power meter simulator and scan target (`main.py demo-server`)
 - `config.schema.json` - Zelos App config UI: `connections[]` (transport fields via oneOf) -> `devices[]`; global tuning under `advanced`, resolved in `cli/app.py`
 
 ## SDK Init Order (Critical)
@@ -39,7 +43,7 @@ Actions must be registered BEFORE `zelos_sdk.init()`: init advertises them to th
 
 ```python
 actions.register_all()  # 1. Register actions
-init_sdk(prefix)        # 2. THEN init (cli/app.py: global source, init, log handler)
+init_sdk(prefix)  # 2. THEN init (cli/app.py: global source, init, log handler)
 ```
 
 ## Testing

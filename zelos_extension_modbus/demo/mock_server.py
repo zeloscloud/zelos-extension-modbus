@@ -21,7 +21,6 @@ import logging
 import random
 import threading
 import time
-from dataclasses import dataclass
 
 from pymodbus.datastore import (
     ModbusDeviceContext,
@@ -76,13 +75,7 @@ def _random_raw_value(reg: Register) -> float | int | bool:
     return raw * reg.scale
 
 
-@dataclass
-class _TypeLayout:
-    max_end: int
-    block_size: int
-
-
-def _size_blocks(register_map: RegisterMap, min_size: int = 16) -> dict[str, _TypeLayout]:
+def _size_blocks(register_map: RegisterMap, min_size: int = 16) -> dict[str, int]:
     """Compute datastore sizes per Modbus register type.
 
     pymodbus's server layer translates wire address N to block index N+1 before
@@ -92,22 +85,21 @@ def _size_blocks(register_map: RegisterMap, min_size: int = 16) -> dict[str, _Ty
     ends: dict[str, int] = {}
     for reg in register_map.registers:
         ends[reg.type] = max(ends.get(reg.type, 0), reg.address + reg.count)
-    layouts: dict[str, _TypeLayout] = {}
+    sizes: dict[str, int] = {}
     for t in RegisterType:
         end = ends.get(t, 0)
-        block_size = max(end + 1, min_size) if end > 0 else min_size
-        layouts[t] = _TypeLayout(max_end=end, block_size=block_size)
-    return layouts
+        sizes[t] = max(end + 1, min_size) if end > 0 else min_size
+    return sizes
 
 
 def build_context(register_map: RegisterMap) -> ModbusServerContext:
     """Create a pymodbus ``ModbusServerContext`` sized for the given register map."""
-    layouts = _size_blocks(register_map)
+    sizes = _size_blocks(register_map)
     device = ModbusDeviceContext(
-        hr=ModbusSequentialDataBlock(0, [0] * layouts[RegisterType.HOLDING].block_size),
-        ir=ModbusSequentialDataBlock(0, [0] * layouts[RegisterType.INPUT].block_size),
-        co=ModbusSequentialDataBlock(0, [False] * layouts[RegisterType.COIL].block_size),
-        di=ModbusSequentialDataBlock(0, [False] * layouts[RegisterType.DISCRETE_INPUT].block_size),
+        hr=ModbusSequentialDataBlock(0, [0] * sizes[RegisterType.HOLDING]),
+        ir=ModbusSequentialDataBlock(0, [0] * sizes[RegisterType.INPUT]),
+        co=ModbusSequentialDataBlock(0, [False] * sizes[RegisterType.COIL]),
+        di=ModbusSequentialDataBlock(0, [False] * sizes[RegisterType.DISCRETE_INPUT]),
     )
     return ModbusServerContext(devices=device, single=True)
 
