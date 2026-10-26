@@ -218,7 +218,7 @@ class TestAutoConfig:
                 ["form"],
                 [{**FORM["connections"][0], "devices": [{"unit_id": 7}, {"unit_id": 2}]}],
             ),
-            # Older app hosts pass nothing: the saved config.
+            # Called without config: the saved config.
             (None, [1], ["saved"], [{**SAVED[0], "devices": [{"unit_id": 1}]}]),
             # No connection anywhere: probe 127.0.0.1:502 only.
             (

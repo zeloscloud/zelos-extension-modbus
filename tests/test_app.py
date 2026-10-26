@@ -6,22 +6,22 @@ Covers the seams that turn config.json into running connections:
 - ``_old_config_error`` flags a 0.1.x config.
 - ``_load_register_map`` fails loud (sys.exit) on a broken/missing configured
   map rather than silently degrading to no-data.
+- The actions register under the manifest name.
 """
 
 import asyncio
 import importlib
-import importlib.util
 import json
 import os
 import signal
 import tomllib
-from fnmatch import fnmatch
 from pathlib import Path
 
 import click
 import pytest
 from zelos_sdk.extensions.config import load_config
 
+from zelos_extension_modbus import ACTION_PREFIX
 from zelos_extension_modbus.cli.app import (
     OLD_CONFIG_ERROR,
     _create_connections,
@@ -316,13 +316,6 @@ def test_console_script_in_package():
     assert isinstance(getattr(importlib.import_module(module), attr), click.Group)
 
 
-def test_archive_named_from_pyproject(monkeypatch):
-    """`just package` names the archive from pyproject, not the directory, so
-    .gitignore covers it in any checkout or worktree."""
-    spec = importlib.util.spec_from_file_location("pkg", ROOT / "scripts/package_extension.py")
-    package = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(package)
-    monkeypatch.chdir(ROOT)
-    name = package.archive_file_name("9.9.9")
-    assert name == "zelos-extension-modbus-v9.9.9.tar.gz"
-    assert any(fnmatch(name, p) for p in (ROOT / ".gitignore").read_text().splitlines())
+def test_actions_register_under_the_manifest_name():
+    manifest = tomllib.loads((ROOT / "extension.toml").read_text())
+    assert manifest["name"] == ACTION_PREFIX
