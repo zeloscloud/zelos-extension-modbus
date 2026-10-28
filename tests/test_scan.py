@@ -388,7 +388,7 @@ def test_action_flags_are_pinned():
         "list_writable_registers": (True, True),
         "save_map": (False, False),
         "scan_device": (False, False),
-        "verify_map": (False, False),
+        "verify_map": (True, False),
         "auto_config": (True, True),
         "list_serial_ports": (True, True),
     }
