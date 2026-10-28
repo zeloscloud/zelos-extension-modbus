@@ -903,6 +903,7 @@ def scan_device(
     "a declared string, plus every decoded value. Reads only; run with the extension stopped.",
     timeout=VERIFY_TIMEOUT,
     standalone=True,
+    read_only=True,
 )
 @_link_fields
 @zelos_sdk.action.number(
