@@ -135,6 +135,20 @@
         "required": [
           "transport"
         ],
+        "propertyNames": {
+          "enum": [
+            "transport",
+            "name",
+            "devices",
+            "host",
+            "port",
+            "serial_port",
+            "baudrate",
+            "parity",
+            "stopbits",
+            "bytesize"
+          ]
+        },
         "dependencies": {
           "transport": {
             "oneOf": [
@@ -398,5 +412,6 @@
   },
   "required": [
     "connections"
-  ]
+  ],
+  "additionalProperties": false
 }

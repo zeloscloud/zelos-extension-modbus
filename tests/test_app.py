@@ -3,7 +3,7 @@
 Covers the seams that turn config.json into running connections:
 - ``_create_connections`` threads connection/device/advanced config onto each
   ModbusConnection and ModbusDevice, and rejects bad or duplicate names.
-- ``_old_config_error`` flags a 0.1.x config.
+- The schema refuses keys it does not define, at the top level and per connection.
 - ``_load_register_map`` fails loud (sys.exit) on a broken/missing configured
   map rather than silently degrading to no-data.
 """
@@ -18,13 +18,11 @@ from pathlib import Path
 
 import click
 import pytest
-from zelos_sdk.extensions.config import load_config
+from zelos_sdk.extensions import ConfigValidationError, load_config
 
 from zelos_extension_modbus.cli.app import (
-    OLD_CONFIG_ERROR,
     _create_connections,
     _load_register_map,
-    _old_config_error,
     device_settings,
     resolve_advanced,
     trace_settings,
@@ -170,6 +168,7 @@ class TestCreateConnections:
         [
             ([], "No connections configured"),
             ([_tcp(devices=[])], "has no devices"),
+            ([{"transport": "tcp", "host": "10.0.0.5"}], "has no devices"),
             ([_tcp(name="a.b")], "'.' is not allowed"),
             ([_tcp(name="log")], "reserved"),
             ([_tcp(name="modbus_log")], "reserved"),
@@ -188,6 +187,7 @@ class TestCreateConnections:
         ids=[
             "none",
             "no-devices",
+            "no-devices-key",
             "bad-char",
             "reserved-log",
             "reserved-log-source",
@@ -213,28 +213,40 @@ class TestCreateConnections:
 
 
 @pytest.mark.parametrize(
-    "config",
+    ("config", "message"),
     [
-        {"interfaces": [_tcp()]},
-        {"log_level": "INFO", "connections": [_tcp()]},
-        {"connections": [{"transport": "tcp", "host": "10.0.0.5"}]},
-        {"connections": [_tcp(unit_id=1)]},
-        {"connections": [_tcp(register_map_file="m.json")]},
-        {"connections": [_tcp(timeout=3)]},
+        (
+            {"interfaces": [_tcp()]},
+            "<root>: Additional properties are not allowed ('interfaces' was unexpected)",
+        ),
+        (
+            {"log_level": "INFO", "connections": [_tcp()]},
+            "<root>: Additional properties are not allowed ('log_level' was unexpected)",
+        ),
+        ({"connections": [_tcp(unit_id=1)]}, "connections.0: 'unit_id' is not one of"),
+        (
+            {"connections": [_tcp(register_map_file="m.json")]},
+            "connections.0: 'register_map_file' is not one of",
+        ),
+        ({"connections": [_tcp(timeout=3)]}, "connections.0: 'timeout' is not one of"),
     ],
-    ids=[
-        "interfaces",
-        "top-level-log_level",
-        "no-devices",
-        "unit_id",
-        "register_map_file",
-        "advanced-key",
-    ],
+    ids=["interfaces", "top-level-log_level", "unit_id", "register_map_file", "advanced-key"],
 )
-def test_old_config_shape_is_an_error(config):
-    """A 0.1.x config is a hard error with one actionable line."""
-    assert _old_config_error(config) == OLD_CONFIG_ERROR
-    assert _old_config_error({"connections": [_tcp()]}) is None
+def test_unknown_config_keys_are_refused(tmp_path, config, message):
+    """A key the schema does not define fails validation, naming the key."""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ConfigValidationError) as exc:
+        load_config(config_path=path, schema_path=SCHEMA)
+    assert message in str(exc.value)
+
+
+def test_connection_key_list_covers_every_field():
+    """The connection's propertyNames list is every field it declares, transport branches too."""
+    conn = json.loads(SCHEMA.read_text())["properties"]["connections"]["items"]
+    branches = conn["dependencies"]["transport"]["oneOf"]
+    declared = {*conn["properties"], *(k for b in branches for k in b["properties"])}
+    assert set(conn["propertyNames"]["enum"]) == declared
 
 
 class TestLoadRegisterMap:

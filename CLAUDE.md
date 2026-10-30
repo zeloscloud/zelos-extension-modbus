@@ -35,7 +35,7 @@ just sim          # Power-meter simulator on 127.0.0.1:5020
 - `scripts/xlsx_to_register_map.py` - Convert a register-map spreadsheet to JSON
 - `zelos_extension_modbus/cli/app.py` - App mode runner (config loading, demo server)
 - `zelos_extension_modbus/demo/simulator.py` - Power meter simulator and scan target (`main.py demo-server`)
-- `config.schema.json` - Zelos App config UI: `connections[]` (transport fields via oneOf) -> `devices[]`; global tuning under `advanced`, resolved in `cli/app.py`
+- `config.schema.json` - Zelos App config UI: `connections[]` (transport fields via oneOf) -> `devices[]`; global tuning under `advanced`, resolved in `cli/app.py`. Unknown top-level and connection keys are refused; a new connection field also goes in its `propertyNames` list
 
 ## SDK Init Order (Critical)
 
