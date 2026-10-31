@@ -209,7 +209,7 @@ With the extension stopped, the same runs as actions:
 
 ## Actions
 
-Actions are available from the Zelos App and to app extensions as `Modbus/<action>`. Every action but `list_devices` takes a `device` selector, `<connection>/<device>` (e.g. `10_0_0_5/unit1`).
+Actions are available from the Zelos App and to app extensions as `Modbus/<action>`. Every action but `list_devices` takes a `device` selector, `<connection>/<device>` (e.g. `10_0_0_5/unit1`). Leave it unset when only one device is configured.
 
 | Action | Description |
 |--------|-------------|
