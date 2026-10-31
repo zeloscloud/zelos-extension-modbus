@@ -20,9 +20,11 @@ def register(device: ModbusDevice) -> None:
     _devices[device.path] = device
 
 
-def get_device(path: str) -> ModbusDevice | None:
-    """Look up a registered device by path."""
-    return _devices.get(path)
+def get_device(path: str | None) -> ModbusDevice | None:
+    """Look up a registered device by path; unset, the only device when just one runs."""
+    if path:
+        return _devices.get(path)
+    return next(iter(_devices.values())) if len(_devices) == 1 else None
 
 
 def clear() -> None:
@@ -38,8 +40,8 @@ def all_devices() -> list[str]:
     return list(_devices.keys())
 
 
-def _paths(device: str, writable_only: bool) -> list[str]:
-    dev = _devices.get(device)
+def _paths(device: str | None, writable_only: bool) -> list[str]:
+    dev = get_device(device)
     if not dev:
         return []
     return [
@@ -50,11 +52,11 @@ def _paths(device: str, writable_only: bool) -> list[str]:
     ]
 
 
-def device_registers(device: str = "") -> list[str]:
+def device_registers(device: str | None = None) -> list[str]:
     """Event/field paths of every register on ``device``."""
     return _paths(device, writable_only=False)
 
 
-def device_writable_registers(device: str = "") -> list[str]:
+def device_writable_registers(device: str | None = None) -> list[str]:
     """Event/field paths of the writable registers on ``device``."""
     return _paths(device, writable_only=True)

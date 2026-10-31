@@ -25,7 +25,7 @@ just sim          # Power-meter simulator on 127.0.0.1:5020
 - `zelos_extension_modbus/constants.py` - `trace_layout` (the one trace-naming rule), `raw_names` (per-register raw events) and `name_error`
 - `zelos_extension_modbus/scan.py` - Read-only scan and verify; `Discovery` drives its range finder one read per tick for auto-scan (`ModbusDevice._discover`)
 - `zelos_extension_modbus/actions.py` - SDK actions, `Modbus/<action>` with a `<connection>/<device>` selector
-- `zelos_extension_modbus/registry.py` - Running devices by `<connection>/<device>`, and the actions' dropdown choices
+- `zelos_extension_modbus/registry.py` - Running devices by `<connection>/<device>` (unset: the only device), and the actions' dropdown choices
 - `zelos_extension_modbus/blocks.py` - Block-read planner (coalesce contiguous registers)
 - `zelos_extension_modbus/serial_diag.py` - RTU connect-failure diagnostics (stale node, perms, holders)
 - `zelos_extension_modbus/register_map.py` - Register definitions and JSON parsing

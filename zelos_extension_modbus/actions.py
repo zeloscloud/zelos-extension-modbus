@@ -1,7 +1,8 @@
 """Free-standing Modbus action functions for the Zelos SDK.
 
 Every per-device action takes a ``device`` parameter first
-(``<connection>/<device>``), which selects the target from the global registry.
+(``<connection>/<device>``), which selects the target from the global registry;
+unset, the only configured device.
 Actions appear as Modbus/get_status, Modbus/read_register, etc.
 """
 
@@ -226,12 +227,18 @@ def _raw_write_refusal(dev: Any, reg_type: str, wire: int, count: int = 1) -> di
     return None
 
 
-def _get_device_or_error(device: str) -> tuple[Any | None, dict | None]:
-    """Look up a device by path, returning an error dict on failure."""
+def _device_field() -> Any:
+    return zelos_sdk.action.select("device", choices=all_devices, title="Device", required=False)
+
+
+def _get_device_or_error(device: str | None) -> tuple[Any | None, dict | None]:
+    """Look up a device by path (unset: the only one), returning an error dict on failure."""
     dev = get_device(device)
-    if not dev:
+    if dev:
+        return dev, None
+    if device:
         return None, {"error": f"Device '{device}' not found", "success": False}
-    return dev, None
+    return None, {"error": f"Set device to one of: {', '.join(all_devices())}", "success": False}
 
 
 def _status_row(dev: Any) -> dict[str, Any]:
@@ -329,8 +336,8 @@ def list_devices() -> dict[str, Any]:
 
 
 @zelos_sdk.action("Get Status", "Get connection and polling status", hidden=True, read_only=True)
-@zelos_sdk.action.select("device", choices=all_devices, title="Device")
-def get_status(device: str) -> dict[str, Any]:
+@_device_field()
+def get_status(device: str | None = None) -> dict[str, Any]:
     """Get current device status."""
     dev, err = _get_device_or_error(device)
     if err:
@@ -355,8 +362,8 @@ def get_status(device: str) -> dict[str, Any]:
     hidden=True,
     read_only=True,
 )
-@zelos_sdk.action.select("device", choices=all_devices, title="Device")
-def get_snapshot(device: str) -> dict[str, Any]:
+@_device_field()
+def get_snapshot(device: str | None = None) -> dict[str, Any]:
     """Snapshot of one device's status and last-seen values, straight from cache.
 
     Reads nothing from the bus: values come from the poll sweep's cache (and any
@@ -391,7 +398,7 @@ def get_snapshot(device: str) -> dict[str, Any]:
     "ir_, coils/ coil_, discrete_inputs/ di_ for the other tables).",
     read_only=True,
 )
-@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@_device_field()
 @_address_field()
 @zelos_sdk.action.select(
     "reg_type",
@@ -402,7 +409,9 @@ def get_snapshot(device: str) -> dict[str, Any]:
 @zelos_sdk.action.number(
     "count", minimum=1, maximum=MODBUS_MAX_READ_COUNT, default=1, title="Count"
 )
-def read_register(device: str, address: int, reg_type: str, count: int) -> dict[str, Any]:
+def read_register(
+    device: str | None = None, *, address: int, reg_type: str, count: int
+) -> dict[str, Any]:
     """Read register(s) by address."""
     dev, err = _get_device_or_error(device)
     if err:
@@ -430,11 +439,11 @@ def read_register(device: str, address: int, reg_type: str, count: int) -> dict[
     + RAW_WRITE_HELP
     + WRITE_OUTCOME_HELP,
 )
-@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@_device_field()
 @_address_field()
 @zelos_sdk.action.number("value", title="Value")
 @_write_action
-def write_single_register(device: str, address: int, value: int) -> dict[str, Any]:
+def write_single_register(device: str | None = None, *, address: int, value: int) -> dict[str, Any]:
     """Write a single register using FC 6."""
     dev, err = _get_device_or_error(device)
     if err:
@@ -465,11 +474,11 @@ def write_single_register(device: str, address: int, value: int) -> dict[str, An
     "Write one or more holding registers using function code 16; address in the device "
     "map's base." + RAW_WRITE_HELP + WRITE_OUTCOME_HELP,
 )
-@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@_device_field()
 @_address_field("Start Address")
 @zelos_sdk.action.text("values", title="Values (comma-separated)")
 @_write_action
-def write_registers(device: str, address: int, values: str) -> dict[str, Any]:
+def write_registers(device: str | None = None, *, address: int, values: str) -> dict[str, Any]:
     """Write registers using FC 16."""
     dev, err = _get_device_or_error(device)
     if err:
@@ -504,9 +513,9 @@ def write_registers(device: str, address: int, values: str) -> dict[str, Any]:
 @zelos_sdk.action(
     "Read Named Register", "Read a register by event/name (e.g. voltage/L1)", read_only=True
 )
-@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@_device_field()
 @zelos_sdk.action.select("name", choices=device_registers, depends_on="device", title="Register")
-def read_named_register(device: str, name: str) -> dict[str, Any]:
+def read_named_register(device: str | None = None, *, name: str) -> dict[str, Any]:
     """Read a register by event/name path from the register map."""
     dev, err = _get_device_or_error(device)
     if err:
@@ -540,13 +549,13 @@ def read_named_register(device: str, name: str) -> dict[str, Any]:
     "Write a value to a register by event/name; only registers the device map marks "
     "writable." + WRITE_OUTCOME_HELP,
 )
-@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@_device_field()
 @zelos_sdk.action.select(
     "name", choices=device_writable_registers, depends_on="device", title="Register"
 )
 @zelos_sdk.action.number("value", title="Value")
 @_write_action
-def write_named_register(device: str, name: str, value: float) -> dict[str, Any]:
+def write_named_register(device: str | None = None, *, name: str, value: float) -> dict[str, Any]:
     """Write a value to a register by event/name path from the register map."""
     dev, err = _get_device_or_error(device)
     if err:
@@ -589,11 +598,11 @@ def write_named_register(device: str, name: str, value: float) -> dict[str, Any]
     + RAW_WRITE_HELP
     + WRITE_OUTCOME_HELP,
 )
-@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@_device_field()
 @_address_field()
 @zelos_sdk.action.select("value", choices=["ON", "OFF"], default="OFF", title="Value")
 @_write_action
-def write_coil(device: str, address: int, value: str) -> dict[str, Any]:
+def write_coil(device: str | None = None, *, address: int, value: str) -> dict[str, Any]:
     """Write a coil by address."""
     dev, err = _get_device_or_error(device)
     if err:
@@ -618,7 +627,7 @@ def write_coil(device: str, address: int, value: str) -> dict[str, Any]:
     }
 
 
-def _register_list(device: str, writable_only: bool) -> dict[str, Any]:
+def _register_list(device: str | None, writable_only: bool) -> dict[str, Any]:
     dev, err = _get_device_or_error(device)
     if err:
         return err
@@ -642,8 +651,8 @@ def _register_list(device: str, writable_only: bool) -> dict[str, Any]:
     hidden=True,
     read_only=True,
 )
-@zelos_sdk.action.select("device", choices=all_devices, title="Device")
-def list_registers(device: str) -> dict[str, Any]:
+@_device_field()
+def list_registers(device: str | None = None) -> dict[str, Any]:
     """List all registers in the register map."""
     return _register_list(device, writable_only=False)
 
@@ -651,8 +660,8 @@ def list_registers(device: str) -> dict[str, Any]:
 @zelos_sdk.action(
     "List Writable Registers", "List all writable registers", hidden=True, read_only=True
 )
-@zelos_sdk.action.select("device", choices=all_devices, title="Device")
-def list_writable_registers(device: str) -> dict[str, Any]:
+@_device_field()
+def list_writable_registers(device: str | None = None) -> dict[str, Any]:
     """List all writable registers in the register map."""
     return _register_list(device, writable_only=True)
 
@@ -666,12 +675,12 @@ def list_writable_registers(device: str) -> dict[str, Any]:
     "Path absolute or starting with ~, in an existing directory; an existing file is "
     "replaced only with overwrite.",
 )
-@zelos_sdk.action.select("device", choices=all_devices, title="Device")
+@_device_field()
 @zelos_sdk.action.text("path", title="Path", description="e.g. ~/maps/meter.json")
 @zelos_sdk.action.boolean(
     "overwrite", title="Overwrite", required=False, default=False, widget="toggle"
 )
-def save_map(device: str, path: str, overwrite: bool = False) -> dict[str, Any]:
+def save_map(device: str | None = None, *, path: str, overwrite: bool = False) -> dict[str, Any]:
     """Write the device's loaded map, or its auto-scanned registers as a map."""
     from zelos_extension_modbus.register_map import write_map_file
 

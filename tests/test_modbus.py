@@ -2304,6 +2304,49 @@ class TestActionsUnit:
         assert "controls/setpoint" in writable
 
 
+def _execute(name: str, params: dict) -> dict:
+    """Run an action through the SDK registry, as the agent does; its result."""
+    with ThreadPoolExecutor(1) as pool:  # the action's asyncio.run would clear this loop
+        return pool.submit(zelos_sdk.actions_registry.execute, name, params).result().value
+
+
+class TestDeviceParameter:
+    """``device`` may be left unset: the actions then use the only configured device."""
+
+    TAKES_DEVICE = [
+        a for a in actions.ALL_ACTIONS if "device" in a._action.to_schema()["properties"]
+    ]
+
+    @pytest.fixture(autouse=True)
+    def only_device(self):
+        data = {"name": "m", "events": {"sensors": [{"name": "temp", "address": 1}]}}
+        dev = _device(register_map=RegisterMap.from_dict(data), name="only")
+        registry.register(dev)
+        yield dev
+        registry.clear()
+
+    def test_device_is_optional_in_every_schema(self):
+        assert len(self.TAKES_DEVICE) == 11
+        for action in self.TAKES_DEVICE:
+            assert "device" not in action._action.to_schema().get("required", []), action
+
+    @pytest.mark.parametrize("params", [{}, {"device": None}], ids=["omitted", "null"])
+    def test_unset_device_is_the_only_one(self, only_device, params):
+        only_device.read_register_value = AsyncMock(return_value=21)
+        assert _execute("get_status", params)["device"] == "c/only"
+        assert _execute("get_snapshot", params)["device"] == "c/only"
+        assert _execute("list_registers", params)["count"] == 1
+        read = _execute("read_named_register", {**params, "name": "sensors/temp"})
+        assert (read["success"], read["value"]) == (True, 21)
+
+    def test_unset_device_among_several_names_the_choices(self):
+        registry.register(_device(name="other"))
+        assert _execute("get_status", {}) == {
+            "error": "Set device to one of: c/only, c/other",
+            "success": False,
+        }
+
+
 class TestActionsIntegration:
     """Actions against the demo server."""
 
