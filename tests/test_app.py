@@ -4,6 +4,7 @@ Covers the seams that turn config.json into running connections:
 - ``_create_connections`` threads connection/device/advanced config onto each
   ModbusConnection and ModbusDevice, and rejects bad or duplicate names.
 - ``_old_config_error`` flags a 0.1.x config.
+- ``run_app_mode`` stops with one ERROR line on saved settings that fail validation.
 - ``_load_register_map`` fails loud (sys.exit) on a broken/missing configured
   map rather than silently degrading to no-data.
 - The actions register under the manifest name.
@@ -12,6 +13,7 @@ Covers the seams that turn config.json into running connections:
 import asyncio
 import importlib
 import json
+import logging
 import os
 import signal
 import tomllib
@@ -29,6 +31,7 @@ from zelos_extension_modbus.cli.app import (
     _old_config_error,
     device_settings,
     resolve_advanced,
+    run_app_mode,
     trace_settings,
 )
 from zelos_extension_modbus.register_map import RegisterMap
@@ -237,6 +240,34 @@ def test_old_config_shape_is_an_error(config):
     """A 0.1.x config is a hard error with one actionable line."""
     assert _old_config_error(config) == OLD_CONFIG_ERROR
     assert _old_config_error({"connections": [_tcp()]}) is None
+
+
+@pytest.mark.parametrize(
+    ("advanced", "reason"),
+    [
+        (
+            {"log_level": "VERBOSE"},
+            "advanced.log_level: 'VERBOSE' is not one of ['DEBUG', 'INFO', 'WARNING', 'ERROR']",
+        ),
+        (
+            {"retries": 9, "write_mode": "fc6"},
+            "advanced.retries: 9 is greater than the maximum of 5; "
+            "advanced.write_mode: 'fc6' is not one of ['auto', 'fc16']",
+        ),
+    ],
+    ids=["one-error", "two-errors"],
+)
+def test_saved_config_off_the_schema_exits(tmp_path, monkeypatch, caplog, advanced, reason):
+    """Saved settings that fail validation stop the extension with one ERROR line."""
+    saved = tmp_path / "config.json"
+    saved.write_text(json.dumps({"connections": [_tcp()], "advanced": advanced}))
+    monkeypatch.setenv("ZELOS_CONFIG_PATH", str(saved))
+    monkeypatch.chdir(ROOT)
+    with pytest.raises(SystemExit) as exc:
+        run_app_mode()
+    assert exc.value.code == 1
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors == [f"Invalid configuration: {reason}"]
 
 
 class TestLoadRegisterMap:

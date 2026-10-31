@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import zelos_sdk
-from zelos_sdk.extensions import load_config
+from zelos_sdk.extensions import ConfigValidationError, load_config
 from zelos_sdk.hooks.logging import TraceLoggingHandler
 
 from zelos_extension_modbus import ACTION_PREFIX
@@ -372,7 +372,11 @@ def run_app_mode(demo: bool = False) -> None:
     from zelos_extension_modbus.scan import quiet_pymodbus
 
     quiet_pymodbus()  # its ERROR frame dumps would land in the trace log; ours cover it
-    config = load_config()
+    try:
+        config = load_config()
+    except ConfigValidationError as e:
+        logger.error("Invalid configuration: %s", "; ".join(m.strip(" •") for m in e.errors))
+        sys.exit(1)
     if demo:
         logger.info("Demo mode: using built-in power meter simulator")
         config["connections"] = [
