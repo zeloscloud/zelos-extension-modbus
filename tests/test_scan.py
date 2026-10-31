@@ -218,11 +218,9 @@ class TestAutoConfig:
                 ["form"],
                 [{**FORM["connections"][0], "devices": [{"unit_id": 7}, {"unit_id": 2}]}],
             ),
-            # Older app hosts pass nothing: the saved config.
-            (None, [1], ["saved"], [{**SAVED[0], "devices": [{"unit_id": 1}]}]),
-            # No connection anywhere: probe 127.0.0.1:502 only.
+            # No connection in the form, even with one saved: probe 127.0.0.1:502 only.
             (
-                {},
+                None,
                 [1],
                 ["127.0.0.1"],
                 [
@@ -390,7 +388,7 @@ def test_action_flags_are_pinned():
         "list_writable_registers": (True, True),
         "save_map": (False, False),
         "scan_device": (False, False),
-        "verify_map": (False, False),
+        "verify_map": (True, False),
         "auto_config": (True, True),
         "list_serial_ports": (True, True),
     }

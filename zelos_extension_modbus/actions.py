@@ -903,6 +903,7 @@ def scan_device(
     "a declared string, plus every decoded value. Reads only; run with the extension stopped.",
     timeout=VERIFY_TIMEOUT,
     standalone=True,
+    read_only=True,
 )
 @_link_fields
 @zelos_sdk.action.number(
@@ -966,9 +967,9 @@ DEFAULT_CONNECTION: dict[str, Any] = {"transport": Transport.TCP, "host": "127.0
     "settings), read their identity, and add a device per new unit. Where the SunSpec "
     "marker is found, register_map is set to sunspec (new or existing units; an existing "
     "unit with a register_map_file keeps it). Existing devices are kept. Returns the "
-    "config; review, then save and start. Sweeps the form's connections (older apps: the "
-    "saved config's); with none, probes 127.0.0.1:502. All within 25 s; what did not fit "
-    "is reported. For a register map use Scan Device.",
+    "config; review, then save and start. Sweeps the form's connections; with none, probes "
+    "127.0.0.1:502. All within 25 s; what did not fit is reported. For a register map use "
+    "Scan Device.",
     timeout=900.0,
     standalone=True,
     hidden=True,
@@ -978,7 +979,7 @@ DEFAULT_CONNECTION: dict[str, Any] = {"transport": Transport.TCP, "host": "127.0
     "config",
     properties={},
     title="Config",
-    description="The config form's current (possibly unsaved) data. Empty: the saved config",
+    description="The config form's current (possibly unsaved) data",
     required=False,
 )
 def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -987,10 +988,7 @@ def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     from zelos_extension_modbus.scan import ScanLink, quiet_pymodbus, sweep
 
     _refuse_if_running()
-    if config is None:
-        connections = _configured_connections()
-    else:
-        connections = [c for c in config.get("connections") or [] if isinstance(c, dict)]
+    connections = [c for c in (config or {}).get("connections") or [] if isinstance(c, dict)]
     probe = not connections
     if probe:
         connections = [DEFAULT_CONNECTION]

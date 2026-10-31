@@ -1,158 +1,111 @@
 # Contributing
 
-## First Commit
+## Prerequisites
 
-All files are staged and ready. Create your first commit:
+- [Zelos](https://zeloscloud.io) 26.0.10 or later
+- [Zelos CLI](https://docs.zeloscloud.io/reference/cli/) 0.1.11 or later
+- [just](https://github.com/casey/just)
+- [uv](https://docs.astral.sh/uv/)
 
-```bash
-git commit -m "Initial commit"
-```
+## Layout
 
-## Push to GitHub
+`extension.toml` describes everything the extension contributes:
 
-Create a repository on GitHub, then:
+| Part | Files | Manifest |
+| ---- | ----- | -------- |
+| Agent runtime | `main.py`, the Python package, `pyproject.toml`, `config.schema.json` | `[agent]`, `[config]` |
 
-```bash
-git remote add origin git@github.com:yourusername/zelos-modbus.git
-git push -u origin main
-```
+| Path                                | Purpose                                                    |
+| ----------------------------------- | ---------------------------------------------------------- |
+| `main.py`                           | Entry point; runs the CLI in `zelos_extension_modbus/cli/` |
+| `zelos_extension_modbus/client.py`  | One link per connection and one device per unit ID         |
+| `zelos_extension_modbus/actions.py` | The Modbus actions                                         |
+| `zelos_extension_modbus/scan.py`    | Read-only device scan and register-map verification        |
+| `zelos_extension_modbus/sunspec.py` | SunSpec discovery                                          |
+| `zelos_extension_modbus/demo/`      | Power-meter, scan-target, SunSpec and mock servers         |
+| `scripts/xlsx_to_register_map.py`   | Convert a register-map spreadsheet to JSON                 |
+| `examples/`                         | Example register maps                                      |
 
-## Development Workflow
+`cli/README.md` documents the `trace` command. `DEBUG.md` covers RTU serial failures, and `SUNSPEC.md` covers SunSpec discovery.
 
-```bash
-just install  # Install dependencies and setup
-just dev      # Run locally
-just test     # Run tests
-just check    # Lint code
-```
+## Commands
 
-1. Make your changes
-2. Run `just format` to auto-format
-3. Run `just test` to verify tests pass
-4. Commit your changes (pre-commit hooks run automatically)
+| Command                | Description                                       |
+| ---------------------- | ------------------------------------------------- |
+| `just install`         | Install dependencies and the pre-commit hooks     |
+| `just format`          | Format code with ruff                             |
+| `just check`           | Check formatting and lint with ruff               |
+| `just test`            | Run tests (pytest)                                |
+| `just package`         | Package for the Zelos marketplace                 |
+| `just release VERSION` | Bump version, check, test, commit, tag            |
+| `just clean`           | Remove build output, caches and packages          |
+| `just run`             | Run the extension against `./config.json`         |
+| `just sim`             | Run the power-meter simulator on `127.0.0.1:5020` |
 
-## Project Structure
+`just --list` also shows the other recipes. `just install` installs the pre-commit hooks in
+`.pre-commit-config.yaml`.
 
-```
-zelos-modbus/
-├── extension.toml                  # Extension metadata and version
-├── config.schema.json              # Configuration UI schema
-├── main.py                         # Entry point
-├── pyproject.toml                  # Python dependencies
-├── uv.lock                         # Locked dependency versions
-├── Justfile                        # Development commands
-├── LICENSE                         # MIT License
-├── README.md                       # User documentation
-├── CHANGELOG.md                    # Version history
-├── CONTRIBUTING.md                 # This file
-├── .pre-commit-config.yaml         # Git hook configuration
-├── .gitignore                      # Git ignore rules
-├── zelos_extension_modbus/  # Your extension package
-│   ├── __init__.py
-│   ├── extension.py                # Main extension logic
-│   └── utils/                      # Utility modules
-│       └── __init__.py
-├── tests/                          # Test suite
-│   └── test_extension.py
-├── scripts/                        # Build and release scripts
-│   ├── package_extension.py        # Creates marketplace tarball
-│   └── bump_version.py             # Updates version numbers
-├── assets/                         # Icons and media
-│   └── icon.svg                    # Marketplace icon
-├── .github/                        # GitHub automation
-│   ├── workflows/
-│   │   ├── CI.yml                  # Run tests on PR
-│   │   └── release.yml             # Publish releases
-│   └── dependabot.yml              # Dependency updates
-└── .vscode/                        # VSCode settings
-    ├── settings.json
-    └── extensions.json
-```
+## Simulators
 
-## Common Tasks
-
-### Run Locally
+`just sim` serves a simulated power meter that answers every unit ID.
+Run `uv run python main.py demo-server --help` for more units, a serial port, or the scan target.
+To serve any register map, run the mock server:
 
 ```bash
-just dev
+uv run python main.py mock-server examples/example_registers.json --port 5020
 ```
 
-Press Ctrl+C to stop.
+## Local run
 
-### Add a Dependency
+`just run` reads `./config.json`, and it needs at least one connection. Start the simulator in one terminal:
 
 ```bash
-uv add package-name        # Runtime dependency
-uv add --dev package-name  # Dev dependency
+just sim
 ```
 
-### Package for Marketplace
+Then run the extension in another:
+
+```bash
+echo '{"connections": [{"transport": "tcp", "host": "127.0.0.1", "port": 5020, "devices": [{"unit_id": 1}]}]}' > config.json
+just run
+```
+
+`just run` connects to the agent at `ZELOS_AGENT_URL`, else `http://localhost:2300`.
+A device with no register map scans the simulator and polls what it finds.
+`uv run python main.py --demo` starts the simulator and a connection to it in one process.
+
+## Run it in Zelos
+
+```bash
+zelos extensions install-local .
+```
+
+A local install runs from your project directory, so you do not install again after a code
+change:
+
+- Agent runtime: stop and start the extension. After a dependency change, stop it and run
+  `zelos extensions reinstall <id>`.
+- `extension.toml`: run `zelos extensions install-local .` again.
+
+## Packaging
 
 ```bash
 just package
 ```
 
-This creates a `.tar.gz` file ready to upload to the Zelos Marketplace (automatically happens in CI!)
+The archive lands next to `extension.toml` as `<name>-<version>.tar.gz`, where `<name>` is the
+manifest name in lowercase with every other run of characters turned into one hyphen. It holds
+`extension.toml`, the README, the icon, the config schema and the paths listed in
+`[package] paths`. With an agent runtime it also holds `pyproject.toml`, `uv.lock` and
+`actions.json`, the list of actions that run while the extension is stopped.
 
-### Create a Release
+## Release
 
 ```bash
 just release 1.0.0
 git push --follow-tags
 ```
 
-This updates version numbers, runs tests, and creates a git tag.
-
-## Testing
-
-### Write Tests
-
-```python
-# tests/test_feature.py
-from zelos_extension_modbus.extension import MyExtension
-
-def test_something():
-    extension = MyExtension({"setting": "value"})
-    assert extension.do_something() == expected_result
-```
-
-### Run Tests
-
-```bash
-just test           # Run all tests
-uv run pytest -v    # Verbose output
-uv run pytest -k test_name  # Run specific test
-```
-
-## Code Quality
-
-### Formatting & Linting
-
-```bash
-just format  # Auto-fix formatting
-just check   # Check for issues
-```
-
-Pre-commit hooks run automatically on `git commit` and will:
-- Format code with ruff
-- Check for common issues
-- Validate YAML/TOML/JSON files
-
-### Type Hints
-
-Use type hints on all function signatures:
-
-```python
-def my_function(name: str, count: int) -> list[str]:
-    return [name] * count
-```
-
-## Getting Help
-
-- [Zelos Docs](https://docs.zeloscloud.io)
-- [SDK Guide](https://docs.zeloscloud.io/sdk)
-- [GitHub Issues](https://github.com/yourusername/zelos-modbus/issues)
-
-## License
-
-MIT - see [LICENSE](LICENSE)
+The release workflow checks, tests and packages the extension, checks that the archive's
+`actions.json` lists the four standalone actions (`auto_config`, `list_serial_ports`,
+`scan_device` and `verify_map`), then attaches the archive to a GitHub release.

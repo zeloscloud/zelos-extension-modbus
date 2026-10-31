@@ -76,9 +76,6 @@ def cli(ctx: click.Context, demo: bool) -> None:
 
     Use 'trace' subcommand for direct CLI access without Zelos App.
     """
-    ctx.ensure_object(dict)
-    ctx.obj["demo"] = demo
-
     if ctx.invoked_subcommand is None:
         _setup_signal_handlers()
         from zelos_extension_modbus.cli.app import run_app_mode
@@ -149,9 +146,7 @@ def cli(ctx: click.Context, demo: bool) -> None:
         "(default: map device block, else 0 = strictly contiguous)"
     ),
 )
-@click.pass_context
 def trace(
-    ctx: click.Context,
     host_or_port: str,
     register_map_file: str | None,
     transport: str,

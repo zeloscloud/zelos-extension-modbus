@@ -2419,7 +2419,7 @@ class TestLastValuesCache:
                 lt.run(client.connection.disconnect())
 
     def test_bare_name_read_still_caches_under_its_event(self, demo_server):
-        """The bare-name compat path has no event, so the map resolves it."""
+        """A bare-name read has no event, so the map resolves it."""
         data = {
             "name": "bare",
             "events": {

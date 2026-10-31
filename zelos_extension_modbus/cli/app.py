@@ -59,20 +59,6 @@ MAP_DEVICE_KEYS = ("min_rate", "close_after_sweep")
 TCP_KEYS = ("host", "port")
 RTU_KEYS = ("serial_port", "baudrate", "parity", "stopbits", "bytesize")
 
-# Keys a 0.1.x interface carried; any of them (or no devices) marks an old config.
-_OLD_CONNECTION_KEYS = {
-    "unit_id",
-    "register_map_file",
-    "poll_interval",
-    *CONNECTION_KEYS,
-    *DEVICE_KEYS,
-}
-
-OLD_CONFIG_ERROR = (
-    "Config is from Modbus 0.1.x: interfaces are now connections, each with a devices list. "
-    "Re-open the config form and set up the connections again."
-)
-
 #: Device `register_map` value that builds the map by SunSpec discovery.
 SUNSPEC_MAP = "sunspec"
 
@@ -102,19 +88,6 @@ def link_kwargs(conn: dict[str, Any]) -> dict[str, Any]:
     transport = conn.get("transport", Transport.TCP)
     keys = RTU_KEYS if transport == Transport.RTU else TCP_KEYS
     return {"transport": transport, **{k: conn[k] for k in keys if k in conn}}
-
-
-def _old_config_error(config: dict[str, Any]) -> str | None:
-    """OLD_CONFIG_ERROR if ``config`` has the 0.1.x shape, else None."""
-    old = (
-        "log_level" in config
-        or "interfaces" in config
-        or any(
-            "devices" not in conn or _OLD_CONNECTION_KEYS & conn.keys()
-            for conn in config.get("connections") or []
-        )
-    )
-    return OLD_CONFIG_ERROR if old else None
 
 
 def get_demo_register_map_path() -> Path:
@@ -384,7 +357,6 @@ def run_app_mode(demo: bool = False) -> None:
                 "devices": [{"register_map_file": str(get_demo_register_map_path())}],
             }
         ]
-    _exit_on(_old_config_error(config))
 
     advanced = resolve_advanced(config)
     log_level = advanced["log_level"]
