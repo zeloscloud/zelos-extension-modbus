@@ -339,6 +339,33 @@ def test_unreachable_server_at_start_retries_when_enabled(caplog):
     assert not conn.ever_connected
 
 
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
+def test_a_stop_signal_ends_the_run_on_a_loop_without_signal_handlers(signum):
+    """Windows' event loops raise NotImplementedError from add_signal_handler."""
+    from conftest import free_port
+
+    from zelos_extension_modbus.cli.app import run_connections
+    from zelos_extension_modbus.client import ModbusConnection
+
+    def unsupported(*_args):
+        raise NotImplementedError
+
+    conn = ModbusConnection(name="gw", host="127.0.0.1", port=free_port(), timeout=0.5, retries=0)
+    conn.start("", None)
+    prior = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    loop = asyncio.new_event_loop()
+    loop.add_signal_handler = unsupported
+    loop.call_later(1.0, signal.raise_signal, signum)
+    try:
+        loop.run_until_complete(
+            asyncio.wait_for(run_connections([conn], retry_unreachable=True), 10.0)
+        )
+    finally:
+        loop.close()
+        for s, handler in prior.items():
+            signal.signal(s, handler)
+
+
 def test_console_script_in_package():
     """The installed script imports from the wheel's package, not the repo-root main.py."""
     scripts = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["scripts"]
