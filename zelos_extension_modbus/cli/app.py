@@ -327,7 +327,10 @@ async def run_connections(
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:  # Windows' event loops take no signal handlers
+            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
     tasks = [asyncio.create_task(conn.run_async()) for conn in connections]
     stopping = asyncio.create_task(stop.wait())
     await asyncio.wait([*tasks, stopping], return_when=asyncio.FIRST_COMPLETED)
