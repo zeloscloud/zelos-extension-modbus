@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 
 [[package]]
@@ -259,11 +259,11 @@ wheels = [
 
 [[package]]
 name = "pymodbus"
-version = "3.11.4"
+version = "3.16.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/2a/af/bbb716301ab9c60f0702c3cdf72cc0e373286a5648fe16bc4431400489dc/pymodbus-3.11.4.tar.gz", hash = "sha256:6910e385cb6b2f983cd457e9ecee2ff580dbb23cf3d84aefec0845e71edd606a", size = 163422, upload-time = "2025-11-30T10:36:33.717Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/65/ca/2552fdc467e87a04654af2b6cd994a29653cf767e371792810e15f4715f6/pymodbus-3.16.1.tar.gz", hash = "sha256:19e571826dff37860afc31c845c1fd2fb72acffca02a233506b32d94fa022c33", size = 168950, upload-time = "2026-10-11T17:38:47.372Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/02/80/84c32440949c77f2c201c38e5fa56fd8f19da31bf24df55bdbdaba67767c/pymodbus-3.11.4-py3-none-any.whl", hash = "sha256:89865929f53bd5e32b4076dde00ee86d9b8afb1686832ed74e69d55df22729c3", size = 166002, upload-time = "2025-11-30T10:36:31.992Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/b4/c6ccb9186b576abbbbffe865544184014fcc0563dfdff00749ca234ca0f8/pymodbus-3.16.1-py3-none-any.whl", hash = "sha256:bb433f7417280bdea1190d95495aa6fb8e1fa8e0d720c436922b270bc378024c", size = 167870, upload-time = "2026-10-11T17:38:45.39Z" },
 ]
 
 [[package]]
@@ -277,14 +277,14 @@ wheels = [
 
 [[package]]
 name = "pysunspec2"
-version = "1.3.6"
+version = "1.3.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyserial" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/65/5d/7f14a87be560af5aeb9e1f14170b29bd4298217e375d077cb81585a26b67/pysunspec2-1.3.6.tar.gz", hash = "sha256:699442066ce7731767f5179d8aea8cfeaac0aa0bbe5dec572280b74371849d24", size = 217331, upload-time = "2026-06-01T15:20:23.836Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0d/14/4634d7811c82ec7b11c44241fbcc89dda2016c4f5871b1a42acb21d6441e/pysunspec2-1.3.7.tar.gz", hash = "sha256:b66c7fa7b86303b4dbc8469df99ab291190ea0e1418b5717ebeb2e7eb2de4ef6", size = 218519, upload-time = "2026-10-21T18:29:52.991Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/04/01/cc7bee34a8c2c63a2a12496f728ab100817e26a95a96a52464efd70f9aa6/pysunspec2-1.3.6-py3-none-any.whl", hash = "sha256:6fae3c690f4bc1130880d85beaf84babe5d24689ecf76b12bdf209120ee0cfca", size = 320957, upload-time = "2026-06-01T15:20:22.598Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/66/d0764534459c273e7a869a9edadab64792b6860f21eae7533e64d91a96fc/pysunspec2-1.3.7-py3-none-any.whl", hash = "sha256:4bc5029ac2ee9ec8ea7bf7e4623c0fc269244c2f0292b2b7dca8588a4287eeeb", size = 322448, upload-time = "2026-10-21T18:29:51.873Z" },
 ]
 
 [[package]]
@@ -387,16 +387,16 @@ wheels = [
 
 [[package]]
 name = "rich-click"
-version = "1.9.5"
+version = "1.9.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6b/d1/b60ca6a8745e76800b50c7ee246fd73f08a3be5d8e0b551fc93c19fa1203/rich_click-1.9.5.tar.gz", hash = "sha256:48120531493f1533828da80e13e839d471979ec8d7d0ca7b35f86a1379cc74b6", size = 73927, upload-time = "2025-12-21T14:49:44.167Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/96/3e/5688fdd83aea416de336582a274f2bc8236b5c261b04c11e17bc262786ad/rich_click-1.9.9.tar.gz", hash = "sha256:324cba7513cd4187ee92b2eef21f071714e45be062458c8b157bd7e0c81103e3", size = 75866, upload-time = "2026-09-05T19:20:14.799Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/25/0a/d865895e1e5d88a60baee0fc3703eb111c502ee10c8c107516bc7623abf8/rich_click-1.9.5-py3-none-any.whl", hash = "sha256:9b195721a773b1acf0e16ff9ec68cef1e7d237e53471e6e3f7ade462f86c403a", size = 70580, upload-time = "2025-12-21T14:49:42.905Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/51/b2b91aec091e86bc961e5164f00207d89f133cc82b5ddad541d2132ea819/rich_click-1.9.9-py3-none-any.whl", hash = "sha256:365e7a9d0adb42e41ea832a0a12e02c44c079a26536dee688125eb9814f97274", size = 71910, upload-time = "2026-09-05T19:20:13.587Z" },
 ]
 
 [[package]]
