@@ -1,5 +1,5 @@
 name = "Modbus"
-version = "0.2.3"
+version = "0.3.0"
 description = "Read and write Modbus TCP and RTU registers on PLCs, power meters, sensors and SunSpec inverters over TCP/IP or RS232/RS485 serial. Register map files, SunSpec discovery or auto-scan turn registers into signals."
 author = "Zelos"
 repository = "https://github.com/zeloscloud/zelos-extension-modbus"

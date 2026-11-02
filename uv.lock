@@ -557,7 +557,7 @@ wheels = [
 
 [[package]]
 name = "zelos-extension-modbus"
-version = "0.2.3"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "pymodbus" },
