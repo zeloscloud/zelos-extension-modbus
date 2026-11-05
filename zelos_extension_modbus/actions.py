@@ -13,6 +13,7 @@ import concurrent.futures
 import functools
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import zelos_sdk
@@ -1102,12 +1103,17 @@ def list_serial_ports() -> dict[str, Any]:
     """The app's `action-choices` contract: `choices` in the order to show."""
     from serial.tools import list_ports
 
-    ports = sorted(list_ports.comports(), key=lambda p: p.device)
+    # include_links adds udev aliases (/dev/ttyRS485 -> ttyAMA4); listed first since
+    # the alias names the port's purpose. Linux only; other platforms ignore it.
+    ports = sorted(
+        list_ports.comports(include_links=True),
+        key=lambda p: (not Path(p.device).is_symlink(), p.device),
+    )
     cu = {p.device for p in ports if p.device.startswith("/dev/cu.")}
     return {
         "status": "success",
         "choices": [
-            {"value": p.device, "detail": p.description if p.description != "n/a" else ""}
+            {"value": p.device, "detail": _port_detail(p)}
             for p in ports
             # macOS pseudo ports, and tty.* twins of cu.* (cu doesn't wait on carrier).
             if "Bluetooth" not in p.device
@@ -1115,6 +1121,14 @@ def list_serial_ports() -> dict[str, Any]:
             and "/dev/cu." + p.device.removeprefix("/dev/tty.") not in cu
         ],
     }
+
+
+def _port_detail(p: Any) -> str:
+    detail = p.description if p.description != "n/a" else ""
+    if Path(p.device).is_symlink():
+        target = f"-> {Path(p.device).resolve().name}"
+        detail = f"{target} {detail}".strip()
+    return detail
 
 
 ALL_ACTIONS = [
