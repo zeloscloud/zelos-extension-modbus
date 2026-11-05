@@ -339,6 +339,36 @@ def test_unreachable_server_at_start_retries_when_enabled(caplog):
     assert not conn.ever_connected
 
 
+@pytest.mark.parametrize("fail", [True, False], ids=["loop-raises", "stop"])
+def test_a_failed_poll_loop_exits_nonzero(caplog, fail):
+    """A loop that raises exits 1; a stop exits 0 (the app shows 0 as a calm stop)."""
+    from conftest import free_port
+
+    from zelos_extension_modbus.cli.app import run_connections
+    from zelos_extension_modbus.client import ModbusConnection
+
+    conn = ModbusConnection(name="gw", host="127.0.0.1", port=free_port(), timeout=0.5, retries=0)
+    conn.start("", None)
+    if fail:
+
+        async def boom():
+            raise RuntimeError("bad batch")
+
+        conn.run_async = boom
+    loop = asyncio.new_event_loop()
+    loop.call_later(1.0, os.kill, os.getpid(), signal.SIGINT)
+    try:
+        if fail:
+            with pytest.raises(SystemExit) as exc:
+                loop.run_until_complete(run_connections([conn], retry_unreachable=True))
+            assert exc.value.code == 1
+            assert "[gw] RuntimeError: bad batch" in caplog.text
+        else:
+            loop.run_until_complete(run_connections([conn], retry_unreachable=True))
+    finally:
+        loop.close()
+
+
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
 def test_a_stop_signal_ends_the_run_on_a_loop_without_signal_handlers(signum):
     """Windows' event loops raise NotImplementedError from add_signal_handler."""
