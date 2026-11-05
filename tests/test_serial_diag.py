@@ -51,6 +51,23 @@ class TestNodeExistence:
         assert any("node missing" in f for f in findings), findings
         assert any("ttyUSB1" in f for f in findings), findings
 
+    def test_missing_node_lists_uart_aliases_first(self, tmp_path):
+        """On-board UARTs are candidates, with their udev alias first and labelled."""
+        dev_root = tmp_path / "dev"
+        dev_root.mkdir()
+        (dev_root / "ttyAMA4").write_text("")
+        (dev_root / "ttyRS485").symlink_to("ttyAMA4")
+        (dev_root / "rtc").symlink_to("ttyNOPE")  # not a serial alias
+
+        findings = diagnose_serial_port(
+            str(dev_root / "ttyUSB0"), dev_root=str(dev_root), sys_root=str(tmp_path / "sys")
+        )
+
+        line = next(f for f in findings if f.startswith("live serial candidates"))
+        assert line == (
+            f"live serial candidates: {dev_root}/ttyRS485 -> ttyAMA4, {dev_root}/ttyAMA4"
+        ), line
+
 
 class TestOpenProbe:
     """Check 2: OS open with errno differentiation."""

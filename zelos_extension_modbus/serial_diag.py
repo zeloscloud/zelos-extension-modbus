@@ -30,8 +30,10 @@ except ImportError:  # pragma: no cover - non-Unix
     pwd = None  # type: ignore[assignment]
 
 # Serial-port device-node glob patterns. ttyUSB*/ttyACM* are the Linux USB
-# adapters; tty.*/cu.* are the macOS equivalents (only meaningful there).
-_LINUX_GLOBS = ("ttyUSB*", "ttyACM*")
+# adapters, ttyAMA* the on-board ARM UARTs (Raspberry Pi, RevPi); tty.*/cu.* are
+# the macOS equivalents (only meaningful there). ttyS* is left out: x86 kernels
+# create dozens of phantom 8250 nodes.
+_LINUX_GLOBS = ("ttyUSB*", "ttyACM*", "ttyAMA*")
 _MAC_GLOBS = ("tty.*", "cu.*")
 
 # Kernel tty basenames whose liveness is visible under /sys/class/tty.
@@ -112,7 +114,11 @@ def diagnose_serial_port(port: str, *, dev_root: str = "/dev", sys_root: str = "
 
 
 def _serial_candidates(dev_root: str) -> list[str]:
-    """Existing serial device nodes under ``dev_root`` (natural-sorted)."""
+    """Existing serial device nodes under ``dev_root`` (natural-sorted).
+
+    Top-level udev aliases of those nodes (``/dev/ttyRS485``) come first, since
+    the alias says what the port is for.
+    """
     patterns = list(_LINUX_GLOBS)
     if sys.platform == "darwin":
         patterns += list(_MAC_GLOBS)
@@ -121,7 +127,24 @@ def _serial_candidates(dev_root: str) -> list[str]:
     for pattern in patterns:
         with contextlib.suppress(OSError):
             found.update(str(p) for p in root.glob(pattern))
-    return sorted(found, key=_natural_key)
+    aliases: set[str] = set()
+    with contextlib.suppress(OSError):
+        for entry in root.iterdir():
+            if entry.is_symlink() and str(entry) not in found and str(_resolve(entry)) in found:
+                aliases.add(str(entry))
+    return sorted(aliases, key=_natural_key) + sorted(found, key=_natural_key)
+
+
+def _other_candidates(dev_root: str, port: str) -> list[str]:
+    """Candidates other than ``port`` and its aliases."""
+    target = _resolve(Path(port))
+    return [c for c in _serial_candidates(dev_root) if c != port and _resolve(Path(c)) != target]
+
+
+def _label(path: str) -> str:
+    """``/dev/ttyRS485 -> ttyAMA4`` for an alias, the path itself otherwise."""
+    p = Path(path)
+    return f"{path} -> {_resolve(p).name}" if p.is_symlink() else path
 
 
 def _natural_key(text: str) -> list[object]:
@@ -130,10 +153,10 @@ def _natural_key(text: str) -> list[object]:
 
 def _candidates_line(dev_root: str, port: str) -> str:
     """A single line naming up to 4 other serial nodes (so a re-enumerated sibling shows)."""
-    others = [c for c in _serial_candidates(dev_root) if c != port]
+    others = _other_candidates(dev_root, port)
     if not others:
         return f"no serial candidates found under {dev_root} (adapter may be fully gone)"
-    listed = ", ".join(others[:4])
+    listed = ", ".join(_label(c) for c in others[:4])
     if len(others) > 4:
         listed += f" +{len(others) - 4} more"
     return f"live serial candidates: {listed}"
@@ -259,8 +282,8 @@ def _probe_sysfs(
         if stale_known:
             findings.append(f"sysfs confirms stale node: {device} is gone")
             return True
-        others = [c for c in _serial_candidates(dev_root) if c != port]
-        tail = f"; live candidates: {', '.join(others)}" if others else ""
+        others = _other_candidates(dev_root, port)
+        tail = f"; live candidates: {', '.join(map(_label, others))}" if others else ""
         findings.append(f"{port} exists but has no sysfs backing (re-enumerated?){tail}")
         return True
     identity = _usb_identity(device)
