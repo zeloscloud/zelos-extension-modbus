@@ -806,6 +806,7 @@ def _link_fields(fn: Any) -> Any:
     "writes the draft map there (several units: <name>_unit<id>.json).",
     timeout=SCAN_TIMEOUT,
     standalone=True,
+    hidden=True,
 )
 @_link_fields
 @zelos_sdk.action.boolean(
@@ -913,6 +914,7 @@ def scan_device(
     "a declared string, plus every decoded value. Reads only; run with the extension stopped.",
     timeout=VERIFY_TIMEOUT,
     standalone=True,
+    hidden=True,
     read_only=True,
 )
 @_link_fields
