@@ -333,7 +333,18 @@ async def run_connections(
             signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
     tasks = [asyncio.create_task(conn.run_async()) for conn in connections]
     stopping = asyncio.create_task(stop.wait())
-    await asyncio.wait([*tasks, stopping], return_when=asyncio.FIRST_COMPLETED)
+    done, _ = await asyncio.wait([*tasks, stopping], return_when=asyncio.FIRST_COMPLETED)
+    # A loop that ended before a stop failed: raised, or returned on its own.
+    failed = [
+        (conn, task)
+        for conn, task in zip(connections, tasks, strict=True)
+        if task in done and not task.cancelled() and not stop.is_set()
+    ]
+    for conn, task in failed:
+        if e := task.exception():
+            logger.error("[%s] %s: %s", conn.name, type(e).__name__, e)
+        else:
+            logger.error("[%s] poll loop ended unexpectedly", conn.name)
     logger.info("Shutting down...")
     for conn in connections:
         conn.stop()
@@ -346,6 +357,8 @@ async def run_connections(
         logger.warning(f"Forced exit; trace flush {'completed' if flushed else 'timed out'}")
         logging.shutdown()
         os._exit(1)
+    if failed:
+        raise SystemExit(1)
 
 
 def _flush_traces(connections: list[ModbusConnection]) -> bool:
