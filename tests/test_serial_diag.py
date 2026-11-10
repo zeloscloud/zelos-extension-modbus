@@ -9,7 +9,6 @@ output.
 
 import asyncio
 import os
-import pty
 import sys
 
 import pytest
@@ -17,6 +16,8 @@ import pytest
 from zelos_extension_modbus import client as client_module
 from zelos_extension_modbus.client import ModbusConnection
 from zelos_extension_modbus.serial_diag import diagnose_serial_port
+
+pty = pytest.importorskip("pty")  # POSIX device nodes; Windows: test_serial_diag_windows.py
 
 
 @pytest.fixture
