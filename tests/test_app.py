@@ -361,7 +361,7 @@ def test_a_failed_poll_loop_exits_nonzero(caplog, fail):
 
         conn.run_async = boom
     loop = asyncio.new_event_loop()
-    loop.call_later(1.0, os.kill, os.getpid(), signal.SIGINT)
+    loop.call_later(1.0, signal.raise_signal, signal.SIGINT)  # os.kill terminates on Windows
     try:
         if fail:
             with pytest.raises(SystemExit) as exc:
