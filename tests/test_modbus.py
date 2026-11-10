@@ -199,6 +199,7 @@ class TestRegisterMap:
         """Configured maps: ~ expands, relative is refused, a typo gets a close name,
         a value starting with `{` is the map itself."""
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # ~ on Windows
         demo = Path(__file__).parents[1] / "zelos_extension_modbus/demo/power_meter.json"
         shutil.copy(demo, tmp_path / "meter.json")
         assert resolve_map_file("~/meter.json") == tmp_path / "meter.json"
@@ -229,6 +230,7 @@ class TestRegisterMap:
     def test_map_output_path(self, tmp_path, monkeypatch, path, overwrite, error):
         """Save paths: ~ expands, relative is refused, the parent must exist, no silent clobber."""
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # ~ on Windows
         (tmp_path / "meter.json").write_text("{}")
         if error:
             with pytest.raises(ValueError, match=error):
@@ -1216,8 +1218,10 @@ class TestPollScheduler:
         _, live_reads = _fake_device(events, conn, unit_id=1, rate=0.1)
         dead_reads = []
         for unit in range(2, 7):
-            dead_reads.append(_fake_device(events, conn, unit_id=unit, dead=True, latency=0.1)[1])
-        asyncio.get_event_loop().run_until_complete(_run_for(conn, 3.5))
+            # A probe outlasts the live rate, as a real timeout does; latency == rate
+            # leaves the order to the clock (15.6 ms on Windows).
+            dead_reads.append(_fake_device(events, conn, unit_id=unit, dead=True, latency=0.15)[1])
+        asyncio.get_event_loop().run_until_complete(_run_for(conn, 4.5))
 
         demoted_at = max(reads[2][3] for reads in dead_reads)
         merged = sorted(live_reads + sum(dead_reads, []), key=lambda r: r[3])
@@ -1497,7 +1501,7 @@ class TestReconnection:
         async def main():
             conn._running = True
             task = asyncio.create_task(conn.run_async())
-            await asyncio.sleep(0.5)
+            await until(lambda: dev.last_error is not None)  # refused takes ~2.5 s on Windows
             assert not dev.answered
             assert dev.last_error.startswith(f"cannot connect to 127.0.0.1:{port}")
             server.start()

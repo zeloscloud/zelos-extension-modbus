@@ -14,7 +14,6 @@ import asyncio
 import importlib
 import json
 import logging
-import os
 import signal
 import tomllib
 from pathlib import Path
@@ -332,7 +331,13 @@ def test_unreachable_server_at_start_retries_when_enabled(caplog):
     conn = ModbusConnection(name="gw", host="127.0.0.1", port=free_port(), timeout=0.5, retries=0)
     conn.start("", None)
     loop = asyncio.new_event_loop()
-    loop.call_later(1.0, os.kill, os.getpid(), signal.SIGINT)
+
+    async def stop_once_retrying():  # a refused connect takes ~2.5 s to report on Windows
+        while "retrying in" not in caplog.text:
+            await asyncio.sleep(0.05)
+        signal.raise_signal(signal.SIGINT)
+
+    loop.create_task(stop_once_retrying())
     loop.run_until_complete(run_connections([conn], retry_unreachable=True))
     loop.close()
     assert "Connection 'gw' (127.0.0.1:" in caplog.text and "retrying in" in caplog.text

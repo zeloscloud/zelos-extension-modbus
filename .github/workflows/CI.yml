@@ -56,3 +56,16 @@ jobs:
 
       - name: Build and package extension
         run: just package
+
+  # Agents run on Windows too; RTU wire tests need socat and skip here.
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest
