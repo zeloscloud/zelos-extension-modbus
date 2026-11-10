@@ -480,9 +480,26 @@ class ModbusConnection:
         self._close_after_sweep = False
         self._parked = False
 
-        # See ``lock``; also holds the request_delay_ms gap.
+        # See ``lock``; also holds the request_gap.
         self._lock: asyncio.Lock | None = None
         self._last_request_end = 0.0
+
+    @property
+    def request_gap(self) -> float:
+        """Seconds between one request's end and the next request's start.
+
+        RTU: at least the 3.5-character silent interval that delimits frames
+        (Modbus serial line spec 2.5.1.1; fixed 1.75 ms above 19200 baud).
+        Without it a device can take the next request as part of the last
+        frame and ignore it.
+        """
+        gap = self.request_delay_ms / 1000
+        if self.transport != Transport.RTU:
+            return gap
+        if self.baudrate > 19200:
+            return max(gap, 0.00175)
+        bits = 1 + self.bytesize + (self.parity != "N") + self.stopbits
+        return max(gap, 3.5 * bits / self.baudrate)
 
     def _create_client(self) -> AsyncModbusTcpClient | AsyncModbusSerialClient:
         # reconnect_delay 0: we reconnect, under the lock, with connect_delay_ms.
@@ -653,7 +670,7 @@ class ModbusConnection:
         """Issue one pymodbus request; the single choke point for all device I/O.
 
         Requests from every device (poll or action) run one at a time, and each
-        starts at least request_delay_ms after the previous one ended. A down
+        starts at least request_gap after the previous one ended. A down
         link is reopened here, under the lock and with connect_delay_ms.
         ``single``: one attempt, no retries (a demoted device's probe).
 
@@ -662,7 +679,8 @@ class ModbusConnection:
             ModbusIOException: no response.
         """
         async with self.lock:
-            wait = self._last_request_end + self.request_delay_ms / 1000 - time.monotonic()
+            # perf_counter: monotonic ticks at 15.6 ms on Windows, coarser than the gap.
+            wait = self._last_request_end + self.request_gap - time.perf_counter()
             if wait > 0:
                 await asyncio.sleep(wait)
             if not await self._ensure_connected():
@@ -682,7 +700,7 @@ class ModbusConnection:
                     raise asyncio.CancelledError from e
                 raise
             finally:
-                self._last_request_end = time.monotonic()
+                self._last_request_end = time.perf_counter()
 
     def start(self, prefix: str, source: zelos_sdk.TraceSource | None = None) -> None:
         """Declare every device's trace events.

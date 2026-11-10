@@ -301,7 +301,7 @@
         "request_delay_ms": {
           "type": "integer",
           "title": "Request Delay (ms)",
-          "description": "Minimum gap between consecutive requests on a connection. For RS485 gateways and slow RTU devices.",
+          "description": "Minimum gap between consecutive requests on a connection. For RS485 gateways and slow RTU devices. RTU always waits at least the 3.5-character silent interval the Modbus serial spec requires.",
           "default": 0,
           "minimum": 0,
           "maximum": 5000
