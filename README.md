@@ -71,7 +71,7 @@ Applies to every connection and device; a register map `device` block overrides 
 | `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `timeout` | `3.0` | Seconds to wait for each response |
 | `retries` | `1` | Extra attempts per request |
-| `request_delay_ms` | `0` | Minimum gap between requests (RS485 gateways, slow RTU devices) |
+| `request_delay_ms` | `0` | Minimum gap between requests (RS485 gateways, slow RTU devices); RTU always waits the spec's 3.5-character silent interval |
 | `connect_delay_ms` | `0` | Pause after each (re)connect |
 | `retry_unreachable_at_start` | off | A connection unreachable at start is retried instead of stopping the extension |
 | `demote_after` | `3` | Consecutive timeouts before a device is demoted |

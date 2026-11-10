@@ -916,15 +916,30 @@ class TestLinkIntegration:
         async def run():
             await client.connection.connect()
             try:
-                start = time.monotonic()
+                start = time.perf_counter()
                 for _ in range(3):
                     assert await client._read_range("holding", 0, 2) is not None
-                return time.monotonic() - start
+                return time.perf_counter() - start
             finally:
                 await client.connection.disconnect()
 
         # Two gaps between three requests; the first request is not delayed.
         assert asyncio.get_event_loop().run_until_complete(run()) >= 0.2
+
+    @pytest.mark.parametrize(
+        ("kwargs", "gap_ms"),
+        [
+            ({"transport": "tcp"}, 0.0),
+            ({"transport": "rtu", "baudrate": 9600}, 3.5 * 10 / 9.6),  # 8N1: 10 bits
+            ({"transport": "rtu", "baudrate": 9600, "parity": "E", "stopbits": 2}, 3.5 * 12 / 9.6),
+            ({"transport": "rtu", "baudrate": 115200}, 1.75),
+            ({"transport": "rtu", "baudrate": 9600, "request_delay_ms": 50}, 50.0),
+        ],
+        ids=["tcp", "rtu-9600", "rtu-9600-8E2", "rtu-115200", "rtu-delay-wins"],
+    )
+    def test_rtu_request_gap_is_at_least_the_silent_interval(self, kwargs, gap_ms):
+        """RTU frames need 3.5 character times of silence between them (spec 2.5.1.1)."""
+        assert ModbusConnection(**kwargs).request_gap * 1000 == pytest.approx(gap_ms)
 
 
 # =============================================================================

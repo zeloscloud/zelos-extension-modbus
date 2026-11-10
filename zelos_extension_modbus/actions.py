@@ -101,7 +101,7 @@ def _run_coro(coro: Any, dev: Any, write: bool = False) -> tuple[Any, dict | Non
     # Worst case per request: every attempt times out, after the pacing gap.
     # The link is serialized, so wait out the request ahead of ours too, plus
     # one reconnect (connect, plain TCP connect, retried connect, connect_delay_ms).
-    per_request = conn.timeout * (1 + conn.retries) + conn.request_delay_ms / 1000
+    per_request = conn.timeout * (1 + conn.retries) + conn.request_gap
     reconnect = 2 * conn.timeout + conn.connect_timeout + conn.connect_delay_ms / 1000
     try:
         if not (conn._loop and conn._loop.is_running()):
