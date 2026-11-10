@@ -24,6 +24,13 @@ lsof /dev/ttyUSB0                                     # who holds the port (run 
 | Adapter keeps disconnecting | USB autosuspend, unpowered hub, marginal cable, counterfeit FTDI/CH340 resetting under load | `journalctl -k \| grep -iE 'usb\|tty'` timestamps vs data gaps; try a powered hub / different cable and port |
 | Node vanishes right after plug-in | `brltty` claims CH341/CP210x adapters on newer Ubuntu | `dmesg` shows attach then immediate disconnect by brltty; remove/mask brltty |
 
+## Windows
+
+| Symptom | Likely causes | Checks |
+|---|---|---|
+| `COMn not found` | Adapter unplugged, driver missing, or Windows gave it another number | Device Manager > Ports (COM & LPT); the diagnosis lists the ports present |
+| `in use by another program` | A terminal (PuTTY), a vendor tool or another extension holds the port; Windows allows one at a time | Close it there, then restart the extension |
+
 ## Prevent re-enumeration breakage
 
 Configure the port by its stable identity instead of a `ttyUSBn` number, and the extension's

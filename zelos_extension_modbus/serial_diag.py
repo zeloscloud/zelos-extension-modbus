@@ -69,6 +69,11 @@ def diagnose_serial_port(port: str, *, dev_root: str = "/dev", sys_root: str = "
     Returns:
         A compact list of finding lines (roughly <= 12).
     """
+    if sys.platform == "win32":
+        with contextlib.suppress(Exception):
+            return [*_diagnose_com_port(port), _DEBUG_LINK]
+        return [_DEBUG_LINK]
+
     findings: list[str] = []
     exists = Path(port).exists()
     status = _OTHER
@@ -106,6 +111,37 @@ def diagnose_serial_port(port: str, *, dev_root: str = "/dev", sys_root: str = "
     # 6. DEBUG.md pointer (always, on any failure).
     findings.append(_DEBUG_LINK)
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Windows COM ports (no /dev node, sysfs or holder scan)
+# ---------------------------------------------------------------------------
+
+
+def _diagnose_com_port(port: str) -> list[str]:
+    """Is ``port`` among the COM ports Windows lists, and can it be opened?"""
+    from serial.tools import list_ports
+
+    name = port.upper().removeprefix("\\\\.\\")  # \\.\COM10 form
+    present = {p.device.upper(): p.description for p in list_ports.comports()}
+    if name not in present:
+        others = ", ".join(  # Windows descriptions end in "(COMn)"
+            desc if dev in desc.upper() else f"{dev} ({desc})"
+            for dev, desc in sorted(present.items(), key=lambda i: _natural_key(i[0]))
+        )
+        return [
+            f"{port} not found",
+            f"COM ports present: {others}"
+            if others
+            else "no COM ports present (adapter unplugged or its driver missing)",
+        ]
+    try:
+        os.close(os.open(rf"\\.\{name}", os.O_RDWR))
+    except PermissionError:
+        return [f"{port} is in use by another program (Windows opens a COM port for one at a time)"]
+    except OSError as exc:
+        return [f"open failed: {exc.strerror}"]
+    return ["port opens cleanly — likely protocol/wiring/unit-id, not the port"]
 
 
 # ---------------------------------------------------------------------------
