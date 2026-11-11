@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -22,9 +23,11 @@ from zelos_extension_modbus.scan import (
     ALLOWED,
     SILENT_AFTER,
     RangeFinder,
+    Reply,
     ScanLink,
     _issues,
     find_devices,
+    find_units,
     parse_formats,
     scan,
     verify_map,
@@ -551,6 +554,24 @@ class TestFindDevices:
         )
         with pytest.raises(ValueError, match="no port in"):
             actions.find_device(ports=" , ")
+        # Unasked, the system console's port is left alone; named, it is searched.
+        monkeypatch.setattr(actions, "_console_nodes", lambda: {os.path.realpath(node)})
+        with pytest.raises(ValueError, match="system console, name it to search it"):
+            actions.find_device()
+        assert actions.find_device(ports=str(node))["searched"]["ports"] == [str(node)]
+
+    def test_listed_units_are_all_tried_on_a_silent_link(self):
+        """Unit 40 behind 20 silent ones: found when listed, given up on in a default sweep."""
+
+        async def request(method, unit, **_):
+            return Reply(values=[1], response=object()) if unit == 40 else Reply()
+
+        link = SimpleNamespace(request=request)
+        units = list(range(20, 60))
+        assert _run(find_units(link, units, give_up=False))["present"] == [40]
+        assert _run(find_units(link, units)) == {"present": [], "gateway_absent": []} | {
+            "silent": True
+        }
 
 
 def test_parse_formats():
