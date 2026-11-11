@@ -83,7 +83,7 @@ Applies to every connection and device; a register map `device` block overrides 
 | `write_mode` | `auto` | `auto` (FC 6 single / FC 16 multi) or `fc16` |
 | `allow_raw_writes` | off | Enable the raw write actions; read-only map addresses stay refused |
 
-Serial/USB troubleshooting: [DEBUG.md](DEBUG.md).
+Serial/USB troubleshooting: [DEBUG.md](DEBUG.md); settings and wiring checks: [Linux RTU](howto/debug/linux-rtu.md).
 
 ### Polling
 
