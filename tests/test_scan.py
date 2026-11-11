@@ -24,6 +24,8 @@ from zelos_extension_modbus.scan import (
     RangeFinder,
     ScanLink,
     _issues,
+    find_devices,
+    parse_formats,
     scan,
     verify_map,
 )
@@ -392,7 +394,90 @@ def test_action_flags_are_pinned():
         "scan_device": (False, True),
         "verify_map": (True, True),
         "auto_config": (True, True),
+        "find_device": (False, True),
         "list_serial_ports": (True, True),
     }
     actual = {a.__name__: (a._action.read_only, a._action.hidden) for a in actions.ALL_ACTIONS}
     assert actual == expected
+
+
+class TestFindDevices:
+    """find_devices over a fake link: {(port, baudrate, parity, stopbits, unit): reply}."""
+
+    def _find(self, monkeypatch, replies, ports, expire_after=None, **kwargs):
+        tried = []
+
+        async def open_link(self, **changes):
+            self.endpoint.update(changes)
+            e = self.endpoint
+            setting = (e["serial_port"], e["baudrate"], e["parity"], e["stopbits"])
+
+            async def request(method, unit, **_):
+                tried.append((*setting, unit))
+                if len(tried) == expire_after:
+                    self.deadline = 0.0  # the time limit passes during this request
+                reply = replies.get((*setting, unit))
+                if reply is None:
+                    raise ModbusIOException("no response")
+                if reply == "echo":
+                    return SimpleNamespace(isError=lambda: False, registers=[])
+                if isinstance(reply, int):
+                    return SimpleNamespace(isError=lambda: True, exception_code=reply)
+                return SimpleNamespace(isError=lambda: False, registers=reply)
+
+            ok = e["serial_port"] != "bad"
+            self.conn = SimpleNamespace(request=request, disconnect=AsyncMock()) if ok else None
+            return ok
+
+        monkeypatch.setattr(ScanLink, "open", open_link)
+        return _run(find_devices(ports, **kwargs)), tried
+
+    def test_likely_units_go_first_on_every_setting(self, monkeypatch):
+        """Unit 9 at 19200 is found after 1, 2 and 247 were tried on both baudrates."""
+        got, tried = self._find(
+            monkeypatch,
+            {("a", 19200, "N", 1, 9): [25]},
+            ["a"],
+            baudrates=[9600, 19200],
+            formats=[("N", 1)],
+        )
+        assert [f["unit_id"] for f in got["found"]] == [9]
+        assert got["found"][0]["reply"] == "holding register 1 = 25"
+        assert tried[:6] == [("a", b, "N", 1, u) for b in (9600, 19200) for u in (1, 2, 247)]
+        assert tried[-1] == ("a", 19200, "N", 1, 9)
+        assert got["stopped_at"] is None
+
+    def test_find_all_keeps_a_port_on_the_setting_that_answered(self, monkeypatch):
+        """An exception is a hit, an echo and a gateway's 0B are not; "bad" is skipped."""
+        replies = {
+            ("a", 9600, "E", 1, 1): 2,
+            ("a", 9600, "E", 1, 5): [7],
+            ("a", 9600, "E", 1, 6): 0x0B,
+            ("b", 9600, "N", 1, 2): "echo",
+        }
+        got, tried = self._find(
+            monkeypatch,
+            replies,
+            ["bad", "a", "b"],
+            baudrates=[9600],
+            units=list(range(1, 8)),
+            find_all=True,
+        )
+        assert [(f["serial_port"], f["unit_id"], f["reply"]) for f in got["found"]] == [
+            ("a", 1, "exception 02 (illegal data address)"),
+            ("a", 5, "holding register 1 = 7"),
+        ]
+        assert (got["unopened"], got["malformed"]) == (["bad"], 1)
+        on_a = {t[1:4] for t in tried if t[0] == "a"}
+        assert on_a == {(9600, "N", 1), (9600, "E", 1)}  # nothing after the setting that hit
+
+    def test_time_limit_says_where_it_stopped(self, monkeypatch):
+        got, tried = self._find(monkeypatch, {}, ["a"], expire_after=2, max_seconds=60)
+        assert (got["found"], len(tried)) == ([], 2)
+        assert got["stopped_at"] == "a 9600 8N1 unit 247"
+
+
+def test_parse_formats():
+    assert parse_formats("8n1, 8E2") == [("N", 1), ("E", 2)]
+    with pytest.raises(ValueError, match="7 is Modbus ASCII"):
+        parse_formats("7E1")
