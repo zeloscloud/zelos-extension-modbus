@@ -31,6 +31,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import re
 import time
 from collections import Counter
 from collections.abc import Iterator
@@ -41,6 +42,7 @@ from typing import Any
 from pymodbus.exceptions import ModbusException
 
 from zelos_extension_modbus.client import (
+    EXCEPTION_NAMES,
     GATEWAY_ABSENT,
     MIN_CONNECT_TIMEOUT,
     READ_METHODS,
@@ -111,6 +113,9 @@ SERIAL_COMBOS = (
     (115200, "N", 1),
 )
 AUTODETECT_UNITS = (1, 2, 247)  # tried after the configured unit
+#: Find Device: what an empty dimension searches. (parity, stopbits); RTU is 8 data bits.
+FIND_BAUDRATES = (9600, 19200, 38400, 57600, 115200)
+FIND_FORMATS = (("N", 1), ("E", 1), ("O", 1), ("N", 2))
 
 #: Per-stage (max requests, max seconds) per device.
 BUDGETS: dict[str, tuple[int, float]] = {
@@ -388,6 +393,19 @@ def quiet_pymodbus() -> None:
 def parse_units(text: str) -> list[int]:
     """``"1,2,10-20"`` -> unit ids in order."""
     return [u for lo, hi in parse_ranges(text, 0, 255) for u in range(lo, hi + 1)]
+
+
+def parse_formats(text: str) -> list[tuple[str, int]]:
+    """``"8N1,8e2"`` -> (parity, stopbits) pairs in order."""
+    out = []
+    for part in filter(None, (p.strip().upper() for p in text.split(","))):
+        if not (m := re.fullmatch(r"8([NEO])([12])", part)):
+            raise ValueError(
+                f"bad format {part!r}: RTU has 8 data bits (7 is Modbus ASCII); "
+                "use 8N1, 8E1, 8O1, 8N2, 8E2 or 8O2"
+            )
+        out.append((m[1], int(m[2])))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +921,96 @@ async def sweep(
         await _finish(link, report, started)
     report["cutoffs"] = cutoffs
     return report
+
+
+async def find_devices(
+    ports: list[str],
+    baudrates: list[int] | None = None,
+    formats: list[tuple[str, int]] | None = None,
+    units: list[int] | None = None,
+    *,
+    find_all: bool = False,
+    max_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Search serial ports x serial settings x unit ids for RTU devices, one FC03 read each.
+
+    A silent try costs a full timeout, so the likely unit ids (AUTODETECT_UNITS)
+    go first on every port and setting, and the rest only after: a device on a
+    common id is not stuck behind a 247-unit sweep of a wrong baudrate. A hit
+    is a value or a non-gateway exception; any other reply (an adapter echoing
+    the request) counts as malformed. The first hit ends the search unless
+    ``find_all``, which goes on but tries no other setting on a port that
+    answered: one bus has one setting.
+    """
+    settings = [(b, *f) for b in baudrates or FIND_BAUDRATES for f in formats or FIND_FORMATS]
+    units = list(dict.fromkeys(units or RTU_UNITS))
+    likely = [u for u in units if u in AUTODETECT_UNITS]
+    batches = [likely, [u for u in units if u not in likely]]
+    started = time.monotonic()
+    links = {p: ScanLink(endpoint(p, Transport.RTU), max_seconds=max_seconds) for p in ports}
+    report: dict[str, Any] = {"found": [], "unopened": [], "malformed": 0, "stopped_at": None}
+    answered: dict[str, tuple[int, str, int]] = {}  # port -> the setting it answers on
+    link = None
+
+    async def search() -> None:
+        nonlocal link
+        for batch in filter(None, batches):
+            for port in ports:
+                for setting in [answered[port]] if port in answered else settings:
+                    if port in report["unopened"]:
+                        break
+                    if link:
+                        await link.close()
+                    link = links[port]
+                    baudrate, parity, stopbits = setting
+                    at = report["stopped_at"] = f"{port} {baudrate} 8{parity}{stopbits}"
+                    link.check()
+                    if not await link.open(baudrate=baudrate, parity=parity, stopbits=stopbits):
+                        report["unopened"].append(port)
+                        break
+                    for unit in batch:
+                        report["stopped_at"] = f"{at} unit {unit}"
+                        reply = await link.request(
+                            "read_holding_registers", unit, address=0, count=1
+                        )
+                        if reply.response is None or reply.exc in GATEWAY_ABSENT:
+                            continue
+                        if reply.exc is None and reply.values is None:
+                            report["malformed"] += 1
+                            continue
+                        answered[port] = setting
+                        report["found"].append(
+                            {
+                                "serial_port": port,
+                                "baudrate": baudrate,
+                                "parity": parity,
+                                "stopbits": stopbits,
+                                "unit_id": unit,
+                                "reply": f"holding register 1 = {reply.values[0]}"
+                                if reply.exc is None
+                                else f"exception {reply.exc:02X} "
+                                f"({EXCEPTION_NAMES.get(reply.exc, 'unknown code')})",
+                            }
+                        )
+                        if not find_all:
+                            return
+                    if port in answered:
+                        break
+        report["stopped_at"] = None
+
+    try:
+        await search()
+    except BudgetExceeded:
+        pass  # stopped_at says where
+    finally:
+        if link:
+            await link.close()
+    if report["found"] and not find_all:
+        report["stopped_at"] = None  # the first hit is a full answer
+    return report | {
+        "requests": sum(x.requests for x in links.values()),
+        "elapsed_s": round(time.monotonic() - started, 2),
+    }
 
 
 # ---------------------------------------------------------------------------
