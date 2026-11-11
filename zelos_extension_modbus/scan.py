@@ -421,21 +421,20 @@ async def probe_unit(link: ScanLink, unit: int) -> str:
     return "gateway_absent" if reply.exc in GATEWAY_ABSENT else "present"
 
 
-async def find_units(link: ScanLink, units: list[int]) -> dict[str, Any]:
-    """Sweep ``units``; stop early on a silent link."""
-    found: dict[str, Any] = {"present": [], "gateway_absent": [], "silent": False}
+async def find_units(link: ScanLink, units: list[int], give_up: bool = True) -> dict[str, Any]:
+    """Sweep ``units``. ``give_up``: stop once SILENT_AFTER go unanswered with nothing heard."""
+    found: dict[str, Any] = {"present": [], "gateway_absent": []}
     heard, timeouts = False, 0
     for unit in units:
         status = await probe_unit(link, unit)
         if status == "timeout":
             timeouts += 1
-            if not heard and timeouts >= SILENT_AFTER:
-                found["silent"] = True
+            if give_up and not heard and timeouts >= SILENT_AFTER:
                 break
             continue
         heard = True
         found[status].append(unit)
-    return found
+    return found | {"silent": not heard and timeouts >= SILENT_AFTER}
 
 
 async def autodetect_serial(
@@ -796,7 +795,8 @@ async def _reach(
     the first to answer (a direct device answers any id); a 0A/0B reply (a
     gateway) or no answer at all falls through to a sweep. RTU sweeps. A sweep
     covers the configured unit and 1-247, or with ``quick`` 1-10 and 247; a
-    silent link stops it after SILENT_AFTER timeouts.
+    silent link stops it after SILENT_AFTER timeouts. Listed ``units`` are
+    all tried.
     """
     rtu = link.endpoint.get("transport") == Transport.RTU
     first = [configured_unit] if configured_unit is not None else []
@@ -816,7 +816,7 @@ async def _reach(
     wide = list(dict.fromkeys(first + list(QUICK_UNITS if quick else RTU_UNITS)))
     sweep = units or (wide if rtu else list(dict.fromkeys(first + list(TCP_UNITS))))
     with link.stage("reach"):
-        found = await find_units(link, sweep)
+        found = await find_units(link, sweep, give_up=not units)  # listed units: try them all
         if not units and not rtu:
             if found["gateway_absent"] or not found["present"]:
                 found = await find_units(link, wide)

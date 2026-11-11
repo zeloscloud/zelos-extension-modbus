@@ -821,9 +821,9 @@ def _link_fields(fn: Any) -> Any:
 @zelos_sdk.action.text(
     "units",
     title="Unit IDs",
-    description="e.g. 1,2,10-20. Empty: TCP the first of 1, 0, 255 to answer, else (a "
-    "gateway, or no answer) a 1-247 sweep; RTU sweeps 1-247 (minutes at low baud; list "
-    "units to go faster)",
+    description="e.g. 1,2,10-20: every listed unit is tried. Empty: TCP the first of 1, 0, "
+    "255 to answer, else (a gateway, or no answer) a 1-247 sweep; RTU sweeps 1-247. An "
+    "empty sweep stops when the first 16 units are silent: list units, or use Find Device",
     required=False,
     default="",
 )
@@ -1094,6 +1094,15 @@ def _found(endpoint: str, units: list[tuple[int, list[str]]], added: list[int]) 
     return f"{endpoint}: found unit{'s' * (len(units) > 1)} {listed}{tail}"
 
 
+def _console_nodes() -> set[str]:
+    """Device nodes the Linux kernel has a console on; empty elsewhere."""
+    try:
+        names = Path("/sys/class/tty/console/active").read_text().split()
+    except OSError:
+        return set()
+    return {os.path.realpath(f"/dev/{name}") for name in names}
+
+
 @zelos_sdk.action(
     "Find Device",
     "Find RTU devices when the serial port, the serial settings or the unit ID is unknown: "
@@ -1112,7 +1121,8 @@ def _found(endpoint: str, units: list[tuple[int, list[str]]], added: list[int]) 
 @zelos_sdk.action.text(
     "ports",
     title="Serial ports",
-    description="e.g. /dev/ttyUSB0 or COM3,COM4. Empty: every port List Serial Ports shows",
+    description="e.g. /dev/ttyUSB0 or COM3,COM4. Empty: every port List Serial Ports shows, "
+    "but one the system console is on",
     required=False,
     default="",
 )
@@ -1178,9 +1188,15 @@ def find_device(
     by_node: dict[str, str] = {}  # an alias and its node are one port
     for p in listed:
         by_node.setdefault(os.path.realpath(p), p)
-    port_list = list(by_node.values())
+    # Unasked, leave the system console alone: a login prompt is on that port.
+    consoles = set() if named else _console_nodes()
+    skipped = [p for node, p in by_node.items() if node in consoles]
+    port_list = [p for p in by_node.values() if p not in skipped]
     if not port_list:
-        raise ValueError("No serial ports on this machine. Plug in the adapter, or name a port.")
+        console = f" ({', '.join(skipped)}: system console, name it to search it)" * bool(skipped)
+        raise ValueError(
+            f"No serial ports to search{console}. Plug in the adapter, or name a port."
+        )
     bauds = [b.strip() for b in baudrates.split(",") if b.strip()]
     if bad := [b for b in bauds if not b.isdigit() or not int(b)]:
         raise ValueError(f"bad baudrate {bad[0]!r}: use e.g. 9600 or 9600,19200")
@@ -1202,6 +1218,7 @@ def find_device(
         bus = buses.setdefault(key, {"transport": Transport.RTU} | link | {"devices": []})
         bus["devices"].append({"unit_id": f["unit_id"]})
     result["connections"] = list(buses.values())
+    result["skipped"] = skipped
     result["searched"] = {
         "ports": port_list,
         "baudrates": baudrates.strip() or "9600,19200,38400,57600,115200",
@@ -1221,6 +1238,8 @@ def find_device(
             f"No device answered on {', '.join(port_list)} "
             f"(baudrates {s['baudrates']}; formats {s['formats']}; units {s['units']})."
         ]
+    if skipped:
+        said.append(f"Skipped {', '.join(skipped)}: system console, name it to search it.")
     if result["unopened"]:
         said.append(f"Couldn't open {', '.join(result['unopened'])}.")
     if result["lost"]:
