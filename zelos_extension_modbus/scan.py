@@ -948,8 +948,16 @@ async def find_devices(
     batches = [likely, [u for u in units if u not in likely]]
     started = time.monotonic()
     links = {p: ScanLink(endpoint(p, Transport.RTU), max_seconds=max_seconds) for p in ports}
-    report: dict[str, Any] = {"found": [], "unopened": [], "malformed": 0, "stopped_at": None}
+    report: dict[str, Any] = {
+        "found": [],
+        "unopened": [],  # a port, or "port baudrate format" when only that setting won't open
+        "lost": [],  # where a link dropped; the rest of that port is not searched
+        "malformed": 0,
+        "stopped_at": None,
+    }
     answered: dict[str, tuple[int, str, int]] = {}  # port -> the setting it answers on
+    opened: set[str] = set()
+    dead: set[str] = set()  # ports out of the search: won't open, or lost
     link = None
 
     async def search() -> None:
@@ -957,22 +965,38 @@ async def find_devices(
         for batch in filter(None, batches):
             for port in ports:
                 for setting in [answered[port]] if port in answered else settings:
-                    if port in report["unopened"]:
+                    baudrate, parity, stopbits = setting
+                    at = f"{port} {baudrate} 8{parity}{stopbits}"
+                    if port in dead:
                         break
+                    if at in report["unopened"]:
+                        continue
                     if link:
                         await link.close()
                     link = links[port]
-                    baudrate, parity, stopbits = setting
-                    at = report["stopped_at"] = f"{port} {baudrate} 8{parity}{stopbits}"
+                    report["stopped_at"] = at
                     link.check()
                     if not await link.open(baudrate=baudrate, parity=parity, stopbits=stopbits):
-                        report["unopened"].append(port)
-                        break
+                        # The port or the setting? Any working port opens at 9600 8N1.
+                        if port not in opened and not await link.open(
+                            baudrate=9600, parity="N", stopbits=1
+                        ):
+                            dead.add(port)
+                            report["unopened"].append(port)
+                            break
+                        opened.add(port)
+                        report["unopened"].append(at)
+                        continue
+                    opened.add(port)
                     for unit in batch:
                         report["stopped_at"] = f"{at} unit {unit}"
                         reply = await link.request(
                             "read_holding_registers", unit, address=0, count=1
                         )
+                        if reply.response is None and not link.conn.connected:
+                            dead.add(port)  # unplugged: later tries would send nothing
+                            report["lost"].append(f"{at} unit {unit}")
+                            break
                         if reply.response is None or reply.exc in GATEWAY_ABSENT:
                             continue
                         if reply.exc is None and reply.values is None:
