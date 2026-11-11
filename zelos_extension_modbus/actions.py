@@ -1172,6 +1172,8 @@ def find_device(
 
     _refuse_if_running()
     named = [p.strip() for p in ports.split(",") if p.strip()]
+    if ports.strip() and not named:
+        raise ValueError(f"no port in {ports!r}: use e.g. /dev/ttyUSB0 or COM3,COM4")
     listed = named or [c["value"] for c in list_serial_ports()["choices"]]
     by_node: dict[str, str] = {}  # an alias and its node are one port
     for p in listed:
@@ -1221,6 +1223,11 @@ def find_device(
         ]
     if result["unopened"]:
         said.append(f"Couldn't open {', '.join(result['unopened'])}.")
+    if result["lost"]:
+        said.append(
+            f"The link dropped at {', '.join(result['lost'])}; "
+            "the rest of that port was not searched."
+        )
     if result["malformed"]:
         said.append(f"{result['malformed']} malformed replies: the adapter may echo what it sends.")
     if result["stopped_at"]:
