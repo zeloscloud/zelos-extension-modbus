@@ -813,7 +813,9 @@ def _link_fields(fn: Any) -> Any:
 @zelos_sdk.action.boolean(
     "autodetect",
     title="Autodetect serial settings",
-    description="RTU: try the given settings, then 9600-115200 baud, 8N1/8E1",
+    description="RTU: try the given settings, then 9600-115200 baud, 8N1/8E1. Only the "
+    "first 3 listed units and 1, 2, 247 are tried for this: if none of them answers, "
+    "nothing is scanned",
     required=False,
     default=False,
     widget="toggle",
@@ -822,10 +824,21 @@ def _link_fields(fn: Any) -> Any:
     "units",
     title="Unit IDs",
     description="e.g. 1,2,10-20: every listed unit is tried. Empty: TCP the first of 1, 0, "
-    "255 to answer, else (a gateway, or no answer) a 1-247 sweep; RTU sweeps 1-247. An "
-    "empty sweep stops when the first 16 units are silent: list units, or use Find Device",
+    "255 to answer, else (a gateway, or no answer) a 1-247 sweep; RTU sweeps 1-247 (about "
+    "2.5 min when nothing answers)",
     required=False,
     default="",
+)
+@zelos_sdk.action.number(
+    "max_devices",
+    title="Devices to find",
+    description="Empty Unit IDs: the sweep stops once this many devices answer and only "
+    "those are scanned. Several devices on one bus: raise it or list their unit IDs. "
+    "0: sweep every unit ID",
+    minimum=0,
+    maximum=247,
+    default=1,
+    required=False,
 )
 @zelos_sdk.action.text(
     "ranges",
@@ -869,6 +882,7 @@ def scan_device(
     stopbits: float = 1,
     autodetect: bool = False,
     units: str = "",
+    max_devices: float = 1,
     ranges: str = "",
     max_seconds: float = SCAN_ACTION_SECONDS,
     out_path: str = "",
@@ -895,6 +909,7 @@ def scan_device(
             max_seconds=min(float(max_seconds), SCAN_TIMEOUT - 60),
             autodetect=autodetect,
             configured_unit=devices[0].get("unit_id"),
+            max_devices=int(max_devices),
         )
     )
     if out:

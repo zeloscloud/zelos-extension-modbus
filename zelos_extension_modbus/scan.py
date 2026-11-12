@@ -92,7 +92,7 @@ GAP_STEP_MS = 10
 MAX_GAP_MS = 500
 SLOW_AFTER = 2
 SPEED_UP_AFTER = 20
-#: Consecutive timeouts that mark a link (scan: with nothing heard yet) or unit silent.
+#: Timeouts that mark a link (scan: with nothing heard at all) or unit (in a row) silent.
 SILENT_AFTER = 16
 #: verify_map's default wall clock, the verify action's longest.
 VERIFY_MAX_SECONDS = 840.0
@@ -421,19 +421,19 @@ async def probe_unit(link: ScanLink, unit: int) -> str:
     return "gateway_absent" if reply.exc in GATEWAY_ABSENT else "present"
 
 
-async def find_units(link: ScanLink, units: list[int], give_up: bool = True) -> dict[str, Any]:
-    """Sweep ``units``. ``give_up``: stop once SILENT_AFTER go unanswered with nothing heard."""
+async def find_units(link: ScanLink, units: list[int], limit: int = 0) -> dict[str, Any]:
+    """Probe ``units``. ``limit``: stop once that many are present (``stopped_at``); 0 tries all."""
     found: dict[str, Any] = {"present": [], "gateway_absent": []}
-    heard, timeouts = False, 0
+    timeouts = 0
     for unit in units:
         status = await probe_unit(link, unit)
         if status == "timeout":
             timeouts += 1
-            if give_up and not heard and timeouts >= SILENT_AFTER:
-                break
             continue
-        heard = True
         found[status].append(unit)
+        if limit and len(found["present"]) >= limit and unit != units[-1]:
+            return found | {"silent": False, "stopped_at": unit}
+    heard = found["present"] or found["gateway_absent"]
     return found | {"silent": not heard and timeouts >= SILENT_AFTER}
 
 
@@ -788,15 +788,15 @@ async def _reach(
     autodetect: bool,
     configured_unit: int | None,
     quick: bool = False,
+    limit: int = 0,
 ) -> list[int]:
     """S0: open the link (autodetecting serial settings) and find the units.
 
     Without ``units``: TCP probes the configured unit, 1, 0 and 255 and keeps
     the first to answer (a direct device answers any id); a 0A/0B reply (a
     gateway) or no answer at all falls through to a sweep. RTU sweeps. A sweep
-    covers the configured unit and 1-247, or with ``quick`` 1-10 and 247; a
-    silent link stops it after SILENT_AFTER timeouts. Listed ``units`` are
-    all tried.
+    covers the configured unit and 1-247, or with ``quick`` 1-10 and 247, and
+    stops once ``limit`` units answer (0: never). Listed ``units`` are all tried.
     """
     rtu = link.endpoint.get("transport") == Transport.RTU
     first = [configured_unit] if configured_unit is not None else []
@@ -805,7 +805,8 @@ async def _reach(
             report |= {"serial": None, "error": f"cannot open {link.label}"}
             return []
         with link.stage("autodetect"):
-            likely = list(dict.fromkeys(first + list(AUTODETECT_UNITS)))
+            # the first listed units too: a listed unit must be able to prove the settings
+            likely = list(dict.fromkeys(first + (units or [])[:3] + list(AUTODETECT_UNITS)))
             report["serial"] = await autodetect_serial(link, likely)
         if not report["serial"]:
             return []
@@ -816,10 +817,10 @@ async def _reach(
     wide = list(dict.fromkeys(first + list(QUICK_UNITS if quick else RTU_UNITS)))
     sweep = units or (wide if rtu else list(dict.fromkeys(first + list(TCP_UNITS))))
     with link.stage("reach"):
-        found = await find_units(link, sweep, give_up=not units)  # listed units: try them all
+        found = await find_units(link, sweep, limit if rtu and not units else 0)
         if not units and not rtu:
             if found["gateway_absent"] or not found["present"]:
-                found = await find_units(link, wide)
+                found = await find_units(link, wide, limit)
             else:
                 found["present"] = found["present"][:1]
     report["units"] = found
@@ -829,7 +830,10 @@ async def _reach(
 async def _finish(link: ScanLink, report: dict[str, Any], started: float) -> None:
     """Close the link; add serial diagnostics for a silent RTU link, and totals."""
     await link.close()
-    silent = report.get("units", {}).get("silent") or report.get("serial", True) is None
+    unanswered = link.timeouts == link.requests >= SILENT_AFTER  # a sweep cut short too
+    silent = (
+        unanswered or report.get("units", {}).get("silent") or report.get("serial", True) is None
+    )
     if link.endpoint.get("transport") == Transport.RTU and silent:
         report["diagnostics"] = await asyncio.to_thread(
             diagnose_serial_port, link.endpoint["serial_port"]
@@ -854,12 +858,14 @@ async def scan(
     max_seconds: float | None = None,
     autodetect: bool = False,
     configured_unit: int | None = None,
+    max_devices: int = 1,
 ) -> dict[str, Any]:
     """Scan one endpoint: ``{"report": ..., "maps": {unit id: draft map}}``.
 
     ``endpoint`` holds ModbusConnection link kwargs (transport, host/port or
-    serial settings). Units as in ``_reach`` (full sweep); ``windows`` are
-    inclusive wire pairs, defaulting per transport.
+    serial settings). Units as in ``_reach``: a full sweep that stops once
+    ``max_devices`` answer (0: every unit id). ``windows`` are inclusive wire
+    pairs, defaulting per transport.
     """
     rtu = endpoint.get("transport") == Transport.RTU
     link = ScanLink(endpoint, timeout=timeout, delay_ms=delay_ms, max_seconds=max_seconds)
@@ -868,7 +874,8 @@ async def scan(
     cutoffs: list[dict[str, Any]] = []
     maps: dict[int, dict[str, Any]] = {}
     try:
-        for unit in await _reach(link, report, units, autodetect, configured_unit):
+        present = await _reach(link, report, units, autodetect, configured_unit, limit=max_devices)
+        for unit in present:
             if link.expired:
                 break  # the cutoff is already recorded
             device, draft = await scan_device(
