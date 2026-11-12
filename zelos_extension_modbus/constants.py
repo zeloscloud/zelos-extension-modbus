@@ -121,3 +121,8 @@ class ByteOrder(StrEnum):
 class WriteMode(StrEnum):
     AUTO = "auto"
     FC16 = "fc16"
+
+
+#: Reply timeout (s) of a discovery probe (unit search, autodetect, Find Device). Most
+#: tries meet silence, so it is what a search costs; devices answer in tens of ms.
+PROBE_TIMEOUT = 0.2

@@ -666,13 +666,21 @@ class ModbusConnection:
             self.connected = False
             self._parked = True
 
-    async def request(self, method: str, unit_id: int, single: bool = False, **kwargs: Any) -> Any:
+    async def request(
+        self,
+        method: str,
+        unit_id: int,
+        single: bool = False,
+        timeout: float | None = None,
+        **kwargs: Any,
+    ) -> Any:
         """Issue one pymodbus request; the single choke point for all device I/O.
 
         Requests from every device (poll or action) run one at a time, and each
         starts at least request_gap after the previous one ended. A down
         link is reopened here, under the lock and with connect_delay_ms.
         ``single``: one attempt, no retries (a demoted device's probe).
+        ``timeout``: this request's reply timeout (a scan's probe); default the link's.
 
         Raises:
             ConnectionException: the link cannot be (re)opened.
@@ -691,6 +699,7 @@ class ModbusConnection:
                 self.connected = False
                 raise ConnectionException(f"{self.endpoint}: link dropped")
             self._client.ctx.retries = 0 if single else self.retries
+            self._client.ctx.comm_params.timeout_connect = timeout or self.timeout
             try:
                 return await getattr(self._client, method)(device_id=unit_id, **kwargs)
             except ModbusIOException as e:

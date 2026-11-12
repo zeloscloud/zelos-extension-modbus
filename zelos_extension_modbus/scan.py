@@ -55,6 +55,7 @@ from zelos_extension_modbus.constants import (
     BIT_REGISTER_TYPES,
     MODBUS_MAX_BIT_READ_COUNT,
     MODBUS_MAX_READ_COUNT,
+    PROBE_TIMEOUT,
     RegisterType,
     Transport,
     raw_names,
@@ -191,6 +192,7 @@ class ScanLink:
     ) -> None:
         self.endpoint = dict(endpoint)
         self.timeout = timeout
+        self.probe_timeout: float | None = None  # set: every request is a probe
         rtu = endpoint.get("transport") == Transport.RTU
         self.delay_ms = delay_ms if delay_ms is not None else RTU_DELAY_MS if rtu else 0
         self._start_delay_ms = self.delay_ms
@@ -280,8 +282,11 @@ class ScanLink:
         self.requests += 1
         self.by_fc[fc] += 1
         self.conn.connect_timeout = self._connect_timeout()  # a reconnect inside
+        timeout = self.probe_timeout
+        if timeout and self.endpoint.get("transport") == Transport.RTU:
+            timeout += 15 * 11 / self.endpoint.get("baudrate", 9600)  # both frames on the wire
         try:
-            response = await self.conn.request(method, unit, **kwargs)
+            response = await self.conn.request(method, unit, timeout=timeout, **kwargs)
         except (ModbusException, OSError):
             self.timeouts += 1
             self.silent += 1
@@ -795,8 +800,9 @@ async def _reach(
     Without ``units``: TCP probes the configured unit, 1, 0 and 255 and keeps
     the first to answer (a direct device answers any id); a 0A/0B reply (a
     gateway) or no answer at all falls through to a sweep. RTU sweeps. A sweep
-    covers the configured unit and 1-247, or with ``quick`` 1-10 and 247, and
-    stops once ``limit`` units answer (0: never). Listed ``units`` are all tried.
+    covers the configured unit, 1-10 and 247, then (not ``quick``) the rest of
+    1-247, and stops once ``limit`` units answer (0: never). Listed ``units``
+    are all tried.
     """
     rtu = link.endpoint.get("transport") == Transport.RTU
     first = [configured_unit] if configured_unit is not None else []
@@ -814,7 +820,8 @@ async def _reach(
         report["error"] = f"cannot open {link.label}{link.conn.connect_error}"
         return []
     report["endpoint"] = link.label
-    wide = list(dict.fromkeys(first + list(QUICK_UNITS if quick else RTU_UNITS)))
+    # the ids devices ship with go first
+    wide = list(dict.fromkeys(first + list(QUICK_UNITS) + ([] if quick else list(RTU_UNITS))))
     sweep = units or (wide if rtu else list(dict.fromkeys(first + list(TCP_UNITS))))
     with link.stage("reach"):
         found = await find_units(link, sweep, limit if rtu and not units else 0)
@@ -859,13 +866,15 @@ async def scan(
     autodetect: bool = False,
     configured_unit: int | None = None,
     max_devices: int = 1,
+    probe_timeout: float | None = PROBE_TIMEOUT,
 ) -> dict[str, Any]:
     """Scan one endpoint: ``{"report": ..., "maps": {unit id: draft map}}``.
 
     ``endpoint`` holds ModbusConnection link kwargs (transport, host/port or
     serial settings). Units as in ``_reach``: a full sweep that stops once
-    ``max_devices`` answer (0: every unit id). ``windows`` are inclusive wire
-    pairs, defaulting per transport.
+    ``max_devices`` answer (0: every unit id), each RTU try waiting
+    ``probe_timeout`` (TCP and the scan itself wait ``timeout``). ``windows``
+    are inclusive wire pairs, defaulting per transport.
     """
     rtu = endpoint.get("transport") == Transport.RTU
     link = ScanLink(endpoint, timeout=timeout, delay_ms=delay_ms, max_seconds=max_seconds)
@@ -874,7 +883,9 @@ async def scan(
     cutoffs: list[dict[str, Any]] = []
     maps: dict[int, dict[str, Any]] = {}
     try:
+        link.probe_timeout = probe_timeout if rtu else None  # TCP: network and gateway delays
         present = await _reach(link, report, units, autodetect, configured_unit, limit=max_devices)
+        link.probe_timeout = None
         for unit in present:
             if link.expired:
                 break  # the cutoff is already recorded
@@ -938,23 +949,30 @@ async def find_devices(
     *,
     find_all: bool = False,
     max_seconds: float | None = None,
+    probe_timeout: float = PROBE_TIMEOUT,
 ) -> dict[str, Any]:
     """Search serial ports x serial settings x unit ids for RTU devices, one FC03 read each.
 
-    A silent try costs a full timeout, so the likely unit ids (AUTODETECT_UNITS)
-    go first on every port and setting, and the rest only after: a device on a
+    A silent try costs ``probe_timeout``, so the common comes first: unit ids
+    1, 2 and 247 on every port and setting, then 3-10, then the rest, and in
+    each pass the SERIAL_COMBOS settings before the others. A device on a
     common id is not stuck behind a 247-unit sweep of a wrong baudrate. A hit
     is a value or a non-gateway exception; any other reply (an adapter echoing
     the request) counts as malformed. The first hit ends the search unless
     ``find_all``, which goes on but tries no other setting on a port that
     answered: one bus has one setting.
     """
-    settings = [(b, *f) for b in baudrates or FIND_BAUDRATES for f in formats or FIND_FORMATS]
-    units = list(dict.fromkeys(units or RTU_UNITS))
-    likely = [u for u in units if u in AUTODETECT_UNITS]
-    batches = [likely, [u for u in units if u not in likely]]
+    grid = [(b, *f) for b in baudrates or FIND_BAUDRATES for f in formats or FIND_FORMATS]
+    settings = [s for s in SERIAL_COMBOS if s in grid] + [s for s in grid if s not in SERIAL_COMBOS]
+    batches, left = [], list(dict.fromkeys(units or RTU_UNITS))
+    for tier in (AUTODETECT_UNITS, QUICK_UNITS):
+        batches.append([u for u in left if u in tier])
+        left = [u for u in left if u not in tier]
+    batches.append(left)
     started = time.monotonic()
     links = {p: ScanLink(endpoint(p, Transport.RTU), max_seconds=max_seconds) for p in ports}
+    for each in links.values():
+        each.probe_timeout = probe_timeout
     report: dict[str, Any] = {
         "found": [],
         "unopened": [],  # a port, or "port baudrate format" when only that setting won't open
