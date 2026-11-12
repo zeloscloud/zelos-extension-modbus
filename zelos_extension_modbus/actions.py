@@ -12,6 +12,7 @@ import asyncio
 import concurrent.futures
 import functools
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from zelos_extension_modbus.constants import (
     BIT_REGISTER_TYPES,
     MODBUS_MAX_READ_COUNT,
     MODBUS_MAX_WRITE_COUNT,
+    PROBE_TIMEOUT,
     RegisterType,
     Transport,
 )
@@ -812,7 +814,9 @@ def _link_fields(fn: Any) -> Any:
 @zelos_sdk.action.boolean(
     "autodetect",
     title="Autodetect serial settings",
-    description="RTU: try the given settings, then 9600-115200 baud, 8N1/8E1",
+    description="RTU: try the given settings, then 9600-115200 baud, 8N1/8E1. Only the "
+    "first 3 listed units and 1, 2, 247 are tried for this: if none of them answers, "
+    "nothing is scanned",
     required=False,
     default=False,
     widget="toggle",
@@ -820,11 +824,32 @@ def _link_fields(fn: Any) -> Any:
 @zelos_sdk.action.text(
     "units",
     title="Unit IDs",
-    description="e.g. 1,2,10-20. Empty: TCP the first of 1, 0, 255 to answer, else (a "
-    "gateway, or no answer) a 1-247 sweep; RTU sweeps 1-247 (minutes at low baud; list "
-    "units to go faster)",
+    description="e.g. 1,2,10-20: every listed unit is tried. Empty: TCP the first of 1, 0, "
+    "255 to answer, else (a gateway, or no answer) a 1-247 sweep; RTU sweeps 1-247, 1-10 "
+    "and 247 first (about 70 s when nothing answers)",
     required=False,
     default="",
+)
+@zelos_sdk.action.number(
+    "max_devices",
+    title="Devices to find",
+    description="Empty Unit IDs: the sweep stops once this many devices answer and only "
+    "those are scanned. Several devices on one bus: raise it or list their unit IDs. "
+    "0: sweep every unit ID",
+    minimum=0,
+    maximum=247,
+    default=1,
+    required=False,
+)
+@zelos_sdk.action.number(
+    "probe_timeout",
+    title="Probe timeout (s)",
+    description="RTU: how long a unit search or Autodetect try waits for a reply (TCP and "
+    "register reads wait 0.5 s). Raise it for a slow device",
+    minimum=0.05,
+    maximum=5,
+    default=PROBE_TIMEOUT,
+    required=False,
 )
 @zelos_sdk.action.text(
     "ranges",
@@ -868,6 +893,8 @@ def scan_device(
     stopbits: float = 1,
     autodetect: bool = False,
     units: str = "",
+    max_devices: float = 1,
+    probe_timeout: float = PROBE_TIMEOUT,
     ranges: str = "",
     max_seconds: float = SCAN_ACTION_SECONDS,
     out_path: str = "",
@@ -894,6 +921,8 @@ def scan_device(
             max_seconds=min(float(max_seconds), SCAN_TIMEOUT - 60),
             autodetect=autodetect,
             configured_unit=devices[0].get("unit_id"),
+            max_devices=int(max_devices),
+            probe_timeout=float(probe_timeout),
         )
     )
     if out:
@@ -1093,6 +1122,181 @@ def _found(endpoint: str, units: list[tuple[int, list[str]]], added: list[int]) 
     return f"{endpoint}: found unit{'s' * (len(units) > 1)} {listed}{tail}"
 
 
+def _console_nodes() -> set[str]:
+    """Device nodes the Linux kernel has a console on; empty elsewhere."""
+    try:
+        names = Path("/sys/class/tty/console/active").read_text().split()
+    except OSError:
+        return set()
+    return {os.path.realpath(f"/dev/{name}") for name in names}
+
+
+@zelos_sdk.action(
+    "Find Device",
+    "Find RTU devices when the serial port, the serial settings or the unit ID is unknown: "
+    "tries each combination with one read (FC 03, holding register 1) and reports what "
+    "answers, with a connection to paste into the config. Fill in what you know; an empty "
+    "field is searched. The common comes first: units 1, 2 and 247 on every setting, then "
+    "3-10, then the rest, and 9600 8N1/8E1, 19200 8N1/8E1, 38400 8N1 and 115200 8N1 before "
+    "other settings. A silent try costs about 0.3 s: every unit at one setting takes about "
+    "70 s, every format and unit at one baudrate about 5 min, and everything on one port "
+    "about 25 min (raise the time limit, or search one baudrate at a time). Stops at the "
+    "first reply unless Find all. Run "
+    "with the extension stopped. It transmits on every port searched, so nothing else may "
+    "be using them.",
+    timeout=SCAN_TIMEOUT,
+    standalone=True,
+    hidden=True,
+)
+@zelos_sdk.action.text(
+    "ports",
+    title="Serial ports",
+    description="e.g. /dev/ttyUSB0 or COM3,COM4. Empty: every port List Serial Ports shows, "
+    "but one the system console is on",
+    required=False,
+    default="",
+)
+@zelos_sdk.action.text(
+    "baudrates",
+    title="Baudrates",
+    description="e.g. 115200 or 9600,19200. Empty: 9600, 19200, 38400, 57600, 115200",
+    required=False,
+    default="",
+)
+@zelos_sdk.action.text(
+    "formats",
+    title="Data formats",
+    description="e.g. 8N1 or 8N1,8E1. Empty: 8N1, 8E1, 8O1, 8N2",
+    required=False,
+    default="",
+)
+@zelos_sdk.action.text(
+    "units",
+    title="Unit IDs",
+    description="e.g. 1 or 1,2,10-20. Empty: 1-247",
+    required=False,
+    default="",
+)
+@zelos_sdk.action.boolean(
+    "find_all",
+    title="Find all",
+    description="Keep searching after the first reply: every unit on a bus, every port",
+    required=False,
+    default=False,
+    widget="toggle",
+)
+@zelos_sdk.action.number(
+    "max_seconds",
+    title="Time limit (s)",
+    description="Stops and reports what was found and where it stopped",
+    minimum=5,
+    maximum=SCAN_TIMEOUT - 60,
+    default=SCAN_ACTION_SECONDS,
+    required=False,
+)
+@zelos_sdk.action.number(
+    "probe_timeout",
+    title="Probe timeout (s)",
+    description="How long each try waits for a reply. Raise it for a slow device or gateway",
+    minimum=0.05,
+    maximum=5,
+    default=PROBE_TIMEOUT,
+    required=False,
+)
+def find_device(
+    ports: str = "",
+    baudrates: str = "",
+    formats: str = "",
+    units: str = "",
+    find_all: bool = False,
+    max_seconds: float = SCAN_ACTION_SECONDS,
+    probe_timeout: float = PROBE_TIMEOUT,
+) -> dict[str, Any]:
+    """Search the dimensions left empty; ``connections`` is ready for the config."""
+    from zelos_extension_modbus.scan import (
+        find_devices,
+        parse_formats,
+        parse_units,
+        quiet_pymodbus,
+    )
+
+    _refuse_if_running()
+    named = [p.strip() for p in ports.split(",") if p.strip()]
+    if ports.strip() and not named:
+        raise ValueError(f"no port in {ports!r}: use e.g. /dev/ttyUSB0 or COM3,COM4")
+    listed = named or [c["value"] for c in list_serial_ports()["choices"]]
+    by_node: dict[str, str] = {}  # an alias and its node are one port
+    for p in listed:
+        by_node.setdefault(os.path.realpath(p), p)
+    # Unasked, leave the system console alone: a login prompt is on that port.
+    consoles = set() if named else _console_nodes()
+    skipped = [p for node, p in by_node.items() if node in consoles]
+    port_list = [p for p in by_node.values() if p not in skipped]
+    if not port_list:
+        console = f" ({', '.join(skipped)}: system console, name it to search it)" * bool(skipped)
+        raise ValueError(
+            f"No serial ports to search{console}. Plug in the adapter, or name a port."
+        )
+    bauds = [b.strip() for b in baudrates.split(",") if b.strip()]
+    if bad := [b for b in bauds if not b.isdigit() or not int(b)]:
+        raise ValueError(f"bad baudrate {bad[0]!r}: use e.g. 9600 or 9600,19200")
+    quiet_pymodbus()
+    result = asyncio.run(
+        find_devices(
+            port_list,
+            [int(b) for b in bauds] or None,
+            parse_formats(formats) or None,
+            parse_units(units) or None,
+            find_all=find_all,
+            max_seconds=min(float(max_seconds), SCAN_TIMEOUT - 60),
+            probe_timeout=float(probe_timeout),
+        )
+    )
+    buses: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for f in result["found"]:
+        key = (f["serial_port"], f["baudrate"], f["parity"], f["stopbits"])
+        link = dict(zip(("serial_port", "baudrate", "parity", "stopbits"), key, strict=True))
+        bus = buses.setdefault(key, {"transport": Transport.RTU} | link | {"devices": []})
+        bus["devices"].append({"unit_id": f["unit_id"]})
+    result["connections"] = list(buses.values())
+    result["skipped"] = skipped
+    result["searched"] = {
+        "ports": port_list,
+        "baudrates": baudrates.strip() or "9600,19200,38400,57600,115200",
+        "formats": formats.strip().upper() or "8N1,8E1,8O1,8N2",
+        "units": units.strip() or "1-247",
+    }
+    said = [
+        f"Unit {f['unit_id']} on {f['serial_port']} at {f['baudrate']} "
+        f"8{f['parity']}{f['stopbits']}: {f['reply']}."
+        for f in result["found"]
+    ]
+    if any(f["reply"].startswith("exception") for f in result["found"]):
+        said.append("An exception reply still proves the port, settings and unit ID.")
+    if not said:
+        s = result["searched"]
+        said = [
+            f"No device answered on {', '.join(port_list)} "
+            f"(baudrates {s['baudrates']}; formats {s['formats']}; units {s['units']}; "
+            f"probe timeout {float(probe_timeout):g} s)."
+        ]
+    if skipped:
+        said.append(f"Skipped {', '.join(skipped)}: system console, name it to search it.")
+    if result["unopened"]:
+        said.append(f"Couldn't open {', '.join(result['unopened'])}.")
+    if result["lost"]:
+        said.append(
+            f"The link dropped at {', '.join(result['lost'])}; "
+            "the rest of that port was not searched."
+        )
+    if result["malformed"]:
+        said.append(f"{result['malformed']} malformed replies: the adapter may echo what it sends.")
+    if result["stopped_at"]:
+        said.append(f"Time limit reached at {result['stopped_at']}; the rest was not searched.")
+    status = "success" if result["found"] else "error"
+    return {"status": status, "message": " ".join(said)} | result
+
+
 @zelos_sdk.action(
     "List Serial Ports",
     "Serial ports on the machine running the agent, as choices for an RTU connection's "
@@ -1149,5 +1353,6 @@ ALL_ACTIONS = [
     scan_device,
     verify_map,
     auto_config,
+    find_device,
     list_serial_ports,
 ]

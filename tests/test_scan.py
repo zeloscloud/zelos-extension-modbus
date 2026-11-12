@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -13,7 +15,7 @@ import pytest
 from conftest import await_listening, free_port
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus.client.mixin import ModbusClientMixin
-from pymodbus.exceptions import ModbusIOException
+from pymodbus.exceptions import ConnectionException, ModbusIOException
 
 from zelos_extension_modbus.constants import raw_names
 from zelos_extension_modbus.demo.simulator import SCAN_TARGET_RANGES, run_demo_server
@@ -22,8 +24,13 @@ from zelos_extension_modbus.scan import (
     ALLOWED,
     SILENT_AFTER,
     RangeFinder,
+    Reply,
     ScanLink,
     _issues,
+    _reach,
+    find_devices,
+    find_units,
+    parse_formats,
     scan,
     verify_map,
 )
@@ -392,7 +399,233 @@ def test_action_flags_are_pinned():
         "scan_device": (False, True),
         "verify_map": (True, True),
         "auto_config": (True, True),
+        "find_device": (False, True),
         "list_serial_ports": (True, True),
     }
     actual = {a.__name__: (a._action.read_only, a._action.hidden) for a in actions.ALL_ACTIONS}
     assert actual == expected
+
+
+class TestFindDevices:
+    """find_devices over a fake link: {(port, baudrate, parity, stopbits, unit): reply}.
+
+    A reply is register values, an exception code, "echo" (empty registers) or
+    "lost" (the link drops). Port "bad" never opens; baudrate 1 never opens.
+    """
+
+    def _find(self, monkeypatch, replies, ports, expire_after=None, **kwargs):
+        tried, conns = [], []
+
+        async def open_link(self, **changes):
+            self.endpoint.update(changes)
+            e = self.endpoint
+            setting = (e["serial_port"], e["baudrate"], e["parity"], e["stopbits"])
+
+            async def request(method, unit, **_):
+                tried.append((*setting, unit))
+                if len(tried) == expire_after:
+                    self.deadline = 0.0  # the time limit passes during this request
+                reply = replies.get((*setting, unit))
+                if reply == "lost":
+                    self.conn.connected = False
+                    raise ConnectionException("link dropped")
+                if reply is None:
+                    raise ModbusIOException("no response")
+                if reply == "echo":
+                    return SimpleNamespace(isError=lambda: False, registers=[])
+                if isinstance(reply, int):
+                    return SimpleNamespace(isError=lambda: True, exception_code=reply)
+                return SimpleNamespace(isError=lambda: False, registers=reply)
+
+            if e["serial_port"] == "bad" or e["baudrate"] == 1:
+                self.conn = None
+                return False
+            self.conn = SimpleNamespace(request=request, disconnect=AsyncMock(), connected=True)
+            conns.append(self.conn)
+            return True
+
+        monkeypatch.setattr(ScanLink, "open", open_link)
+        got = _run(find_devices(ports, **kwargs))
+        assert all(c.disconnect.await_count for c in conns)  # no port is left open
+        return got, tried
+
+    def test_likely_units_go_first_on_every_port_and_the_first_hit_ends_it(self, monkeypatch):
+        """Port b's unit 1 is found before port a's unit 9 is ever tried, and nothing after."""
+        got, tried = self._find(
+            monkeypatch,
+            {("a", 9600, "N", 1, 9): [25], ("b", 9600, "N", 1, 1): [7]},
+            ["a", "b"],
+            baudrates=[9600, 19200],
+            formats=[("N", 1)],
+        )
+        assert [(f["serial_port"], f["unit_id"], f["reply"]) for f in got["found"]] == [
+            ("b", 1, "holding register 1 = 7")
+        ]
+        on_a = [("a", b, "N", 1, u) for b in (9600, 19200) for u in (1, 2, 247)]
+        assert tried == [*on_a, ("b", 9600, "N", 1, 1)]
+        assert got["stopped_at"] is None
+
+    def test_the_common_goes_first(self, monkeypatch):
+        """Units 1, 2, 247, then 3-10, then the rest; in each pass 9600 8N1 before the others."""
+        got, tried = self._find(
+            monkeypatch,
+            {("a", 57600, "O", 1, 12): [7]},
+            ["a"],
+            baudrates=[57600, 9600],
+            formats=[("N", 1), ("O", 1)],
+        )
+        settings = [(9600, "N"), (57600, "N"), (57600, "O"), (9600, "O")]
+        assert tried == [
+            *[
+                ("a", b, p, 1, u)
+                for t in ((1, 2, 247), range(3, 11))
+                for b, p in settings
+                for u in t
+            ],
+            *[("a", b, "N", 1, u) for b in (9600, 57600) for u in range(11, 247)],
+            ("a", 57600, "O", 1, 11),
+            ("a", 57600, "O", 1, 12),
+        ]
+        assert got["found"][0]["unit_id"] == 12
+
+    def test_a_probe_waits_the_probe_timeout_plus_the_frames(self):
+        link = ScanLink({"transport": "rtu", "serial_port": "x", "baudrate": 1200})
+        link.conn = SimpleNamespace(request=AsyncMock(side_effect=ModbusIOException("")))
+        _run(link.request("read_holding_registers", 1, address=0, count=1))
+        assert link.conn.request.await_args.kwargs["timeout"] is None  # the link's own
+        link.probe_timeout = 0.2
+        _run(link.request("read_holding_registers", 1, address=0, count=1))
+        assert link.conn.request.await_args.kwargs["timeout"] == pytest.approx(0.2 + 165 / 1200)
+
+    def test_find_all_keeps_a_port_on_the_setting_that_answered(self, monkeypatch):
+        """An exception is a hit, an echo and a gateway's 0B are not; "bad" is skipped."""
+        replies = {
+            ("a", 9600, "E", 1, 1): 2,
+            ("a", 9600, "E", 1, 5): [7],
+            ("a", 9600, "E", 1, 6): 0x0B,
+            ("b", 9600, "N", 1, 2): "echo",
+        }
+        got, tried = self._find(
+            monkeypatch,
+            replies,
+            ["bad", "a", "b"],
+            baudrates=[9600],
+            units=list(range(1, 8)),
+            find_all=True,
+        )
+        assert [(f["serial_port"], f["unit_id"], f["reply"]) for f in got["found"]] == [
+            ("a", 1, "exception 02 (illegal data address)"),
+            ("a", 5, "holding register 1 = 7"),
+        ]
+        assert (got["unopened"], got["malformed"]) == (["bad"], 1)
+        on_a = {t[1:4] for t in tried if t[0] == "a"}
+        assert on_a == {(9600, "N", 1), (9600, "E", 1)}  # nothing after the setting that hit
+
+    def test_a_setting_that_wont_open_does_not_drop_the_port(self, monkeypatch):
+        got, _ = self._find(
+            monkeypatch,
+            {("a", 9600, "N", 1, 5): [7]},
+            ["a"],
+            baudrates=[1, 9600],
+            formats=[("N", 1)],
+        )
+        assert [f["unit_id"] for f in got["found"]] == [5]
+        assert got["unopened"] == ["a 1 8N1"]
+
+    def test_a_dropped_link_is_not_silence(self, monkeypatch):
+        got, tried = self._find(
+            monkeypatch,
+            {("a", 9600, "N", 1, 2): "lost"},
+            ["a"],
+            baudrates=[9600, 19200],
+            formats=[("N", 1)],
+        )
+        assert (got["found"], got["lost"]) == ([], ["a 9600 8N1 unit 2"])
+        assert tried == [("a", 9600, "N", 1, 1), ("a", 9600, "N", 1, 2)]  # nothing after it
+
+    def test_time_limit_says_where_it_stopped(self, monkeypatch):
+        got, tried = self._find(monkeypatch, {}, ["a"], expire_after=2, max_seconds=60)
+        assert (got["found"], len(tried)) == ([], 2)
+        assert got["stopped_at"] == "a 9600 8N1 unit 247"
+
+    def test_action_dedupes_ports_and_builds_the_connection(self, monkeypatch, tmp_path):
+        from zelos_extension_modbus import actions, scan
+
+        node, alias = tmp_path / "ttyX", tmp_path / "ttyRS485"
+        node.touch()
+        try:
+            alias.symlink_to(node)
+        except OSError:  # Windows without the symlink privilege: one name, listed twice
+            alias = node
+        hits = [
+            {"serial_port": str(alias), "baudrate": 9600, "parity": "N", "stopbits": 1}
+            | {"unit_id": u, "reply": r}
+            for u, r in ((1, "exception 02 (illegal data address)"), (2, "holding register 1 = 7"))
+        ]
+        seen = {}
+
+        async def fake_find(ports, *args, **kwargs):
+            seen["ports"] = ports
+            return {"found": hits, "unopened": [], "lost": [], "malformed": 0, "stopped_at": None}
+
+        monkeypatch.setattr(scan, "find_devices", fake_find)
+        monkeypatch.setattr(actions, "_refuse_if_running", lambda: None)
+        monkeypatch.setattr(
+            actions,
+            "list_serial_ports",
+            lambda: {"choices": [{"value": str(alias)}, {"value": str(node)}]},
+        )
+        got = actions.find_device()
+        assert seen["ports"] == [str(alias)]
+        assert got["connections"] == [
+            {"transport": "rtu", "serial_port": str(alias), "baudrate": 9600, "parity": "N"}
+            | {"stopbits": 1, "devices": [{"unit_id": 1}, {"unit_id": 2}]}
+        ]
+        assert got["message"] == (
+            f"Unit 1 on {alias} at 9600 8N1: exception 02 (illegal data address). "
+            f"Unit 2 on {alias} at 9600 8N1: holding register 1 = 7. "
+            "An exception reply still proves the port, settings and unit ID."
+        )
+        with pytest.raises(ValueError, match="no port in"):
+            actions.find_device(ports=" , ")
+        # Unasked, the system console's port is left alone; named, it is searched.
+        monkeypatch.setattr(actions, "_console_nodes", lambda: {os.path.realpath(node)})
+        with pytest.raises(ValueError, match="system console, name it to search it"):
+            actions.find_device()
+        assert actions.find_device(ports=str(node))["searched"]["ports"] == [str(node)]
+
+    def test_unit_sweep_stops_at_the_limit_not_on_silence(self):
+        """Units 40 and 50 behind 20 silent ones: both found; a limit of 1 stops at 40."""
+
+        async def request(method, unit, **_):
+            return Reply(values=[1], response=object()) if unit in (40, 50) else Reply()
+
+        link = SimpleNamespace(request=request)
+        units = list(range(20, 60))
+        assert _run(find_units(link, units))["present"] == [40, 50]
+        assert _run(find_units(link, units, 1)) == {"present": [40], "gateway_absent": []} | {
+            "silent": False,
+            "stopped_at": 40,
+        }
+        assert _run(find_units(link, units[:20]))["silent"]  # nothing heard in 16 or more
+
+    def test_autodetect_probes_a_listed_unit(self):
+        """A lone unit 100 proves the serial settings when it is listed."""
+
+        async def request(method, unit, **_):
+            return Reply(values=[1], response=object()) if unit == 100 else Reply()
+
+        async def opened(**_):
+            return True
+
+        link = SimpleNamespace(request=request, open=opened, label="x", stage=nullcontext)
+        link.endpoint = {"transport": "rtu"}
+        report: dict = {}
+        assert _run(_reach(link, report, [100], True, None)) == [100]
+        assert report["serial"]["unit_id"] == 100
+
+
+def test_parse_formats():
+    assert parse_formats("8n1, 8E2") == [("N", 1), ("E", 2)]
+    with pytest.raises(ValueError, match="7 is Modbus ASCII"):
+        parse_formats("7E1")
