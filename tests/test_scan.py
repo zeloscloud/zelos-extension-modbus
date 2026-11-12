@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import os
 import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -26,6 +27,7 @@ from zelos_extension_modbus.scan import (
     Reply,
     ScanLink,
     _issues,
+    _reach,
     find_devices,
     find_units,
     parse_formats,
@@ -560,18 +562,35 @@ class TestFindDevices:
             actions.find_device()
         assert actions.find_device(ports=str(node))["searched"]["ports"] == [str(node)]
 
-    def test_listed_units_are_all_tried_on_a_silent_link(self):
-        """Unit 40 behind 20 silent ones: found when listed, given up on in a default sweep."""
+    def test_unit_sweep_stops_at_the_limit_not_on_silence(self):
+        """Units 40 and 50 behind 20 silent ones: both found; a limit of 1 stops at 40."""
 
         async def request(method, unit, **_):
-            return Reply(values=[1], response=object()) if unit == 40 else Reply()
+            return Reply(values=[1], response=object()) if unit in (40, 50) else Reply()
 
         link = SimpleNamespace(request=request)
         units = list(range(20, 60))
-        assert _run(find_units(link, units, give_up=False))["present"] == [40]
-        assert _run(find_units(link, units)) == {"present": [], "gateway_absent": []} | {
-            "silent": True
+        assert _run(find_units(link, units))["present"] == [40, 50]
+        assert _run(find_units(link, units, 1)) == {"present": [40], "gateway_absent": []} | {
+            "silent": False,
+            "stopped_at": 40,
         }
+        assert _run(find_units(link, units[:20]))["silent"]  # nothing heard in 16 or more
+
+    def test_autodetect_probes_a_listed_unit(self):
+        """A lone unit 100 proves the serial settings when it is listed."""
+
+        async def request(method, unit, **_):
+            return Reply(values=[1], response=object()) if unit == 100 else Reply()
+
+        async def opened(**_):
+            return True
+
+        link = SimpleNamespace(request=request, open=opened, label="x", stage=nullcontext)
+        link.endpoint = {"transport": "rtu"}
+        report: dict = {}
+        assert _run(_reach(link, report, [100], True, None)) == [100]
+        assert report["serial"]["unit_id"] == 100
 
 
 def test_parse_formats():
