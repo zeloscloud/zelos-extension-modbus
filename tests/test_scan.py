@@ -465,6 +465,38 @@ class TestFindDevices:
         assert tried == [*on_a, ("b", 9600, "N", 1, 1)]
         assert got["stopped_at"] is None
 
+    def test_the_common_goes_first(self, monkeypatch):
+        """Units 1, 2, 247, then 3-10, then the rest; in each pass 9600 8N1 before the others."""
+        got, tried = self._find(
+            monkeypatch,
+            {("a", 57600, "O", 1, 12): [7]},
+            ["a"],
+            baudrates=[57600, 9600],
+            formats=[("N", 1), ("O", 1)],
+        )
+        settings = [(9600, "N"), (57600, "N"), (57600, "O"), (9600, "O")]
+        assert tried == [
+            *[
+                ("a", b, p, 1, u)
+                for t in ((1, 2, 247), range(3, 11))
+                for b, p in settings
+                for u in t
+            ],
+            *[("a", b, "N", 1, u) for b in (9600, 57600) for u in range(11, 247)],
+            ("a", 57600, "O", 1, 11),
+            ("a", 57600, "O", 1, 12),
+        ]
+        assert got["found"][0]["unit_id"] == 12
+
+    def test_a_probe_waits_the_probe_timeout_plus_the_frames(self):
+        link = ScanLink({"transport": "rtu", "serial_port": "x", "baudrate": 1200})
+        link.conn = SimpleNamespace(request=AsyncMock(side_effect=ModbusIOException("")))
+        _run(link.request("read_holding_registers", 1, address=0, count=1))
+        assert link.conn.request.await_args.kwargs["timeout"] is None  # the link's own
+        link.probe_timeout = 0.2
+        _run(link.request("read_holding_registers", 1, address=0, count=1))
+        assert link.conn.request.await_args.kwargs["timeout"] == pytest.approx(0.2 + 165 / 1200)
+
     def test_find_all_keeps_a_port_on_the_setting_that_answered(self, monkeypatch):
         """An exception is a hit, an echo and a gateway's 0B are not; "bad" is skipped."""
         replies = {

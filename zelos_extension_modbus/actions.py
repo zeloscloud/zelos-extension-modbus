@@ -31,6 +31,7 @@ from zelos_extension_modbus.constants import (
     BIT_REGISTER_TYPES,
     MODBUS_MAX_READ_COUNT,
     MODBUS_MAX_WRITE_COUNT,
+    PROBE_TIMEOUT,
     RegisterType,
     Transport,
 )
@@ -824,8 +825,8 @@ def _link_fields(fn: Any) -> Any:
     "units",
     title="Unit IDs",
     description="e.g. 1,2,10-20: every listed unit is tried. Empty: TCP the first of 1, 0, "
-    "255 to answer, else (a gateway, or no answer) a 1-247 sweep; RTU sweeps 1-247 (about "
-    "2.5 min when nothing answers)",
+    "255 to answer, else (a gateway, or no answer) a 1-247 sweep; RTU sweeps 1-247, 1-10 "
+    "and 247 first (about 70 s when nothing answers)",
     required=False,
     default="",
 )
@@ -838,6 +839,16 @@ def _link_fields(fn: Any) -> Any:
     minimum=0,
     maximum=247,
     default=1,
+    required=False,
+)
+@zelos_sdk.action.number(
+    "probe_timeout",
+    title="Probe timeout (s)",
+    description="RTU: how long a unit search or Autodetect try waits for a reply (TCP and "
+    "register reads wait 0.5 s). Raise it for a slow device",
+    minimum=0.05,
+    maximum=5,
+    default=PROBE_TIMEOUT,
     required=False,
 )
 @zelos_sdk.action.text(
@@ -883,6 +894,7 @@ def scan_device(
     autodetect: bool = False,
     units: str = "",
     max_devices: float = 1,
+    probe_timeout: float = PROBE_TIMEOUT,
     ranges: str = "",
     max_seconds: float = SCAN_ACTION_SECONDS,
     out_path: str = "",
@@ -910,6 +922,7 @@ def scan_device(
             autodetect=autodetect,
             configured_unit=devices[0].get("unit_id"),
             max_devices=int(max_devices),
+            probe_timeout=float(probe_timeout),
         )
     )
     if out:
@@ -1123,10 +1136,12 @@ def _console_nodes() -> set[str]:
     "Find RTU devices when the serial port, the serial settings or the unit ID is unknown: "
     "tries each combination with one read (FC 03, holding register 1) and reports what "
     "answers, with a connection to paste into the config. Fill in what you know; an empty "
-    "field is searched. A silent try costs about 0.6 s: every unit at one setting takes "
-    "about 2.5 min, and every format and unit at one baudrate about 9 min. Every baudrate "
-    "does not fit in one run, so search one at a time. Units 1, 2 and 247 are tried first "
-    "on every setting. Stops at the first reply unless Find all. Run "
+    "field is searched. The common comes first: units 1, 2 and 247 on every setting, then "
+    "3-10, then the rest, and 9600 8N1/8E1, 19200 8N1/8E1, 38400 8N1 and 115200 8N1 before "
+    "other settings. A silent try costs about 0.3 s: every unit at one setting takes about "
+    "70 s, every format and unit at one baudrate about 5 min, and everything on one port "
+    "about 25 min (raise the time limit, or search one baudrate at a time). Stops at the "
+    "first reply unless Find all. Run "
     "with the extension stopped. It transmits on every port searched, so nothing else may "
     "be using them.",
     timeout=SCAN_TIMEOUT,
@@ -1179,6 +1194,15 @@ def _console_nodes() -> set[str]:
     default=SCAN_ACTION_SECONDS,
     required=False,
 )
+@zelos_sdk.action.number(
+    "probe_timeout",
+    title="Probe timeout (s)",
+    description="How long each try waits for a reply. Raise it for a slow device or gateway",
+    minimum=0.05,
+    maximum=5,
+    default=PROBE_TIMEOUT,
+    required=False,
+)
 def find_device(
     ports: str = "",
     baudrates: str = "",
@@ -1186,6 +1210,7 @@ def find_device(
     units: str = "",
     find_all: bool = False,
     max_seconds: float = SCAN_ACTION_SECONDS,
+    probe_timeout: float = PROBE_TIMEOUT,
 ) -> dict[str, Any]:
     """Search the dimensions left empty; ``connections`` is ready for the config."""
     from zelos_extension_modbus.scan import (
@@ -1224,6 +1249,7 @@ def find_device(
             parse_units(units) or None,
             find_all=find_all,
             max_seconds=min(float(max_seconds), SCAN_TIMEOUT - 60),
+            probe_timeout=float(probe_timeout),
         )
     )
     buses: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -1251,7 +1277,8 @@ def find_device(
         s = result["searched"]
         said = [
             f"No device answered on {', '.join(port_list)} "
-            f"(baudrates {s['baudrates']}; formats {s['formats']}; units {s['units']})."
+            f"(baudrates {s['baudrates']}; formats {s['formats']}; units {s['units']}; "
+            f"probe timeout {float(probe_timeout):g} s)."
         ]
     if skipped:
         said.append(f"Skipped {', '.join(skipped)}: system console, name it to search it.")
