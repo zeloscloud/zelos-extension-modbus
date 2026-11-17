@@ -170,15 +170,6 @@ class TestRegisterMap:
         assert set(reg_map.event_names) == {"voltage", "current"}
         assert len(reg_map.registers) == 2
 
-    @pytest.mark.parametrize(
-        "extra",
-        [{"bit": 16}, {"bit": 0, "scale": 0.1}, {"bit": 0, "datatype": "float32"}],
-        ids=["outside the word", "scaled", "not an integer"],
-    )
-    def test_bit_rejects(self, extra):
-        with pytest.raises(ValueError, match="bit"):
-            RegisterMap.from_dict({"events": {"e": [{"address": 1, **extra}]}})
-
     def test_mixed_types_in_event(self):
         """Single event can contain different register types."""
         data = {

@@ -290,6 +290,7 @@ def _register_row(dev: Any, event: str, reg: Any) -> dict[str, Any]:
         "writable": reg.writable,
         "byte_order": reg.byte_order,
         "rate": dev.rate_of(reg),
+        **({} if reg.bit is None else {"bit": reg.bit}),
     }
 
 

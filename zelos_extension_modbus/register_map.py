@@ -40,8 +40,9 @@ the write actions set a holding register or coil), and:
   On a string only [0]: all NUL bytes.
 - values: {"<int>": "<label>"} enum on an unscaled integer register, shown as
   labels in the trace.
-- bit: bit number (0 = least significant) of an integer holding or input
-  register; the field logs that one bit as a boolean. Give each flag of a
+- bit: bit number (0 = least significant, of the whole value after byte_order)
+  of an integer holding or input register; the field logs that one bit as a
+  boolean. Give each flag of a
   status word its own register entry at the same address. Read-only, and not
   combined with scale, scale_ref or values. With `invalid`, null when the
   whole word is.
@@ -287,7 +288,7 @@ def _resolve_scale_refs(event_name: str, registers: list[Register]) -> None:
             continue
         ref = by_name.get(reg.scale_ref)
         is_int = ref is not None and ref.datatype in INT_DATATYPES
-        if not is_int or ref is reg or ref.type in BIT_REGISTER_TYPES:
+        if not is_int or ref is reg or ref.type in BIT_REGISTER_TYPES or ref.bit is not None:
             msg = (
                 f"Register '{reg.name}' in event '{event_name}': scale_ref '{reg.scale_ref}' "
                 "must name an integer register in the same event"
