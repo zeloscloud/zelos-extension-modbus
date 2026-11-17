@@ -2,7 +2,8 @@
 
 Holding registers from 40000: the `SunS` marker, model 1 (common, strings),
 model 103 (three-phase inverter: scale factors, the St enum, not-implemented
-points), model 160 (MPPT, two repeating modules), then the end marker.
+points), model 160 (MPPT, two repeating modules), model 705 (volt-var: two
+curves of three points), then the end marker.
 Measurements move over time; every other value is fixed.
 
 Run standalone: `uv run python -m zelos_extension_modbus.demo.sunspec_sim --port 5021`.
@@ -43,7 +44,7 @@ INVERTER = {
     "PF": 99, "PF_SF": 0, "WH": 12345, "WH_SF": 1,
     "DCA": 150, "DCA_SF": -1, "DCV": 4000, "DCV_SF": -1, "DCW": 6000, "DCW_SF": 0,
     "TmpCab": 452, "TmpSnk": NI16, "TmpTrns": NI16, "TmpOt": NI16, "Tmp_SF": -1,
-    "St": 4, "StVnd": NU16, "Evt1": 0, "Evt2": 0,
+    "St": 4, "StVnd": NU16, "Evt1": 0x81, "Evt2": 0,  # GROUND_FAULT | OVER_TEMP
     "EvtVnd1": NU32, "EvtVnd2": NU32, "EvtVnd3": NU32, "EvtVnd4": NU32,
 }  # fmt: skip
 
@@ -56,13 +57,23 @@ MODULES = [
 ]  # fmt: skip
 
 
+VOLT_VAR = {"Ena": 1, "NPt": 3, "NCrv": 2, "V_SF": -2, "DeptRef_SF": -2}
+CURVE = {"ActPt": 3, "VRef": 10000}
+# (V, Var) per point, in % x 100.
+CURVES = [
+    [(9200, 3000), (10000, 0), (10800, -3000)],
+    [(9500, 4400), (10000, 0), (10500, -4400)],
+]
+
+
 def _points(model_id: int, group: str | None = None) -> list[dict]:
-    """Point definitions of a model's top group, or of its subgroup ``group``."""
+    """Point definitions of a model's top group, or of its subgroup path ``group``
+    (`module`, `Crv/Pt`)."""
     path = resources.files("sunspec2") / "models" / "json" / f"model_{model_id}.json"
     top = json.loads(path.read_text())["group"]
-    if group is None:
-        return top["points"]
-    return next(g for g in top["groups"] if g["name"] == group)["points"]
+    for name in group.split("/") if group else ():
+        top = next(g for g in top["groups"] if g["name"] == name)
+    return top["points"]
 
 
 def _words(point: dict, value: int | str) -> list[int]:
@@ -95,7 +106,14 @@ def _image(inverter: dict) -> list[int]:
     inv = _encode(103, inverter, length=50)
     modules = [w for m in MODULES for w in _encode(160, m, group="module")]
     mppt = _encode(160, MPPT, length=8 + len(modules))
-    return [0x5375, 0x6E53, *common, *inv, *mppt, *modules, 0xFFFF, 0]
+    curves = [
+        w
+        for curve in CURVES
+        for w in _encode(705, CURVE, group="Crv")
+        + [w for v, var in curve for w in _encode(705, {"V": v, "Var": var}, group="Crv/Pt")]
+    ]
+    volt_var = _encode(705, VOLT_VAR, length=13 + len(curves))
+    return [0x5375, 0x6E53, *common, *inv, *mppt, *modules, *volt_var, *curves, 0xFFFF, 0]
 
 
 def build_context() -> ModbusServerContext:

@@ -267,8 +267,8 @@ def _register_count(dev: Any) -> int:
 
 
 def _datatype(reg: Any) -> str:
-    """``bool`` for a coil or discrete input, whatever the map's datatype says."""
-    return "bool" if reg.type in BIT_REGISTER_TYPES else reg.datatype
+    """``bool`` for a coil, discrete input or `bit`, whatever the map's datatype says."""
+    return "bool" if reg.type in BIT_REGISTER_TYPES or reg.bit is not None else reg.datatype
 
 
 def _register_row(dev: Any, event: str, reg: Any) -> dict[str, Any]:
