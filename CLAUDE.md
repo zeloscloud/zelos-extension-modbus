@@ -30,7 +30,7 @@ just sim          # Power-meter simulator on 127.0.0.1:5020
 - `zelos_extension_modbus/serial_diag.py` - RTU connect-failure diagnostics (stale node, perms, holders)
 - `zelos_extension_modbus/register_map.py` - Register definitions and JSON parsing
 - `zelos_extension_modbus/sunspec.py` - SunSpec discovery: model chain -> RegisterMap (`"register_map": "sunspec"`)
-- `zelos_extension_modbus/demo/sunspec_sim.py` - SunSpec simulator (models 1, 103, 160)
+- `zelos_extension_modbus/demo/sunspec_sim.py` - SunSpec simulator (models 1, 103, 160, 705)
 - `zelos_extension_modbus/demo/mock_server.py` - Serves any register map (`main.py mock-server`)
 - `scripts/xlsx_to_register_map.py` - Convert a register-map spreadsheet to JSON
 - `zelos_extension_modbus/cli/app.py` - App mode runner (config loading, demo server)
