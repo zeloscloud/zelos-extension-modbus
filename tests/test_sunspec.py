@@ -12,6 +12,7 @@ from zelos_extension_modbus.sunspec import (
     MAX_MODELS,
     SUNS_MARKER,
     DiscoveryError,
+    _map_model,
     build_register_map,
 )
 
@@ -51,7 +52,12 @@ def test_sunspec_map_from_sim():
     reg_map = dev.register_map
 
     assert not dev.map_pending and dev.last_error is None
-    assert list(reg_map.events) == ["common_1", "inverter_three_phase_103", "mppt_160"]
+    assert list(reg_map.events) == [
+        "common_1",
+        "inverter_three_phase_103",
+        "mppt_160",
+        "DERVoltVar_705",
+    ]
     assert all(not r.writable for r in reg_map.registers)
 
     def reg(event, name):
@@ -74,11 +80,20 @@ def test_sunspec_map_from_sim():
     assert reg("inverter_three_phase_103", "WH").invalid == mn.invalid == [0]
     # Repeating group: count from the model length, sf from the enclosing model.
     assert reg("mppt_160", "module_2_DCA").scale_ref == "DCA_SF"
+    # Nested repeating groups: the point count read from the device (NPt); curve models poll slow.
+    curve = [r.name for r in reg_map.events["DERVoltVar_705"] if r.name.startswith("Crv_2_Pt")]
+    assert curve == [f"Crv_2_Pt_{n}_{p}" for n in (1, 2, 3) for p in ("V", "Var")]
+    assert reg("DERVoltVar_705", "Crv_2_Pt_3_Var").rate == reg("DERVoltVar_705", "Ena").rate == 60
 
     assert values["common_1"]["Mn"] == "Zelos"
     inverter = values["inverter_three_phase_103"]
     assert (inverter["PhVphA"], inverter["Hz"] > 59, inverter["VA"]) == (230.1, True, None)
     assert values["mppt_160"]["module_2_DCV"] == 379.5
+    # Bitfield: the integer, and a boolean per named bit (0x81 = bits 0 and 7).
+    flags = [inverter[f"Evt1{f}"] for f in ("", "_GROUND_FAULT", "_DC_OVER_VOLT", "_OVER_TEMP")]
+    assert flags == [0x81, True, False, True]
+    volt_var = values["DERVoltVar_705"]
+    assert (volt_var["Crv_1_Pt_1_V"], volt_var["Crv_2_Pt_3_Var"]) == (92.0, -44.0)
 
 
 @pytest.mark.parametrize(
@@ -106,3 +121,13 @@ def test_partial_chain_is_not_a_map(headers, error):
     loop.run_until_complete(dev.load_map(0.0))
     loop.close()
     assert dev.map_pending and dev.register_map is None and error in dev.last_error
+
+
+@pytest.mark.parametrize(
+    ("counts", "last"),
+    [({"NPt": 3}, "Crv_2_Pt_3_Var"), ({}, "RspTms_SF")],
+    ids=["curves from the model length", "no point count: curves skipped"],
+)
+def test_curve_counts(counts, last):
+    _, regs = _map_model(705, BASE + 2, 13 + 2 * 16, set(), counts)
+    assert regs[-1]["name"] == last
