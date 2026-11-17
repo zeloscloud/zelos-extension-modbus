@@ -11,8 +11,8 @@ Mapping: one event per model, `<model name>_<id>` (`common_1`, `inverter_103`;
 a repeat of the same model gets `_2`, `_3`). One field per point, named after
 the point; repeating groups flatten to `<group>_<n>_<point>` (1-based), nested
 ones to `<group>_<n>_<group>_<m>_<point>`. The model length gives a repeat count;
-where it cannot (a nested group, the 700-series curve points) the count is read
-from the model's count point. Scale
+where it cannot (a nested group, the 700-series curve points) the model's count
+points are read from the device, and must fit the model length. Scale
 factor links become `scale_ref` (a fixed sf becomes `scale`), enums become `values`, and the SunSpec
 not-implemented values become `invalid` (logged as null). A bitfield keeps its
 integer field and adds a boolean `<point>_<symbol>` per named bit.
@@ -73,10 +73,11 @@ ENUM_TYPES = {"enum16", "enum32"}
 HEADER_POINTS = {"ID", "L"}  # model header, already known
 
 #: Models polled at SLOW_RATE: identity (1 common), nameplate (120, and 702 DER
-#: capacity, its 700-series successor), basic settings (121) and the 700-series
-#: curve functions (705-710, 712: enable, adopt state and the curve points). They
-#: change only on reconfiguration; status and controls (122-126, other 7xx) keep
-#: the device rate.
+#: capacity, its 700-series successor) and basic settings (121), which change
+#: only on reconfiguration; and the 700-series curve functions (705-710, 712),
+#: whose hundreds of curve points would slow every sweep (their enable, adopt
+#: result and revert countdown ride along). Status and controls (122-126, other
+#: 7xx) keep the device rate.
 SLOW_MODELS = {1, 120, 121, 702, 705, 706, 707, 708, 709, 710, 712}
 
 
@@ -147,21 +148,26 @@ def _model_def(model_id: int) -> dict[str, Any] | None:
     return mdef.from_json_file(str(path)) if path.is_file() else None
 
 
-def _count_offsets(group: dict[str, Any]) -> dict[str, int]:
-    """Count points the model length cannot stand in for -> offset in the model.
-
-    Those of nested groups, and of a top-level group another group follows.
-    """
+def _count_names(group: dict[str, Any]) -> set[str]:
+    """The count points ``group``'s repeating groups name, at any depth."""
     names: set[str] = set()
+    for sub in group.get(mdef.GROUPS, []):
+        if isinstance(sub.get(mdef.COUNT), str):
+            names.add(sub[mdef.COUNT])
+        names |= _count_names(sub)
+    return names
 
-    def collect(g: dict[str, Any], top: bool) -> None:
-        subgroups = g.get(mdef.GROUPS, [])
-        for i, sub in enumerate(subgroups):
-            if isinstance(sub.get(mdef.COUNT), str) and not (top and i == len(subgroups) - 1):
-                names.add(sub[mdef.COUNT])
-            collect(sub, False)
 
-    collect(group, True)
+def _count_offsets(group: dict[str, Any]) -> dict[str, int]:
+    """Count points to read from the device -> offset in the model.
+
+    None unless a nested group has one: the model length gives a top-level
+    group's count. With one, all of them, so the counts can be checked
+    against the model length.
+    """
+    if not any(_count_names(sub) for sub in group.get(mdef.GROUPS, [])):
+        return {}
+    names = _count_names(group)
     offsets, offset = {}, 0
     for point in group.get(mdef.POINTS, []):
         if point[mdef.NAME] in names:
@@ -173,10 +179,10 @@ def _count_offsets(group: dict[str, Any]) -> dict[str, int]:
 async def _read_counts(
     device: ModbusDevice, model_id: int, address: int, length: int
 ) -> dict[str, int]:
-    """The repeat counts only the device can give, read from the model's count points.
+    """The model's count points (`_count_offsets`), read from the device.
 
     One register each, inside the model. A count the device does not give
-    (exception answer, 0, not implemented) is left out: its group is skipped.
+    (exception answer, 0, not implemented) is left out.
     """
     model = _model_def(model_id)
     counts: dict[str, int] = {}
@@ -289,12 +295,18 @@ class _Walk:
                 pass  # fixed by the definition
             elif not prefix and i == len(subgroups) - 1:
                 # Nothing follows: the model length gives the count.
-                count, rest = divmod(self.end - address, sub_len)
+                fits, rest = divmod(self.end - address, sub_len)
+                counted = isinstance(count, str) and self.counts.get(count) != fits
+                if _count_names(sub) and (rest or counted):
+                    # Its length came from the device's counts: a misfit would
+                    # map the wrong registers under valid names.
+                    raise _Stop(f"the device's counts for '{name}' do not fit the model length")
                 if rest:
                     logger.warning(
                         f"SunSpec: model {self.model_id}: {rest} register(s) after "
                         f"'{name}' do not fill a group; ignored"
                     )
+                count = fits
             else:
                 count = _instances(count, self.counts)
                 if count is None or address + count * sub_len > self.end:
@@ -351,6 +363,8 @@ class _Walk:
         self.out.append(reg)
         if ptype.startswith("bitfield"):
             for symbol in point.get(mdef.SYMBOLS, []):
+                if symbol[mdef.VALUE] not in range(16 * size):
+                    continue  # not a bit of this point
                 flag = {**reg, "name": f"{name}_{symbol[mdef.NAME]}", "bit": symbol[mdef.VALUE]}
                 flag["description"] = symbol.get(mdef.LABEL) or symbol[mdef.NAME]
                 self.out.append(flag)
