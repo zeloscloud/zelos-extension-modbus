@@ -124,10 +124,11 @@ def test_partial_chain_is_not_a_map(headers, error):
 
 
 @pytest.mark.parametrize(
-    ("counts", "last"),
-    [({"NPt": 3}, "Crv_2_Pt_3_Var"), ({}, "RspTms_SF")],
-    ids=["curves from the model length", "no point count: curves skipped"],
+    "counts",
+    [{}, {"NPt": 3}, {"NPt": 2, "NCrv": 3}, {"NPt": 1, "NCrv": 3}],
+    ids=["no point count", "no curve count", "remainder", "curve count disagrees"],
 )
-def test_curve_counts(counts, last):
-    _, regs = _map_model(705, BASE + 2, 13 + 2 * 16, set(), counts)
-    assert regs[-1]["name"] == last
+def test_curves_need_counts_that_fit(counts):
+    """Three curves of three points: anything else would map the wrong registers."""
+    _, regs = _map_model(705, BASE + 2, 13 + 3 * 16, set(), counts)
+    assert regs[-1]["name"] == "RspTms_SF"

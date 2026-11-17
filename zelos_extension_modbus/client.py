@@ -1505,7 +1505,11 @@ class ModbusDevice:
                     regs, self.max_block_size, self.max_read_gap, self.max_bit_block_size
                 )
             else:
-                plan = [ReadBlock(r.type, r.address, r.address_span, (r,)) for r in regs]
+                # One read per distinct span: `bit` entries share their word's.
+                spans: dict[tuple[str, int, int], list[Register]] = {}
+                for r in regs:
+                    spans.setdefault((r.type, r.address, r.address_span), []).append(r)
+                plan = [ReadBlock(t, a, n, tuple(rs)) for (t, a, n), rs in spans.items()]
             for read in plan:
                 block = old.get((read.type, read.address, read.count, rate))
                 if block:

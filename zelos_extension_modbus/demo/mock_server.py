@@ -131,7 +131,7 @@ def randomize_once(context: ModbusServerContext, register_map: RegisterMap) -> N
     server persist and can be observed on the next poll.
     """
     for reg in register_map.registers:
-        if reg.writable:
+        if reg.writable or reg.bit is not None:  # a `bit` entry is a view of its word
             continue
         try:
             value = _random_raw_value(reg)
