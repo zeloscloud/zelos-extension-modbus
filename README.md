@@ -152,6 +152,7 @@ Addresses are 1-based, as in vendor sheets: holding register `40001` is sent as 
 | `scale_ref` | No | | Integer register in the same event holding a power-of-10 exponent |
 | `invalid` | No | | Raw values meaning "not implemented", logged as null |
 | `values` | No | | Enum labels, `{"0": "off", "1": "on"}` |
+| `bit` | No | | Bit number (0 = lowest, of the whole value) of an integer register, logged as a boolean; one entry per flag of a status word, at the same address |
 
 An optional top-level `device` block carries device quirks, e.g. `"device": {"max_block_size": 60, "byte_order": "big_swap"}`:
 

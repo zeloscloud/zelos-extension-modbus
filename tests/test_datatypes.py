@@ -17,7 +17,9 @@ MAP = {
             {"name": "sf", "address": 4, "datatype": "int16", "invalid": [0x8000]},
             {"name": "v", "address": 5, "scale_ref": "sf", "unit": "V"},
             {"name": "n", "address": 6, "datatype": "int16", "invalid": [0x8000]},
+            {"name": "n_neg", "address": 6, "datatype": "int16", "invalid": [0x8000], "bit": 15},
             {"name": "st", "address": 7, "values": {"1": "on", "2": "off"}},
+            {"name": "st_on", "address": 7, "bit": 0},
         ]
     }
 }
@@ -50,6 +52,9 @@ class _Source:
         ({}, "n", 7),
         ({5: 0x8000}, "n", None),
         ({}, "st", 1),
+        ({}, "st_on", True),
+        ({5: 0x8001}, "n_neg", True),
+        ({5: 0x8000}, "n_neg", None),  # null with its word
     ],
     ids=[
         "string",
@@ -61,6 +66,9 @@ class _Source:
         "int",
         "invalid",
         "enum",
+        "bit",
+        "bit-signed",
+        "bit-invalid",
     ],
 )
 @pytest.mark.parametrize("block_reads", [True, False], ids=["block", "single"])
@@ -86,10 +94,12 @@ def test_decode(words, field, expected, block_reads):
 
     assert values[field] == expected
     assert "sf" not in values  # read for `v`, never logged
-    assert source.fields == {"c/unit1/e": ["s", "v", "n", "st"]}
+    assert source.fields == {"c/unit1/e": ["s", "v", "n", "n_neg", "st", "st_on"]}
     assert source.tables == [("c/unit1/e", "st", {1: "on", 2: "off"})]
     if block_reads:
         assert reads == [(0, 7)]  # the exponent rides in the same block
+    else:
+        assert len(reads) == len(set(reads))  # a `bit` entry shares its word's read
 
 
 @pytest.mark.parametrize(
@@ -111,6 +121,9 @@ def test_decode(words, field, expected, block_reads):
         ({"datatype": "float32", "values": {"1": "a"}}, "unscaled integer"),
         ({"values": {"one": "a"}}, "keys must be integers"),
         ({"datatype": "string", "length": 1, "invalid": [1]}, "'invalid' needs"),
+        ({"bit": 16}, "'bit' needs"),
+        ({"bit": 0, "datatype": "float32"}, "'bit' needs"),
+        ({"bit": 0, "scale": 0.1}, "'bit' register is read-only"),
     ],
     ids=[
         "string-no-length",
@@ -129,6 +142,9 @@ def test_decode(words, field, expected, block_reads):
         "values-float",
         "values-bad-key",
         "invalid-on-string",
+        "bit-outside-word",
+        "bit-on-float",
+        "bit-scaled",
     ],
 )
 def test_validation(reg, message):

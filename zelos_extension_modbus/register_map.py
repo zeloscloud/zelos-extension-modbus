@@ -40,6 +40,12 @@ the write actions set a holding register or coil), and:
   On a string only [0]: all NUL bytes.
 - values: {"<int>": "<label>"} enum on an unscaled integer register, shown as
   labels in the trace.
+- bit: bit number (0 = least significant, of the whole value after byte_order)
+  of an integer holding or input register; the field logs that one bit as a
+  boolean. Give each flag of a
+  status word its own register entry at the same address. Read-only, and not
+  combined with scale, scale_ref or values. With `invalid`, null when the
+  whole word is.
 
 Optional "device" block: quirks of the device model. max_block_size (1-125),
 max_bit_block_size (1-2000), max_read_gap (>= 0) and write_mode (auto/fc16)
@@ -166,6 +172,7 @@ class Register:
     scale_ref: str = ""
     invalid: list[int] = field(default_factory=list)
     values: dict[int, str] = field(default_factory=dict)
+    bit: int | None = None
     base: int = 1
     # The scale_ref register, resolved by RegisterMap.from_dict
     ref: Register | None = field(default=None, init=False, repr=False, compare=False)
@@ -261,6 +268,13 @@ class Register:
                 self.values = {int(k): str(v) for k, v in self.values.items()}
             except ValueError:
                 raise ValueError(f"{where}: 'values' keys must be integers") from None
+        if self.bit is not None:
+            if not is_int or not _is_int(self.bit) or not 0 <= self.bit < 16 * self.count:
+                raise ValueError(f"{where}: 'bit' needs an integer register and a bit inside it")
+            if self.scale != 1 or self.scale_ref or self.values or self.writable:
+                raise ValueError(
+                    f"{where}: a 'bit' register is read-only, without scale, scale_ref or values"
+                )
 
 
 def _resolve_scale_refs(event_name: str, registers: list[Register]) -> None:
@@ -274,7 +288,7 @@ def _resolve_scale_refs(event_name: str, registers: list[Register]) -> None:
             continue
         ref = by_name.get(reg.scale_ref)
         is_int = ref is not None and ref.datatype in INT_DATATYPES
-        if not is_int or ref is reg or ref.type in BIT_REGISTER_TYPES:
+        if not is_int or ref is reg or ref.type in BIT_REGISTER_TYPES or ref.bit is not None:
             msg = (
                 f"Register '{reg.name}' in event '{event_name}': scale_ref '{reg.scale_ref}' "
                 "must name an integer register in the same event"
@@ -435,6 +449,7 @@ class RegisterMap:
                     scale_ref=reg_data.get("scale_ref", ""),
                     invalid=reg_data.get("invalid", []),
                     values=reg_data.get("values", {}),
+                    bit=reg_data.get("bit"),
                 )
                 field_name = reg.field_name
                 if field_name in seen_fields:

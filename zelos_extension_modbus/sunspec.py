@@ -9,9 +9,13 @@ RegisterMap; polling, decoding and tracing know nothing about SunSpec.
 
 Mapping: one event per model, `<model name>_<id>` (`common_1`, `inverter_103`;
 a repeat of the same model gets `_2`, `_3`). One field per point, named after
-the point; repeating groups flatten to `<group>_<n>_<point>` (1-based). Scale
+the point; repeating groups flatten to `<group>_<n>_<point>` (1-based), nested
+ones to `<group>_<n>_<group>_<m>_<point>`. The model length gives a repeat count;
+where it cannot (a nested group, the 700-series curve points) the model's count
+points are read from the device, and must fit the model length. Scale
 factor links become `scale_ref` (a fixed sf becomes `scale`), enums become `values`, and the SunSpec
-not-implemented values become `invalid` (logged as null).
+not-implemented values become `invalid` (logged as null). A bitfield keeps its
+integer field and adds a boolean `<point>_<symbol>` per named bit.
 
 Addresses: the walk runs on wire (0-based) addresses; the map, and every log
 line, use the default address_base 1, matching SunSpec's documented 40001-based
@@ -69,9 +73,12 @@ ENUM_TYPES = {"enum16", "enum32"}
 HEADER_POINTS = {"ID", "L"}  # model header, already known
 
 #: Models polled at SLOW_RATE: identity (1 common), nameplate (120, and 702 DER
-#: capacity, its 700-series successor) and basic settings (121). They change only
-#: on reconfiguration; status and controls (122-126, 7xx) keep the device rate.
-SLOW_MODELS = {1, 120, 121, 702}
+#: capacity, its 700-series successor) and basic settings (121), which change
+#: only on reconfiguration; and the 700-series curve functions (705-710, 712),
+#: whose hundreds of curve points would slow every sweep (their enable, adopt
+#: result and revert countdown ride along). Status and controls (122-126, other
+#: 7xx) keep the device rate.
+SLOW_MODELS = {1, 120, 121, 702, 705, 706, 707, 708, 709, 710, 712}
 
 
 class DiscoveryError(Exception):
@@ -117,7 +124,8 @@ async def build_register_map(device: ModbusDevice) -> RegisterMap:
         model_id, length = header
         if model_id == END_MODEL_ID:
             break
-        name, registers = _map_model(model_id, address, length, warned)
+        counts = await _read_counts(device, model_id, address, length)
+        name, registers = _map_model(model_id, address, length, warned, counts)
         if registers:
             event, n = name, 1
             while event in events:
@@ -140,17 +148,67 @@ def _model_def(model_id: int) -> dict[str, Any] | None:
     return mdef.from_json_file(str(path)) if path.is_file() else None
 
 
+def _count_names(group: dict[str, Any]) -> set[str]:
+    """The count points ``group``'s repeating groups name, at any depth."""
+    names: set[str] = set()
+    for sub in group.get(mdef.GROUPS, []):
+        if isinstance(sub.get(mdef.COUNT), str):
+            names.add(sub[mdef.COUNT])
+        names |= _count_names(sub)
+    return names
+
+
+def _count_offsets(group: dict[str, Any]) -> dict[str, int]:
+    """Count points to read from the device -> offset in the model.
+
+    None unless a nested group has one: the model length gives a top-level
+    group's count. With one, all of them, so the counts can be checked
+    against the model length.
+    """
+    if not any(_count_names(sub) for sub in group.get(mdef.GROUPS, [])):
+        return {}
+    names = _count_names(group)
+    offsets, offset = {}, 0
+    for point in group.get(mdef.POINTS, []):
+        if point[mdef.NAME] in names:
+            offsets[point[mdef.NAME]] = offset
+        offset += point[mdef.SIZE]
+    return offsets
+
+
+async def _read_counts(
+    device: ModbusDevice, model_id: int, address: int, length: int
+) -> dict[str, int]:
+    """The model's count points (`_count_offsets`), read from the device.
+
+    One register each, inside the model. A count the device does not give
+    (exception answer, 0, not implemented) is left out.
+    """
+    model = _model_def(model_id)
+    counts: dict[str, int] = {}
+    for name, offset in _count_offsets(model[mdef.GROUP]).items() if model else ():
+        if offset >= 2 + length:
+            continue
+        raw = await _read(device, address + offset, 1)
+        if raw and 0 < raw[0] < 0xFFFF:
+            counts[name] = raw[0]
+    return counts
+
+
 def _map_model(
-    model_id: int, address: int, length: int, warned: set[str]
+    model_id: int, address: int, length: int, warned: set[str], counts: dict[str, int]
 ) -> tuple[str, list[dict[str, Any]]]:
-    """(event name, register dicts) for one model starting at ``address``."""
+    """(event name, register dicts) for one model starting at ``address``.
+
+    ``counts``: the device's values for the count points `_read_counts` reads.
+    """
     model = _model_def(model_id)
     if model is None:
         logger.warning(f"SunSpec: model {model_id} at {address + 1} has no definition; skipped")
         return str(model_id), []
     group = model[mdef.GROUP]
     out: list[dict[str, Any]] = []
-    _Walk(model_id, address + 2 + length, warned, out).group(group, address, "", [])
+    _Walk(model_id, address + 2 + length, warned, out, counts).group(group, address)
     name = f"{group[mdef.NAME]}_{model_id}"
     try:
         # Validate per model, so one odd model cannot fail the whole device.
@@ -161,15 +219,24 @@ def _map_model(
     return name, out
 
 
-def _group_len(group: dict[str, Any]) -> int | None:
-    """Registers one instance of ``group`` spans; None if it holds a variable group."""
+def _instances(count: int | str, counts: dict[str, int]) -> int | None:
+    """Instances of a repeating group: its fixed count, or the device's for a count
+    point; None when unknown."""
+    if isinstance(count, str):
+        return counts.get(count)
+    return count or None
+
+
+def _group_len(group: dict[str, Any], counts: dict[str, int]) -> int | None:
+    """Registers one instance of ``group`` spans; None if it holds a group of
+    unknown count."""
     total = sum(p[mdef.SIZE] for p in group.get(mdef.POINTS, []))
     for sub in group.get(mdef.GROUPS, []):
-        count = sub.get(mdef.COUNT, 1)
-        sub_len = _group_len(sub)
-        if sub_len is None or not isinstance(count, int) or count == 0:
+        n = _instances(sub.get(mdef.COUNT, 1), counts)
+        sub_len = _group_len(sub, counts)
+        if n is None or sub_len is None:
             return None
-        total += sub_len * count
+        total += sub_len * n
     return total
 
 
@@ -180,21 +247,29 @@ class _Stop(Exception):
 class _Walk:
     """Flattens one model's groups into register dicts."""
 
-    def __init__(self, model_id: int, end: int, warned: set[str], out: list[dict[str, Any]]):
+    def __init__(
+        self,
+        model_id: int,
+        end: int,
+        warned: set[str],
+        out: list[dict[str, Any]],
+        counts: dict[str, int],
+    ):
         self.model_id = model_id
         self.end = end  # exclusive, from the header's length
         self.warned = warned
         self.out = out
+        self.counts = counts
 
-    def group(self, group: dict[str, Any], address: int, prefix: str, scopes: list) -> int:
-        """Map ``group``'s points then its subgroups; return the next address."""
+    def group(self, group: dict[str, Any], address: int) -> None:
+        """Map the model's top ``group``: its points, then its subgroups."""
         try:
-            return self._group(group, address, prefix, scopes)
+            self._group(group, address, "", [])
         except _Stop as e:
             logger.warning(f"SunSpec: model {self.model_id}: {e}; later points skipped")
-            return self.end
 
     def _group(self, group: dict[str, Any], address: int, prefix: str, scopes: list) -> int:
+        """Map ``group``'s points then its subgroups; return the next address."""
         # Scale factors resolve in this group first, then outward.
         scope: dict[str, str] = {}
         scopes = [scope, *scopes]
@@ -213,18 +288,29 @@ class _Walk:
             if count is None:
                 address = self._group(sub, address, f"{name}_", scopes)
                 continue
-            sub_len = _group_len(sub)
-            if not isinstance(count, int) or count == 0:
-                # Variable count: resolvable from the model length only when
-                # nothing follows it.
-                if sub_len is None or prefix or i != len(subgroups) - 1:
-                    raise _Stop(f"repeating group '{name}' has no fixed length")
-                count, rest = divmod(self.end - address, sub_len)
+            sub_len = _group_len(sub, self.counts)
+            if sub_len is None:
+                raise _Stop(f"repeating group '{name}' has no fixed length")
+            if isinstance(count, int) and count:
+                pass  # fixed by the definition
+            elif not prefix and i == len(subgroups) - 1:
+                # Nothing follows: the model length gives the count.
+                fits, rest = divmod(self.end - address, sub_len)
+                counted = isinstance(count, str) and self.counts.get(count) != fits
+                if _count_names(sub) and (rest or counted):
+                    # Its length came from the device's counts: a misfit would
+                    # map the wrong registers under valid names.
+                    raise _Stop(f"the device's counts for '{name}' do not fit the model length")
                 if rest:
                     logger.warning(
                         f"SunSpec: model {self.model_id}: {rest} register(s) after "
                         f"'{name}' do not fill a group; ignored"
                     )
+                count = fits
+            else:
+                count = _instances(count, self.counts)
+                if count is None or address + count * sub_len > self.end:
+                    raise _Stop(f"repeating group '{name}' has no usable count")
             for n in range(1, count + 1):
                 address = self._group(sub, address, f"{name}_{n}_", scopes)
         return address
@@ -275,3 +361,10 @@ class _Walk:
         if ptype in ENUM_TYPES and point.get(mdef.SYMBOLS):
             reg["values"] = {str(s[mdef.VALUE]): s[mdef.NAME] for s in point[mdef.SYMBOLS]}
         self.out.append(reg)
+        if ptype.startswith("bitfield"):
+            for symbol in point.get(mdef.SYMBOLS, []):
+                if symbol[mdef.VALUE] not in range(16 * size):
+                    continue  # not a bit of this point
+                flag = {**reg, "name": f"{name}_{symbol[mdef.NAME]}", "bit": symbol[mdef.VALUE]}
+                flag["description"] = symbol.get(mdef.LABEL) or symbol[mdef.NAME]
+                self.out.append(flag)

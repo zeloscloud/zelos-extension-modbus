@@ -326,7 +326,8 @@ def decode_register(register: Register, raw: list[int] | list[bool]) -> Any:
         words = _reorder_registers(list(raw), register.byte_order)
         if int.from_bytes(struct.pack(f">{len(words)}H", *words)) in register.invalid:
             return None
-    return decode_value(raw, register.datatype, register.scale, register.byte_order)
+    value = decode_value(raw, register.datatype, register.scale, register.byte_order)
+    return bool(value >> register.bit & 1) if register.bit is not None else value
 
 
 def apply_scale_ref(value: Any, exponent: Any) -> float | None:
@@ -1286,7 +1287,7 @@ class ModbusDevice:
                     reg.field_name,
                     # Bits log booleans; a scale or scale_ref makes an integer fractional.
                     zelos_sdk.DataType.Boolean
-                    if reg.type in BIT_REGISTER_TYPES
+                    if reg.type in BIT_REGISTER_TYPES or reg.bit is not None
                     else zelos_sdk.DataType.Float64
                     if reg.ref or is_scaled_int(reg.datatype, reg.scale)
                     else SDK_DATATYPE_MAP.get(reg.datatype, zelos_sdk.DataType.Int32),
@@ -1480,7 +1481,11 @@ class ModbusDevice:
                     regs, self.max_block_size, self.max_read_gap, self.max_bit_block_size
                 )
             else:
-                plan = [ReadBlock(r.type, r.address, r.address_span, (r,)) for r in regs]
+                # One read per distinct span: `bit` entries share their word's.
+                spans: dict[tuple[str, int, int], list[Register]] = {}
+                for r in regs:
+                    spans.setdefault((r.type, r.address, r.address_span), []).append(r)
+                plan = [ReadBlock(t, a, n, tuple(rs)) for (t, a, n), rs in spans.items()]
             for read in plan:
                 block = old.get((read.type, read.address, read.count, rate))
                 if block:
