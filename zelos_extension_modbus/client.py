@@ -482,7 +482,7 @@ class ModbusConnection:
 
         # A scan's link. keep_open: pymodbus closes a link after retries + 4 requests
         # in a row with no reply; a search expects silence. trace_packet: pymodbus's
-        # hook, called with (sending, bytes) for every frame sent and chunk received.
+        # hook, called with (sending, bytes): each frame sent, and its receive buffer as it grows.
         self.keep_open = False
         self.trace_packet: Any = None
 
