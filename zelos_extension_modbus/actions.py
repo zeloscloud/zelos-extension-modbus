@@ -982,21 +982,21 @@ DEFAULT_HOST = ("127.0.0.1", 502)
     "Auto-configure",
     "Find Modbus devices and fill in the config: the one device discovery action, behind "
     "the config form's button and for a search from nothing. Give what you know; whatever "
-    "is left empty is searched, the most likely first. Baudrates, formats and unit IDs given "
-    "here are the only ones tried: a value that may be wrong belongs in the config, where it "
-    "is only tried first. Serial: ports x baudrates x formats "
-    "x unit IDs, one read per try (FC 03, holding register 1); a try that meets silence "
-    "costs about 0.12 s, so every unit ID at one setting takes about 30 s, and the first "
-    "reply fixes that port's setting. TCP: the configured unit, 1, 0 and 255, then every "
-    "unit ID when a gateway answers or none of them does. With no endpoint given it "
-    "searches the config's connections, each until it has a device; with none, every "
-    "serial port and 127.0.0.1:502. It ends at the first device (after unit IDs 1-10 and "
-    "247 on a serial port or behind a gateway), or at Devices to find, or at the time "
-    "limit. The result says per port and setting how many requests went out and how "
-    "many bytes came back, and `ask` lists what to give next. Found devices are identified "
-    "(FC 43/14, FC 17, SunSpec marker) and added to the returned config: review, then save "
-    "and start. Reads only. Run with the extension stopped. For a register map use Scan "
-    "Device.",
+    "is left empty is searched, the most likely first. Baudrates, formats and unit IDs "
+    "given are tried first, in full; if nothing answers there, the rest is searched until "
+    "the time limit. Serial ports and hosts given are the only ones searched. Serial: "
+    "ports x baudrates x formats x unit IDs, one read per try (FC 03, holding register "
+    "1); a try that meets silence costs about 0.12 s, so every unit ID at one setting "
+    "takes about 30 s, and the first reply fixes that port's setting. TCP: the configured "
+    "unit, 1, 0 and 255, then every unit ID when a gateway answers or none of them does. "
+    "With no endpoint given it searches the config's connections, each until it has a "
+    "device; with none, every serial port and 127.0.0.1:502. It ends at the first device "
+    "(after unit IDs 1-10 and 247 on a serial port or behind a gateway), or at Devices to "
+    "find, or at the time limit. The result says per port and setting how many requests "
+    "went out and how many bytes came back, and `ask` lists what to give next. Found "
+    "devices are identified (FC 43/14, FC 17, SunSpec marker) and added to the returned "
+    "config: review, then save and start. Reads only. Run with the extension stopped. For "
+    "a register map use Scan Device.",
     timeout=900.0,
     standalone=True,
     hidden=True,
@@ -1031,14 +1031,14 @@ DEFAULT_HOST = ("127.0.0.1", 502)
 @zelos_sdk.action.text(
     "baudrates",
     title="Baudrates",
-    description="e.g. 115200 or 9600,19200: only these. Empty: 9600, 19200, 38400, 57600, 115200",
+    description="e.g. 115200 or 9600,19200: tried first. Empty: 9600, 19200, 38400, 57600, 115200",
     required=False,
     default="",
 )
 @zelos_sdk.action.text(
     "formats",
     title="Data formats",
-    description="e.g. 8E1 or 8N1,8E1: only these. Empty: 8N1, 8E1, 8O1, 8N2",
+    description="e.g. 8E1 or 8N1,8E1: tried first. Empty: 8N1, 8E1, 8O1, 8N2",
     required=False,
     default="",
 )
@@ -1053,8 +1053,8 @@ DEFAULT_HOST = ("127.0.0.1", 502)
 @zelos_sdk.action.text(
     "units",
     title="Unit IDs",
-    description="e.g. 1 or 1,2,10-20: only these. Empty: every unit ID, 1, 247, 2, 3, 10 "
-    "first, then 1-32, then the rest",
+    description="e.g. 1 or 1,2,10-20: tried first; the others only if none of these "
+    "answers. Empty: every unit ID, 1, 247, 2, 3, 10 first, then 1-32, then the rest",
     required=False,
     default="",
 )
@@ -1123,7 +1123,13 @@ def auto_config(
     max_seconds: float = 0,
 ) -> dict[str, Any]:
     """The app's auto-configure contract: ``config.connections`` replaces the form's."""
-    from zelos_extension_modbus.scan import discover, parse_formats, parse_units, quiet_pymodbus
+    from zelos_extension_modbus.scan import (
+        discover,
+        parse_formats,
+        parse_units,
+        quiet_pymodbus,
+        serial_settings,
+    )
 
     _refuse_if_running()
     if config is None:
@@ -1151,12 +1157,17 @@ def auto_config(
         }
     serial = [t for t in targets if t["transport"] == Transport.RTU]
     pinned = ports or bauds or formats.strip() or any(c.get("serial_port") for c in connections)
+    unit_list = parse_units(units) or None
+    for t in serial if bauds or formats.strip() or unit_list else []:
+        t["widen"] = list(dict.fromkeys([*t["settings"], *serial_settings()]))
+    for t in targets if unit_list else []:
+        t.setdefault("widen", None)  # TCP: every unit ID
     limit = float(max_seconds) or (SERIAL_SECONDS if serial and pinned else DISCOVER_SECONDS)
     quiet_pymodbus()
     result = asyncio.run(
         discover(
             targets,
-            units=parse_units(units) or None,
+            units=unit_list,
             probe=(probe_type, int(probe_address) - 1),
             probe_timeout=float(probe_timeout),
             max_devices=int(max_devices),
@@ -1172,9 +1183,11 @@ def auto_config(
     said += _evidence(result)
     if skipped:
         said.append(f"Left alone: {', '.join(skipped)} (name a port to search it).")
+    if result["widened"] and not found:
+        said.append("Nothing answered on the values given, so the rest was searched too.")
     if result["cut"]:
         said.append(f"Not everything was tried in {limit:g} s.")
-    result["ask"] = [] if found else _ask(targets, units, result)
+    result["ask"] = [] if found else _ask(result)
     if result["ask"]:
         said.append(f"To search further, give: {'; '.join(result['ask'])}.")
     out = {"status": "success" if found else "error", "message": " ".join(said)} | result
@@ -1367,23 +1380,17 @@ def _evidence(result: dict[str, Any]) -> list[str]:
     return said
 
 
-def _ask(targets: list[dict[str, Any]], units: str, result: dict[str, Any]) -> list[str]:
+def _ask(result: dict[str, Any]) -> list[str]:
     """Facts that would narrow the next search, the most useful first."""
     rows = result["tried"]
     serial = [r for r in rows if r["transport"] == Transport.RTU]
     ask = []
     if not serial and all(r["link"] == "{}:{}".format(*DEFAULT_HOST) for r in rows):
         ask.append("the device's IP address and port, or the serial port its adapter is on")
-    if serial and any(len(t.get("settings", ())) > 1 for t in targets):
+    if serial:
         ask.append("the baudrate and format (e.g. 19200 8E1) from the datasheet or the device")
-    elif serial:
-        ask.append("the baudrate and format if they are not certain (empty searches them)")
-    if rows and not units.strip():
+    if rows:
         ask.append("the unit ID (slave address)")
-    elif rows:
-        ask.append("the unit IDs if they are not certain (empty tries every one)")
-        if serial:  # few tries: no later try was listening when a slow device answered
-            ask.append("a longer probe timeout (e.g. 0.5) if the device may answer slowly")
     if serial and not any(r["bytes_received"] for r in serial):
         ask.append("whether Modbus RTU is enabled on the device, and a register it serves")
     return ask

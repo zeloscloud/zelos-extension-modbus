@@ -330,8 +330,10 @@ def discover(**knobs: str | float) -> None:
     """Find devices; print a JSON report. Empty options are searched.
 
     The Auto-configure action with no config: serial ports x baudrates x
-    formats x unit ids, and TCP hosts, one read per try. With no option at all
-    it searches every serial port and 127.0.0.1:502.
+    formats x unit ids, and TCP hosts, one read per try. Baudrates, formats and
+    units given are tried first, then the rest; ports and hosts given are the
+    only ones searched. With no option at all it searches every serial port and
+    127.0.0.1:502.
 
     \b
     Examples:

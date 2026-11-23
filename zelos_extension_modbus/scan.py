@@ -550,6 +550,7 @@ class Search:
     lost: list[str] = field(default_factory=list)  # links that dropped; not searched further
     cut: list[str] = field(default_factory=list)  # links the time limit stopped
     malformed: int = 0  # replies with no values: an adapter echoing the request
+    widened: list[str] = field(default_factory=list)  # links searched past the values given
     pending: set[Any] = field(default_factory=set)  # configured connections with no device yet
 
     def enough(self, link: ScanLink) -> bool:
@@ -688,8 +689,14 @@ async def _search(
     """Search one link; it stays open on the setting that answered."""
     rtu = link.endpoint.get("transport") == Transport.RTU
     link.probe_timeout = (s.probe_timeout or PROBE_TIMEOUT) if rtu else None  # TCP: the link's
+    plan = _search_serial if rtu else _search_tcp
     try:
-        await (_search_serial if rtu else _search_tcp)(link, target, units, s)
+        await plan(link, target, units, s)
+        # Nothing at the values given: the search an empty call runs, those values first.
+        if "widen" in target and not link.units and not s.enough(link):
+            s.widened.append(link.endpoint.get("serial_port") or link.label)
+            first = [*(units or ()), *target.get("first", ())]
+            await plan(link, target | {"settings": target["widen"], "first": first}, None, s)
     except LinkLost:
         s.lost.append(link.label)
     finally:
@@ -736,8 +743,10 @@ async def discover(
 
     A target is a link's ``endpoint`` kwargs plus, optionally, ``settings``
     (RTU: the ``serial_settings`` to try, default the endpoint's own),
-    ``first`` (unit ids tried first) and ``connection`` (the configured
-    connection it is searched for). ``units`` lists the only ids to try;
+    ``first`` (unit ids tried first), ``connection`` (the configured
+    connection it is searched for) and ``widen`` (when ``settings`` and
+    ``units`` meet silence, the settings to go on with, every unit id).
+    ``units`` lists the only ids to try;
     ``probe`` is the (table, wire address) every try reads. The search ends
     once ``max_devices`` answered (0: never), after QUICK_UNITS on that link,
     or at ``max_seconds``; a target with a ``connection`` goes on until that
@@ -746,7 +755,7 @@ async def discover(
     """
     s = Search(*probe, probe_timeout, max_devices)
     started = time.monotonic()
-    keys = ("settings", "first", "connection")
+    keys = ("settings", "first", "connection", "widen")
     links = [
         ScanLink({k: v for k, v in t.items() if k not in keys}, max_seconds=max_seconds)
         for t in targets
@@ -774,6 +783,7 @@ async def discover(
         "lost": s.lost,
         "cut": s.cut,
         "malformed": s.malformed,
+        "widened": s.widened,
         "requests": sum(link.requests for link in links),
         "elapsed_s": round(time.monotonic() - started, 2),
     }

@@ -374,6 +374,21 @@ class TestDiscover:
         ]
         assert len([t for t in tried if t[0] == "b"]) <= 1
 
+    def test_silence_on_the_values_given_widens_the_search(self, bus):
+        """Wrong settings and unit given: they are tried in full, then the rest is searched."""
+        given = _serial("a", E) | {"widen": [E, N]}
+        got, tried = bus({("a", *N, 2): [7]}, [given], units=[5, 6])
+        assert tried[:5] == [("a", *E, u) for u in (5, 6, 5, 6)] + [("a", *E, 5)]
+        assert ([f["at"] for f in got["found"]], got["widened"]) == (["a 9600 8N1"], ["a"])
+        got, tried = bus({("a", *E, 6): [7]}, [given], units=[5, 6])  # right: no more is tried
+        assert (len(tried), got["widened"]) == (2, [])
+
+    def test_scan_device_tries_only_the_listed_units(self, bus):
+        bus({}, [])  # arms the fake bus
+        link = {"transport": "rtu", "serial_port": "a", "baudrate": 9600, "parity": "N"}
+        report = _run(scan(link, units=[40, 41]))["report"]
+        assert ({t[4] for t in FakeBus.tried}, report["units"]) == ({40, 41}, {"present": []})
+
     def test_link_counts_bytes_and_notes_a_late_reply(self):
         link = ScanLink(_serial("a") | {"settings": None, "first": None})
         late = bytes.fromhex("0283023 0f1".replace(" ", ""))  # unit 2, exception 02, valid CRC
@@ -415,6 +430,7 @@ class TestAutoConfig:
         async def fake_discover(targets, **knobs):
             seen.update(targets=targets, knobs=knobs)
             empty = {"tried": [], "unopened": [], "lost": [], "cut": [], "malformed": 0}
+            empty["widened"] = []
             return empty | {"found": [dict(f) for f in found]} | result
 
         monkeypatch.setattr(scan, "discover", fake_discover)
@@ -448,7 +464,7 @@ class TestAutoConfig:
         _, targets, knobs = self._run(monkeypatch)(**kwargs)
         assert (self._where(targets), knobs["max_seconds"]) == (where, seconds)
 
-    def test_form_values_go_first_and_knobs_pin(self, monkeypatch):
+    def test_form_values_and_knobs_go_first(self, monkeypatch):
         conn = self.RTU | {"devices": [{"unit_id": 9}]}
         call = self._run(monkeypatch)
         _, [target], _ = call(config={"connections": [conn]})
@@ -460,6 +476,7 @@ class TestAutoConfig:
             config={"connections": [conn]}, baudrates="115200", formats="8e1", units="1-3"
         )
         assert (target["settings"], knobs["units"]) == ([(115200, "E", 1)], [1, 2, 3])
+        assert (target["widen"][0], len(target["widen"])) == ((115200, "E", 1), 20)  # then the rest
         _, _, knobs = call(probe_type="input", probe_address=14)
         assert knobs["probe"] == ("input", 13)
 
@@ -512,26 +529,24 @@ class TestAutoConfig:
             {"at": "h:502", "link": "h:502", "transport": "tcp", "requests": 4}
             | {"bytes_received": 0, "replies": 0},
         ]
-        call = self._run(monkeypatch, tried=tried, unopened=["b:502: connection refused"])
+        call = self._run(
+            monkeypatch, tried=tried, unopened=["b:502: connection refused"], widened=["COM3"]
+        )
         got, _, _ = call(serial_ports="COM3", baudrates="9600", formats="8N1", hosts="h,b")
         assert got["status"] == "error" and "config" not in got
         assert got["message"] == (
             "No device answered. COM3: 252 requests on 9600 8N1, nothing came back (check the "
             "A/B wiring, power, the adapter, and that Modbus RTU is enabled on the device). "
             "h:502: connected, no unit answered 4 requests. Couldn't open b:502: connection "
-            "refused. To search further, give: the baudrate and format if they are not certain "
-            "(empty searches them); the unit ID (slave address); whether Modbus RTU is "
-            "enabled on the device, and a register it serves."
+            "refused. Nothing answered on the values given, so the rest was searched too. To "
+            "search further, give: the baudrate and format (e.g. 19200 8E1) from the datasheet "
+            "or the device; the unit ID (slave address); whether Modbus RTU is enabled on the "
+            "device, and a register it serves."
         )
         tried = [row | {"at": "COM3 9600 8N1", "bytes_received": 40}]
         got, _, _ = self._run(monkeypatch, tried=tried)(serial_ports="COM3")
         assert "Bytes came back with no valid reply on COM3 9600 8N1 (40 bytes)" in got["message"]
         assert got["ask"][0].startswith("the baudrate and format")
-        got, _, _ = self._run(monkeypatch, tried=tried)(serial_ports="COM3", units="5")
-        assert [a[:22] for a in got["ask"][-2:]] == [
-            "the unit IDs if they a",
-            "a longer probe timeout",
-        ]
 
     def test_no_port_to_search(self, monkeypatch):
         got, _, _ = self._run(monkeypatch, ports=())(transport="rtu")
