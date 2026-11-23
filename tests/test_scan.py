@@ -527,6 +527,8 @@ class TestAutoConfig:
         got, _, _ = self._run(monkeypatch, tried=tried)(serial_ports="COM3")
         assert "Bytes came back with no valid reply on COM3 9600 8N1 (40 bytes)" in got["message"]
         assert got["ask"][0].startswith("the baudrate and format")
+        got, _, _ = self._run(monkeypatch, tried=tried)(serial_ports="COM3", units="5")
+        assert got["ask"][-1].startswith("a longer probe timeout")
 
     def test_no_port_to_search(self, monkeypatch):
         got, _, _ = self._run(monkeypatch, ports=())(transport="rtu")
