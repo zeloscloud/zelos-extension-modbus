@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sys
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -229,6 +230,7 @@ class FakeBus:
         return self.connected
 
     async def request(self, method: str, unit: int, **_: Any) -> Any:
+        await asyncio.sleep(0)  # links take turns, as on real I/O
         FakeBus.tried.append((*self.at, unit))
         if len(FakeBus.tried) == FakeBus.expire_after:
             for link in ScanLink.made:
@@ -258,6 +260,8 @@ def bus(monkeypatch):
         ScanLink, "__init__", lambda self, *a, **k: (init(self, *a, **k), made.append(self))[0]
     )
     monkeypatch.setattr(scan_module, "ModbusConnection", FakeBus)
+    monkeypatch.setattr(ScanLink, "listen", AsyncMock())  # the waits: test_slow_device_on_a_pty
+    monkeypatch.setattr(ScanLink, "settle", AsyncMock())
     monkeypatch.setattr(scan_module, "identify", AsyncMock(return_value={}))
     monkeypatch.setattr(scan_module, "detect_sunspec", AsyncMock(return_value=None))
 
@@ -296,7 +300,7 @@ class TestDiscover:
             ("a 19200 8E1", 9, "holding 1 = 7"),
         ]
         row = {"requests": 11, "bytes_received": 0, "replies": 2}
-        assert got["tried"][1] == {"at": "a 19200 8E1", "link": "a"} | row
+        assert got["tried"][1] == {"at": "a 19200 8E1", "link": "a", "transport": "rtu"} | row
 
     def test_first_values_lead_and_listed_units_bound_the_search(self, bus):
         got, tried = bus({}, [_serial("a", first=(40,))], units=[40, 41, 1])
@@ -336,6 +340,12 @@ class TestDiscover:
         direct = {("h", 502, u): [1] for u in range(256)}
         got, tried = bus(direct, [tcp], max_devices=0)
         assert ([f["unit_id"] for f in got["found"]], len(tried)) == ([7], 4)
+        other = {"transport": "tcp", "host": "g", "port": 502}
+        got, _ = bus(direct | {("g", 502, 1): [1]}, [tcp, other], max_devices=2)
+        assert [(f["host"], f["unit_id"]) for f in got["found"]] == [("h", 7), ("g", 1)]
+        behind = {("h", 502, 0): 0x0B, ("h", 502, 1): [1], ("h", 502, 3): [1], ("h", 502, 40): [1]}
+        got, tried = bus(behind, [tcp])  # the first device does not hide units 1-10
+        assert ([f["unit_id"] for f in got["found"]], len(tried)) == ([1, 3], 13)
         got, tried = bus({("h", 502, 0): 0x0B, ("h", 502, 90): [1]}, [tcp], max_devices=0)
         assert [f["unit_id"] for f in got["found"]] == [90]
         assert [t[2] for t in tried] == [
@@ -352,6 +362,17 @@ class TestDiscover:
             9,
             *range(11, 247),
         ]
+
+    def test_a_configured_connection_is_searched_until_it_answers(self, bus):
+        """The first device ends the guessed ports, not another connection of the form."""
+        tcp = {"transport": "tcp", "host": "h", "port": 502, "connection": 0}
+        targets = [tcp, _serial("a", N, E) | {"connection": 1}, _serial("b", N, E)]
+        got, tried = bus({("h", 502, 1): [5], ("a", *E, 40): [7]}, targets)
+        assert [(f["at"], f["unit_id"]) for f in got["found"]] == [
+            ("h:502", 1),
+            ("a 19200 8E1", 40),
+        ]
+        assert len([t for t in tried if t[0] == "b"]) <= 1
 
     def test_link_counts_bytes_and_notes_a_late_reply(self):
         link = ScanLink(_serial("a") | {"settings": None, "first": None})
@@ -371,11 +392,14 @@ class TestDiscover:
         assert link.conn.request.await_args.kwargs["timeout"] is None  # the link's own
         assert link.conn.request_delay_ms == 50
         link.probe_timeout = 0.2
+        link._asked = 1  # as the send hook leaves it
         _run(link.request("read_holding_registers", 1, address=0, count=1))
         tick = time.get_clock_info("monotonic").resolution  # Windows: 15.6 ms
         waited = link.conn.request.await_args.kwargs["timeout"]
         assert waited == pytest.approx(0.2 + 165 / 1200 + tick)
         assert link.conn.request_delay_ms == 5  # the last try met silence
+        link._trace(False, bytes.fromhex("018302c0f1"))  # unit 1 answers before the next request
+        assert link.late == {1}
 
 
 class TestAutoConfig:
@@ -430,6 +454,8 @@ class TestAutoConfig:
         _, [target], _ = call(config={"connections": [conn]})
         assert (target["settings"][:2], target["first"]) == ([(19200, "E", 1), (9600, "N", 1)], [9])
         assert len(target["settings"]) == 20
+        _, guessed, _ = call(config={})
+        assert target["connection"] and {t["connection"] for t in guessed} == {None}
         _, [target], knobs = call(
             config={"connections": [conn]}, baudrates="115200", formats="8e1", units="1-3"
         )
@@ -480,10 +506,11 @@ class TestAutoConfig:
         ]
 
     def test_nothing_found_says_what_each_link_saw_and_what_to_give(self, monkeypatch):
-        row = {"link": "COM3", "requests": 252, "replies": 0}
+        row = {"link": "COM3", "transport": "rtu", "requests": 252, "replies": 0}
         tried = [
             row | {"at": "COM3 9600 8N1", "bytes_received": 0},
-            {"at": "h:502", "link": "h:502", "requests": 4, "bytes_received": 0, "replies": 0},
+            {"at": "h:502", "link": "h:502", "transport": "tcp", "requests": 4}
+            | {"bytes_received": 0, "replies": 0},
         ]
         call = self._run(monkeypatch, tried=tried, unopened=["b:502: connection refused"])
         got, _, _ = call(serial_ports="COM3", baudrates="9600", formats="8N1", hosts="h,b")
@@ -503,7 +530,53 @@ class TestAutoConfig:
 
     def test_no_port_to_search(self, monkeypatch):
         got, _, _ = self._run(monkeypatch, ports=())(transport="rtu")
-        assert got["message"].startswith("No serial port to search (/dev/console0 left alone")
+        assert got["message"].startswith("Nothing to search (/dev/console0 left alone")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a pty")
+def test_slow_device_on_a_pty():
+    """Real pymodbus: unit 5 answers 0.18 s after each request, past the probe timeout.
+    It is found, and its late replies are not taken for the identity answers."""
+    import os
+    import select
+    import threading
+    import tty
+
+    from pymodbus.framer import FramerRTU
+
+    master, slave = os.openpty()
+    tty.setraw(slave)
+    reply = bytes.fromhex("050302002a")
+    reply += FramerRTU.compute_CRC(reply).to_bytes(2, "big")
+    stop = threading.Event()
+
+    def device() -> None:
+        due: list[float] = []
+        while not stop.is_set():
+            if select.select([master], [], [], 0.01)[0] and os.read(master, 64)[:2] == b"\x05\x03":
+                due.append(time.monotonic() + 0.18)
+            if due and due[0] <= time.monotonic():
+                os.write(master, reply)
+                due.pop(0)
+
+    threading.Thread(target=device, daemon=True).start()
+    try:
+        got = _run(discover([_serial(os.ttyname(slave))], units=[5]))
+    finally:
+        stop.set()
+    assert [(f["unit_id"], f["reply"], "identity" in f) for f in got["found"]] == [
+        (5, "holding 1 = 42", True)
+    ]
+    assert got["lost"] == []
+
+
+def test_parse_hosts_caps_one_search():
+    from zelos_extension_modbus.actions import _parse_hosts
+
+    assert len(_parse_hosts("10.0.0.0/24, h:1502")) == 255
+    for bad in ("10.0.0.0/24,10.0.1.0/24", "10.0.0.0/23", ":502", "h:x"):
+        with pytest.raises(ValueError):
+            _parse_hosts(bad)
 
 
 def test_action_flags_are_pinned():

@@ -389,7 +389,7 @@ def scan(
     43/14 and 17 are sent. Addresses are 1-based (holding 40001 = wire 40000).
     Default windows: TCP 1-65536; RTU 1-10000, 30001-31000, 40001-41000,
     50001-51000. Default units: TCP the first of 1, 0, 255 that answers; a
-    gateway reply or no answer tries 1-247. RTU tries 1-247, about 40 s (use
+    gateway reply or no answer tries 1-247. RTU tries 1-247, about 30 s (use
     --units, or find the device with discover first).
 
     The draft map lists every readable address as a raw uint16 word or bool

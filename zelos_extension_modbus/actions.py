@@ -727,7 +727,7 @@ SCAN_ACTION_SECONDS = 240
 SCAN_TIMEOUT = 1800.0
 VERIFY_TIMEOUT = 900.0
 #: Auto-configure's time limit; SERIAL_SECONDS once a serial port or setting is named
-#: (every unit ID at one setting takes about 40 s).
+#: (every unit ID at one setting takes about 30 s).
 DISCOVER_SECONDS = 30.0
 SERIAL_SECONDS = 60.0
 
@@ -828,7 +828,7 @@ def _link_fields(fn: Any) -> Any:
     title="Unit IDs",
     description="e.g. 1,2,10-20: only these are tried, and each that answers is scanned. "
     "Empty: TCP the first of 1, 0, 255 to answer, else (a gateway, or no answer) every unit "
-    "ID; RTU every unit ID (about 40 s). Faster: find the device with Auto-configure first",
+    "ID; RTU every unit ID (about 30 s). Faster: find the device with Auto-configure first",
     required=False,
     default="",
 )
@@ -984,12 +984,13 @@ DEFAULT_HOST = ("127.0.0.1", 502)
     "the config form's button and for a search from nothing. Give what you know; whatever "
     "is left empty is searched, the most likely first. Serial: ports x baudrates x formats "
     "x unit IDs, one read per try (FC 03, holding register 1); a try that meets silence "
-    "costs about 0.15 s, so every unit ID at one setting takes about 40 s, and the first "
+    "costs about 0.12 s, so every unit ID at one setting takes about 30 s, and the first "
     "reply fixes that port's setting. TCP: the configured unit, 1, 0 and 255, then every "
-    "unit ID when a gateway answers. With no endpoint given it searches the config's "
-    "connections; with none, every serial port and 127.0.0.1:502. It ends at the first "
-    "device (after unit IDs 1-10 and 247 on that link), or at Devices to find, or at the "
-    "time limit. The result says per port and setting how many requests went out and how "
+    "unit ID when a gateway answers or none of them does. With no endpoint given it "
+    "searches the config's connections, each until it has a device; with none, every "
+    "serial port and 127.0.0.1:502. It ends at the first device (after unit IDs 1-10 and "
+    "247 on a serial port or behind a gateway), or at Devices to find, or at the time "
+    "limit. The result says per port and setting how many requests went out and how "
     "many bytes came back, and `ask` lists what to give next. Found devices are identified "
     "(FC 43/14, FC 17, SunSpec marker) and added to the returned config: review, then save "
     "and start. Reads only. Run with the extension stopped. For a register map use Scan "
@@ -1143,7 +1144,7 @@ def auto_config(
         left = f" ({', '.join(skipped)} left alone: name a port to search it)" if skipped else ""
         return {
             "status": "error",
-            "message": f"No serial port to search{left}. Plug in the adapter, or give a "
+            "message": f"Nothing to search{left}. Plug in the adapter, or give a "
             "serial port or a host.",
         }
     serial = [t for t in targets if t["transport"] == Transport.RTU]
@@ -1178,6 +1179,10 @@ def auto_config(
     return out | {"config": {"connections": connections}} if found else out
 
 
+#: Hosts one search opens at once.
+MAX_HOSTS = 256
+
+
 def _parse_hosts(text: str) -> list[tuple[str, int]]:
     """``"a, b:1502, 10.0.0.0/30"`` -> (host, port) pairs; a subnet lists its addresses."""
     import ipaddress
@@ -1185,21 +1190,34 @@ def _parse_hosts(text: str) -> list[tuple[str, int]]:
     out = []
     for part in filter(None, (p.strip() for p in text.split(","))):
         host, _, port = part.partition(":")
-        if port and not port.isdigit():
+        if not host or (port and not port.isdigit()):
             raise ValueError(f"bad host {part!r}: use e.g. 192.168.1.50 or 192.168.1.50:1502")
         if "/" not in host:
             out.append((host, int(port or 502)))
             continue
         net = ipaddress.ip_network(host, strict=False)
-        if net.num_addresses > 256:
-            raise ValueError(f"{host}: a subnet of at most 256 addresses (/24)")
+        if net.num_addresses > MAX_HOSTS:
+            raise ValueError(f"{host}: a subnet of at most {MAX_HOSTS} addresses (/24)")
         out += [(str(a), int(port or 502)) for a in net.hosts()]
+    if len(out) > MAX_HOSTS:
+        raise ValueError(f"{len(out)} hosts: at most {MAX_HOSTS} in one search")
     return out
 
 
 def _same_port(a: str | None, b: str) -> bool:
     """An alias and its node are one serial port."""
     return bool(a) and os.path.realpath(a) == os.path.realpath(b)
+
+
+def _connection_at(connections: list[dict[str, Any]], e: dict[str, Any]) -> dict[str, Any] | None:
+    """The connection an endpoint is for: its port or host, else a serial one with no port."""
+    if e["transport"] == Transport.RTU:
+        mine = [c for c in connections if c.get("transport") == Transport.RTU]
+        conn = next((c for c in mine if _same_port(c.get("serial_port"), e["serial_port"])), None)
+        return conn or next((c for c in mine if not c.get("serial_port")), None)
+    mine = [c for c in connections if c.get("transport", Transport.TCP) == Transport.TCP]
+    at = (e["host"], e["port"])
+    return next((c for c in mine if (c.get("host"), int(c.get("port", 502))) == at), None)
 
 
 def _first_units(conn: dict[str, Any]) -> list[int]:
@@ -1220,7 +1238,8 @@ def _targets(
     connections' own; a serial connection with no port chosen, or nothing
     configured for the transport asked, means every listed port, and no TCP
     endpoint means DEFAULT_HOST. A connection's settings and unit IDs are tried
-    first on its endpoint: the form cannot say "unknown".
+    first on its endpoint: the form cannot say "unknown". Its endpoint is
+    searched until it has a device, whatever the others found.
     """
     from zelos_extension_modbus.scan import endpoint, serial_settings
 
@@ -1241,23 +1260,18 @@ def _targets(
     targets = []
     by_node = {os.path.realpath(p): p for p in reversed(ports)}
     for port in reversed(by_node.values()):
-        conn = next((c for c in rtu if _same_port(c.get("serial_port"), port)), None)
-        conn = conn or next((c for c in rtu if not c.get("serial_port")), None)
+        e = endpoint(port, Transport.RTU)
+        conn = _connection_at(connections, e)
         own = conn and (
             conn.get("baudrate", 9600),
             conn.get("parity", "N"),
             conn.get("stopbits", 1),
         )
-        targets.append(
-            endpoint(port, Transport.RTU)
-            | {
-                "settings": serial_settings(baudrates, formats, own),
-                "first": _first_units(conn or {}),
-            }
-        )
-    for host, port in dict.fromkeys(hosts):
-        conn = next((c for c in tcp if (c.get("host"), c.get("port", 502)) == (host, port)), {})
-        targets.append(endpoint(host, Transport.TCP, port) | {"first": _first_units(conn)})
+        targets.append(e | {"settings": serial_settings(baudrates, formats, own)})
+    targets += [endpoint(host, Transport.TCP, port) for host, port in dict.fromkeys(hosts)]
+    for target in targets:
+        conn = _connection_at(connections, target)
+        target |= {"first": _first_units(conn or {}), "connection": conn and id(conn)}
     return targets, skipped
 
 
@@ -1271,28 +1285,15 @@ def _merge(connections: list[dict[str, Any]], found: list[dict[str, Any]]) -> li
     for at in dict.fromkeys(f["at"] for f in found):
         here = [f for f in found if f["at"] == at]
         f = here[0]
+        keys = ("host", "port")
         if f["transport"] == Transport.RTU:
-            link = {k: f[k] for k in ("serial_port", "baudrate", "parity", "stopbits")}
-            mine = [c for c in connections if c.get("transport") == Transport.RTU]
-            conn = next(
-                (c for c in mine if _same_port(c.get("serial_port"), f["serial_port"])), None
-            )
-            conn = conn or next((c for c in mine if not c.get("serial_port")), None)
-        else:
-            link = {"host": f["host"], "port": f["port"]}
-            conn = next(
-                (
-                    c
-                    for c in connections
-                    if c.get("transport", Transport.TCP) == Transport.TCP
-                    and (c.get("host"), c.get("port", 502)) == (f["host"], f["port"])
-                ),
-                None,
-            )
+            keys = ("serial_port", "baudrate", "parity", "stopbits")
+        conn = _connection_at(connections, f)
         if conn is None:
             conn = {"transport": f["transport"]}
             connections.append(conn)
-        conn |= link  # the serial settings that answered
+        # The serial settings that answered; a port the form names keeps its name.
+        conn |= {k: f[k] for k in keys if k != "serial_port" or not conn.get("serial_port")}
         devices = [dict(d) for d in conn.get("devices") or [] if isinstance(d, dict)]
         known = {d.get("unit_id", 1) for d in devices}
         units, added = [], []
@@ -1301,7 +1302,7 @@ def _merge(connections: list[dict[str, Any]], found: list[dict[str, Any]]) -> li
             ids = f.get("identity", {}).get("device_id", {})
             who = " ".join(ids.get(k, "") for k in ("VendorName", "ProductCode")).strip()
             notes = [who] if who else []
-            if f["reply"].startswith("answered after"):
+            if f.get("late"):
                 notes.append("answered after the probe timeout: a slow device")
             if unit not in known:
                 devices.append({"unit_id": unit})
@@ -1342,7 +1343,7 @@ def _evidence(result: dict[str, Any]) -> list[str]:
             )
         elif any(row["replies"] for row in rows):
             said.append(f"{link}: a gateway answered {requests} requests, no unit behind it.")
-        elif link == rows[0]["at"]:  # TCP
+        elif rows[0]["transport"] == Transport.TCP:
             said.append(f"{link}: connected, no unit answered {requests} requests.")
         else:
             tried = f"{len(rows)} settings" if len(rows) > 1 else rows[0]["at"][len(link) + 1 :]
@@ -1351,8 +1352,10 @@ def _evidence(result: dict[str, Any]) -> list[str]:
                 "wiring, power, the adapter, and that Modbus RTU is enabled on the device)."
             )
     if unopened := result["unopened"]:
-        more = f"; and {len(unopened) - 5} more" if len(unopened) > 5 else ""
-        said.append(f"Couldn't open {'; '.join(unopened[:5])}{more}.")
+        if len(unopened) > 5:  # a subnet: most addresses have no device
+            said.append(f"Couldn't open {len(unopened)} endpoints, e.g. {unopened[0]}.")
+        else:
+            said.append(f"Couldn't open {'; '.join(unopened)}.")
     if result["lost"]:
         said.append(
             f"The link dropped on {', '.join(result['lost'])}; it was not searched further."
@@ -1365,7 +1368,7 @@ def _evidence(result: dict[str, Any]) -> list[str]:
 def _ask(targets: list[dict[str, Any]], units: str, result: dict[str, Any]) -> list[str]:
     """Facts that would narrow the next search, the most useful first."""
     rows = result["tried"]
-    serial = [r for r in rows if r["link"] != r["at"]]
+    serial = [r for r in rows if r["transport"] == Transport.RTU]
     ask = []
     if not serial and all(r["link"] == "{}:{}".format(*DEFAULT_HOST) for r in rows):
         ask.append("the device's IP address and port, or the serial port its adapter is on")
@@ -1394,12 +1397,14 @@ def _search_ports() -> tuple[list[str], list[str]]:
 
     Left alone: a port the system console is on (a login prompt), and Bluetooth
     ports (opening one blocks while it pages the remote device): BTHENUM on
-    Windows, and on macOS, which has no on-board UART, any port that is not USB.
+    Windows, rfcomm on Linux, and on macOS, which has no on-board UART, any port
+    that is not USB.
     """
     consoles = _console_nodes()
     search, skipped = [], []
     for p in _serial_ports():
-        bluetooth = "BTHENUM" in (p.hwid or "") or (sys.platform == "darwin" and p.vid is None)
+        bluetooth = "BTHENUM" in (p.hwid or "") or "rfcomm" in p.device
+        bluetooth = bluetooth or (sys.platform == "darwin" and p.vid is None)
         alone = bluetooth or os.path.realpath(p.device) in consoles
         (skipped if alone else search).append(p.device)
     return search, skipped
