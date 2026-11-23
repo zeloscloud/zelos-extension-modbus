@@ -480,6 +480,12 @@ class ModbusConnection:
         self._close_after_sweep = False
         self._parked = False
 
+        # A scan's link. keep_open: pymodbus closes a link after retries + 4 requests
+        # in a row with no reply; a search expects silence. trace_packet: pymodbus's
+        # hook, called with (sending, bytes) for every frame sent and chunk received.
+        self.keep_open = False
+        self.trace_packet: Any = None
+
         # See ``lock``; also holds the request_gap.
         self._lock: asyncio.Lock | None = None
         self._last_request_end = 0.0
@@ -503,7 +509,12 @@ class ModbusConnection:
 
     def _create_client(self) -> AsyncModbusTcpClient | AsyncModbusSerialClient:
         # reconnect_delay 0: we reconnect, under the lock, with connect_delay_ms.
-        common = {"timeout": self.timeout, "retries": self.retries, "reconnect_delay": 0}
+        common = {
+            "timeout": self.timeout,
+            "retries": self.retries,
+            "reconnect_delay": 0,
+            "trace_packet": self.trace_packet,
+        }
         if self.transport == Transport.TCP:
             return AsyncModbusTcpClient(host=self.host, port=self.port, **common)
         return AsyncModbusSerialClient(
@@ -688,8 +699,9 @@ class ModbusConnection:
         """
         async with self.lock:
             # perf_counter: monotonic ticks at 15.6 ms on Windows, coarser than the gap.
-            wait = self._last_request_end + self.request_gap - time.perf_counter()
-            if wait > 0:
+            # A loop: the Windows event loop runs a timer due within one tick at once.
+            due = self._last_request_end + self.request_gap
+            while (wait := due - time.perf_counter()) > 0:
                 await asyncio.sleep(wait)
             if not await self._ensure_connected():
                 raise ConnectionException(f"cannot connect to {self.endpoint}")
@@ -698,8 +710,11 @@ class ModbusConnection:
                 # (no backoff, no delay); reconnect through connect() instead.
                 self.connected = False
                 raise ConnectionException(f"{self.endpoint}: link dropped")
-            self._client.ctx.retries = 0 if single else self.retries
-            self._client.ctx.comm_params.timeout_connect = timeout or self.timeout
+            ctx = self._client.ctx
+            ctx.retries = 0 if single else self.retries
+            ctx.comm_params.timeout_connect = timeout or self.timeout
+            if self.keep_open:
+                ctx.count_until_disconnect = ctx.max_until_disconnect
             try:
                 return await getattr(self._client, method)(device_id=unit_id, **kwargs)
             except ModbusIOException as e:
