@@ -982,7 +982,9 @@ DEFAULT_HOST = ("127.0.0.1", 502)
     "Auto-configure",
     "Find Modbus devices and fill in the config: the one device discovery action, behind "
     "the config form's button and for a search from nothing. Give what you know; whatever "
-    "is left empty is searched, the most likely first. Serial: ports x baudrates x formats "
+    "is left empty is searched, the most likely first. Baudrates, formats and unit IDs given "
+    "here are the only ones tried: a value that may be wrong belongs in the config, where it "
+    "is only tried first. Serial: ports x baudrates x formats "
     "x unit IDs, one read per try (FC 03, holding register 1); a try that meets silence "
     "costs about 0.12 s, so every unit ID at one setting takes about 30 s, and the first "
     "reply fixes that port's setting. TCP: the configured unit, 1, 0 and 255, then every "
@@ -1353,7 +1355,7 @@ def _evidence(result: dict[str, Any]) -> list[str]:
             )
     if unopened := result["unopened"]:
         if len(unopened) > 5:  # a subnet: most addresses have no device
-            said.append(f"Couldn't open {len(unopened)} endpoints, e.g. {unopened[0]}.")
+            said.append(f"Couldn't open {len(unopened)}, e.g. {unopened[0]}.")
         else:
             said.append(f"Couldn't open {'; '.join(unopened)}.")
     if result["lost"]:
@@ -1378,8 +1380,10 @@ def _ask(targets: list[dict[str, Any]], units: str, result: dict[str, Any]) -> l
         ask.append("the baudrate and format if they are not certain (empty searches them)")
     if rows and not units.strip():
         ask.append("the unit ID (slave address)")
-    elif serial:  # few tries: no later try was listening when a slow device answered
-        ask.append("a longer probe timeout (e.g. 0.5) if the device may answer slowly")
+    elif rows:
+        ask.append("the unit IDs if they are not certain (empty tries every one)")
+        if serial:  # few tries: no later try was listening when a slow device answered
+            ask.append("a longer probe timeout (e.g. 0.5) if the device may answer slowly")
     if serial and not any(r["bytes_received"] for r in serial):
         ask.append("whether Modbus RTU is enabled on the device, and a register it serves")
     return ask

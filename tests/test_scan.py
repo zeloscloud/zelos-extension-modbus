@@ -528,17 +528,19 @@ class TestAutoConfig:
         assert "Bytes came back with no valid reply on COM3 9600 8N1 (40 bytes)" in got["message"]
         assert got["ask"][0].startswith("the baudrate and format")
         got, _, _ = self._run(monkeypatch, tried=tried)(serial_ports="COM3", units="5")
-        assert got["ask"][-1].startswith("a longer probe timeout")
+        assert [a[:22] for a in got["ask"][-2:]] == [
+            "the unit IDs if they a",
+            "a longer probe timeout",
+        ]
 
     def test_no_port_to_search(self, monkeypatch):
         got, _, _ = self._run(monkeypatch, ports=())(transport="rtu")
         assert got["message"].startswith("Nothing to search (/dev/console0 left alone")
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="needs a pty")
-def test_slow_device_on_a_pty():
-    """Real pymodbus: unit 5 answers 0.18 s after each request, past the probe timeout.
-    It is found, and its late replies are not taken for the identity answers."""
+@pytest.fixture
+def pty_device():
+    """``start(delay)`` -> the port of a unit 5 that answers FC 03 after ``delay`` s."""
     import os
     import select
     import threading
@@ -552,24 +554,45 @@ def test_slow_device_on_a_pty():
     reply += FramerRTU.compute_CRC(reply).to_bytes(2, "big")
     stop = threading.Event()
 
-    def device() -> None:
+    def device(delay: float) -> None:
         due: list[float] = []
         while not stop.is_set():
             if select.select([master], [], [], 0.01)[0] and os.read(master, 64)[:2] == b"\x05\x03":
-                due.append(time.monotonic() + 0.18)
+                due.append(time.monotonic() + delay)
             if due and due[0] <= time.monotonic():
                 os.write(master, reply)
                 due.pop(0)
 
-    threading.Thread(target=device, daemon=True).start()
-    try:
-        got = _run(discover([_serial(os.ttyname(slave))], units=[5]))
-    finally:
-        stop.set()
+    def start(delay: float) -> str:
+        threading.Thread(target=device, args=(delay,), daemon=True).start()
+        return os.ttyname(slave)
+
+    yield start
+    stop.set()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a pty")
+def test_slow_device_on_a_pty(pty_device):
+    """Real pymodbus: unit 5 answers 0.18 s after each request, past the probe timeout.
+    It is found, and its late replies are not taken for the identity answers."""
+    got = _run(discover([_serial(pty_device(0.18))], units=[5]))
     assert [(f["unit_id"], f["reply"], "identity" in f) for f in got["found"]] == [
         (5, "holding 1 = 42", True)
     ]
     assert got["lost"] == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="a Linux pty refuses even parity")
+def test_a_refused_setting_does_not_lock_the_port(pty_device, monkeypatch):
+    """Real pyserial: the refused open must not keep the port's exclusive lock."""
+    from zelos_extension_modbus import scan as scan_module
+
+    monkeypatch.setattr(scan_module, "identify", AsyncMock(return_value={}))
+    monkeypatch.setattr(scan_module, "detect_sunspec", AsyncMock(return_value=None))
+    port = pty_device(0)
+    got = _run(discover([_serial(port, E, (19200, "N", 1))], units=[5]))
+    assert [f["at"] for f in got["found"]] == [f"{port} 19200 8N1"]
+    assert got["unopened"] == [f"{port} 19200 8E1"]
 
 
 def test_parse_hosts_caps_one_search():
