@@ -1378,6 +1378,8 @@ def _ask(targets: list[dict[str, Any]], units: str, result: dict[str, Any]) -> l
         ask.append("the baudrate and format if they are not certain (empty searches them)")
     if rows and not units.strip():
         ask.append("the unit ID (slave address)")
+    elif serial:  # few tries: no later try was listening when a slow device answered
+        ask.append("a longer probe timeout (e.g. 0.5) if the device may answer slowly")
     if serial and not any(r["bytes_received"] for r in serial):
         ask.append("whether Modbus RTU is enabled on the device, and a register it serves")
     return ask
