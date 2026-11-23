@@ -72,8 +72,7 @@ its addresses as is. Without `python3`, unit 1 holding register 1 is
 | Nothing | Wrong unit ID, baud or parity, wiring, or the device is off |
 
 A wrong unit ID, baud or parity gets no reply at all; a wrong address gets an exception. To find
-unknown settings or unit IDs, use Auto-configure in the extension's config: it tries common
-settings and units 1-10 and 247.
+unknown settings or unit IDs, use Auto-configure in the extension's config.
 
 ## 4. RS-485 failure modes
 
