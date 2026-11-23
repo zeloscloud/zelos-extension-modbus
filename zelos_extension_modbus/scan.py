@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import logging
 import math
 import re
@@ -282,7 +283,12 @@ class ScanLink:
         )
         self.conn.keep_open = True  # silence is expected: no reopen every few tries
         self.conn.trace_packet = self._trace
-        return await self.conn.connect()
+        if await self.conn.connect():
+            return True
+        # A setting refused after the port opened leaves pyserial's port in a reference
+        # cycle, still holding the exclusive lock: every later open would fail.
+        gc.collect()
+        return False
 
     def _connect_timeout(self) -> float:
         """CONNECT_TIMEOUT, capped by the deadline (never below the request timeout)."""
