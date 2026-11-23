@@ -18,7 +18,8 @@ Examples:
     uv run main.py trace 192.168.1.100 registers.json
     uv run main.py trace /dev/ttyUSB0 registers.json --transport rtu
 
-    # Discover an unknown device (read-only) / check a map against a device
+    # Find devices / map an unknown device (read-only) / check a map against a device
+    uv run main.py discover
     uv run main.py scan 192.168.1.100 --out draft.json
     uv run main.py verify 192.168.1.100 registers.json
 """
@@ -39,6 +40,7 @@ from zelos_extension_modbus.constants import (
     DEFAULT_PREFIX,
     MIN_RATE,
     MODBUS_MAX_READ_COUNT,
+    PROBE_TIMEOUT,
     RESERVED_CONNECTION_NAMES,
     name_error,
 )
@@ -309,14 +311,53 @@ def _link_options(fn: Callable) -> Callable:
 
 
 @cli.command()
+@click.option("--transport", "-t", type=click.Choice(["auto", "tcp", "rtu"]), default="auto")
+@click.option("--serial-ports", default="", help="e.g. /dev/ttyUSB0 or COM3,COM4")
+@click.option("--baudrates", default="", help="e.g. 9600,19200")
+@click.option("--formats", default="", help="e.g. 8N1,8E1")
+@click.option("--hosts", default="", help="e.g. 192.168.1.50:1502 or 192.168.1.0/24")
+@click.option("--units", default="", help="e.g. 1,2,10-20")
+@click.option(
+    "--probe-type",
+    type=click.Choice(["holding", "input", "coil", "discrete_input"]),
+    default="holding",
+)
+@click.option("--probe-address", type=int, default=1, help="1-based register every try reads")
+@click.option("--probe-timeout", type=float, default=PROBE_TIMEOUT, show_default=True)
+@click.option("--max-devices", type=int, default=1, show_default=True, help="0: every device")
+@click.option("--max-seconds", type=float, default=0, help="Default 30, 60 with serial given")
+def discover(**knobs: str | float) -> None:
+    """Find devices; print a JSON report. Empty options are searched.
+
+    The Auto-configure action with no config: serial ports x baudrates x
+    formats x unit ids, and TCP hosts, one read per try. With no option at all
+    it searches every serial port and 127.0.0.1:502.
+
+    \b
+    Examples:
+        uv run main.py discover
+        uv run main.py discover --serial-ports /dev/ttyUSB0 --baudrates 19200 --formats 8E1
+        uv run main.py discover --hosts 192.168.1.0/24
+    """
+    import json
+
+    try:
+        result = actions.auto_config(config={}, **knobs)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from e
+    click.echo(json.dumps(result, indent=2))
+    sys.exit(0 if result["status"] == "success" else 1)
+
+
+@cli.command()
 @click.argument("target")
 @_link_options
-@click.option("--autodetect", is_flag=True, help="RTU: try common serial settings first")
+@click.option("--autodetect", is_flag=True, help="RTU: also search the serial settings")
 @click.option(
     "--units",
     default="",
-    help="Unit ids to probe, e.g. 1,2,10-20 (default: TCP the first of 1, 0, 255 to answer, "
-    "else a 1-247 sweep; RTU 1-247)",
+    help="Unit ids to try, e.g. 1,2,10-20 (default: TCP the first of 1, 0, 255 to answer, "
+    "else 1-247; RTU 1-247)",
 )
 @click.option(
     "--tables",
@@ -348,8 +389,8 @@ def scan(
     43/14 and 17 are sent. Addresses are 1-based (holding 40001 = wire 40000).
     Default windows: TCP 1-65536; RTU 1-10000, 30001-31000, 40001-41000,
     50001-51000. Default units: TCP the first of 1, 0, 255 that answers; a
-    gateway reply or no answer sweeps 1-247 (a silent link stops after 16
-    timeouts). RTU sweeps 1-247 (use --units to go faster).
+    gateway reply or no answer tries 1-247. RTU tries 1-247, about 40 s (use
+    --units, or find the device with discover first).
 
     The draft map lists every readable address as a raw uint16 word or bool
     (1-based, writable: false, named holding_registers/<a> hr_<a> as auto-scan

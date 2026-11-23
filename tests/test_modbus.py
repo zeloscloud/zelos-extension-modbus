@@ -941,6 +941,34 @@ class TestLinkIntegration:
         """RTU frames need 3.5 character times of silence between them (spec 2.5.1.1)."""
         assert ModbusConnection(**kwargs).request_gap * 1000 == pytest.approx(gap_ms)
 
+    def test_request_holds_the_gap_and_its_own_timeout(self, monkeypatch):
+        """The gap holds when a sleep returns early (Windows runs a timer due within one
+        15.6 ms loop tick at once), and a request's own timeout does not outlive it."""
+        conn = ModbusConnection(transport="rtu", serial_port="x", request_delay_ms=30, timeout=2.0)
+        ctx = SimpleNamespace(comm_params=SimpleNamespace(), retries=0)
+        ctx.count_until_disconnect, ctx.max_until_disconnect = 0, 3
+        sent = []
+
+        async def read(**_):
+            at = time.perf_counter()
+            sent.append((at, ctx.comm_params.timeout_connect, ctx.count_until_disconnect))
+
+        conn._client = SimpleNamespace(connected=True, ctx=ctx, read_holding_registers=read)
+        conn.connected = True
+        sleep = asyncio.sleep
+        monkeypatch.setattr(asyncio, "sleep", lambda s: sleep(min(s, 0.001)))
+
+        async def run():
+            await conn.request("read_holding_registers", 1, timeout=0.1)
+            conn.keep_open = True  # a scan's link: pymodbus's close-on-silence count is reset
+            await conn.request("read_holding_registers", 1)
+
+        asyncio.get_event_loop().run_until_complete(run())
+        (t0, first, kept), (t1, second, reset) = sent
+        assert t1 - t0 >= 0.03
+        assert (first, second) == (0.1, 2.0)
+        assert (kept, reset) == (0, 3)
+
 
 # =============================================================================
 # Block Reads Integration Tests

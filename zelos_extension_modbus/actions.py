@@ -13,6 +13,7 @@ import concurrent.futures
 import functools
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -725,8 +726,10 @@ SCAN_ACTION_SECONDS = 240
 #: Scan Device's action timeout; its time limit stays a minute under it.
 SCAN_TIMEOUT = 1800.0
 VERIFY_TIMEOUT = 900.0
-#: Auto-configure's shared deadline across connections, under the app's 30 s.
-AUTO_CONFIG_SECONDS = 25.0
+#: Auto-configure's time limit; SERIAL_SECONDS once a serial port or setting is named
+#: (every unit ID at one setting takes about 40 s).
+DISCOVER_SECONDS = 30.0
+SERIAL_SECONDS = 60.0
 
 
 def _refuse_if_running() -> None:
@@ -814,9 +817,8 @@ def _link_fields(fn: Any) -> Any:
 @zelos_sdk.action.boolean(
     "autodetect",
     title="Autodetect serial settings",
-    description="RTU: try the given settings, then 9600-115200 baud, 8N1/8E1. Only the "
-    "first 3 listed units and 1, 2, 247 are tried for this: if none of them answers, "
-    "nothing is scanned",
+    description="RTU: also search the serial settings, the given ones first, as "
+    "Auto-configure does",
     required=False,
     default=False,
     widget="toggle",
@@ -824,32 +826,11 @@ def _link_fields(fn: Any) -> Any:
 @zelos_sdk.action.text(
     "units",
     title="Unit IDs",
-    description="e.g. 1,2,10-20: every listed unit is tried. Empty: TCP the first of 1, 0, "
-    "255 to answer, else (a gateway, or no answer) a 1-247 sweep; RTU sweeps 1-247, 1-10 "
-    "and 247 first (about 70 s when nothing answers)",
+    description="e.g. 1,2,10-20: only these are tried, and each that answers is scanned. "
+    "Empty: TCP the first of 1, 0, 255 to answer, else (a gateway, or no answer) every unit "
+    "ID; RTU every unit ID (about 40 s). Faster: find the device with Auto-configure first",
     required=False,
     default="",
-)
-@zelos_sdk.action.number(
-    "max_devices",
-    title="Devices to find",
-    description="Empty Unit IDs: the sweep stops once this many devices answer and only "
-    "those are scanned. Several devices on one bus: raise it or list their unit IDs. "
-    "0: sweep every unit ID",
-    minimum=0,
-    maximum=247,
-    default=1,
-    required=False,
-)
-@zelos_sdk.action.number(
-    "probe_timeout",
-    title="Probe timeout (s)",
-    description="RTU: how long a unit search or Autodetect try waits for a reply (TCP and "
-    "register reads wait 0.5 s). Raise it for a slow device",
-    minimum=0.05,
-    maximum=5,
-    default=PROBE_TIMEOUT,
-    required=False,
 )
 @zelos_sdk.action.text(
     "ranges",
@@ -893,8 +874,6 @@ def scan_device(
     stopbits: float = 1,
     autodetect: bool = False,
     units: str = "",
-    max_devices: float = 1,
-    probe_timeout: float = PROBE_TIMEOUT,
     ranges: str = "",
     max_seconds: float = SCAN_ACTION_SECONDS,
     out_path: str = "",
@@ -921,8 +900,6 @@ def scan_device(
             max_seconds=min(float(max_seconds), SCAN_TIMEOUT - 60),
             autodetect=autodetect,
             configured_unit=devices[0].get("unit_id"),
-            max_devices=int(max_devices),
-            probe_timeout=float(probe_timeout),
         )
     )
     if out:
@@ -997,20 +974,26 @@ def verify_map(
     return asyncio.run(run_verify(endpoint, register_map, unit, max_seconds=max_seconds))
 
 
-#: Probed when there is no connection: the Modbus TCP well-known port on this host.
-DEFAULT_CONNECTION: dict[str, Any] = {"transport": Transport.TCP, "host": "127.0.0.1", "port": 502}
+#: Searched when nothing names an endpoint: the Modbus TCP well-known port on this host.
+DEFAULT_HOST = ("127.0.0.1", 502)
 
 
 @zelos_sdk.action(
     "Auto-configure",
-    "Quick device discovery for the config form (seconds): on each connection, find the "
-    "units that answer among the configured unit, 1-10 and 247 (RTU: also serial "
-    "settings), read their identity, and add a device per new unit. Where the SunSpec "
-    "marker is found, register_map is set to sunspec (new or existing units; an existing "
-    "unit with a register_map_file keeps it). Existing devices are kept. Returns the "
-    "config; review, then save and start. Sweeps the form's connections (older apps: the "
-    "saved config's); with none, probes 127.0.0.1:502. All within 25 s; what did not fit "
-    "is reported. For a register map use Scan Device.",
+    "Find Modbus devices and fill in the config: the one device discovery action, behind "
+    "the config form's button and for a search from nothing. Give what you know; whatever "
+    "is left empty is searched, the most likely first. Serial: ports x baudrates x formats "
+    "x unit IDs, one read per try (FC 03, holding register 1); a try that meets silence "
+    "costs about 0.15 s, so every unit ID at one setting takes about 40 s, and the first "
+    "reply fixes that port's setting. TCP: the configured unit, 1, 0 and 255, then every "
+    "unit ID when a gateway answers. With no endpoint given it searches the config's "
+    "connections; with none, every serial port and 127.0.0.1:502. It ends at the first "
+    "device (after unit IDs 1-10 and 247 on that link), or at Devices to find, or at the "
+    "time limit. The result says per port and setting how many requests went out and how "
+    "many bytes came back, and `ask` lists what to give next. Found devices are identified "
+    "(FC 43/14, FC 17, SunSpec marker) and added to the returned config: review, then save "
+    "and start. Reads only. Run with the extension stopped. For a register map use Scan "
+    "Device.",
     timeout=900.0,
     standalone=True,
     hidden=True,
@@ -1020,99 +1003,320 @@ DEFAULT_CONNECTION: dict[str, Any] = {"transport": Transport.TCP, "host": "127.0
     "config",
     properties={},
     title="Config",
-    description="The config form's current (possibly unsaved) data. Empty: the saved config",
+    description="The config form's current (possibly unsaved) data. Empty: the saved config. "
+    "Its ports, hosts, serial settings and unit IDs are tried first",
     required=False,
 )
-def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+@zelos_sdk.action.select(
+    "transport",
+    choices=["auto", *Transport],
+    default="auto",
+    title="Transport",
+    description="With no port or host given. auto: the config's connections, or with none "
+    "every serial port and 127.0.0.1:502. rtu: serial ports only. tcp: TCP only",
+    required=False,
+)
+@zelos_sdk.action.text(
+    "serial_ports",
+    title="Serial ports",
+    description="e.g. /dev/ttyUSB0 or COM3,COM4: only these are searched. Empty with "
+    "nothing configured: every port List Serial Ports shows, but a system console or "
+    "Bluetooth port",
+    required=False,
+    default="",
+)
+@zelos_sdk.action.text(
+    "baudrates",
+    title="Baudrates",
+    description="e.g. 115200 or 9600,19200: only these. Empty: 9600, 19200, 38400, 57600, 115200",
+    required=False,
+    default="",
+)
+@zelos_sdk.action.text(
+    "formats",
+    title="Data formats",
+    description="e.g. 8E1 or 8N1,8E1: only these. Empty: 8N1, 8E1, 8O1, 8N2",
+    required=False,
+    default="",
+)
+@zelos_sdk.action.text(
+    "hosts",
+    title="Hosts",
+    description="e.g. 192.168.1.50, 192.168.1.50:1502 or a subnet up to 256 addresses, "
+    "192.168.1.0/24: only these are searched (port 502 unless given)",
+    required=False,
+    default="",
+)
+@zelos_sdk.action.text(
+    "units",
+    title="Unit IDs",
+    description="e.g. 1 or 1,2,10-20: only these. Empty: every unit ID, 1, 247, 2, 3, 10 "
+    "first, then 1-32, then the rest",
+    required=False,
+    default="",
+)
+@zelos_sdk.action.select(
+    "probe_type",
+    choices=list(RegisterType),
+    default=RegisterType.HOLDING,
+    title="Probe register type",
+    required=False,
+)
+@zelos_sdk.action.number(
+    "probe_address",
+    title="Probe register",
+    description="The register every try reads, 1-based. A device normally answers a read "
+    "of a register it lacks with an error reply, which still counts. If nothing answers, "
+    "set a register from the datasheet: one listed as 40001 is usually holding 1; try "
+    "40001 as written next",
+    minimum=1,
+    maximum=65536,
+    default=1,
+    required=False,
+)
+@zelos_sdk.action.number(
+    "probe_timeout",
+    title="Probe timeout (s)",
+    description="Serial: how long a try waits for a reply, beyond the time the frames "
+    "take on the wire. Raise it for a slow device (the result names a unit that answered "
+    "late). TCP tries wait 0.5 s",
+    minimum=0.02,
+    maximum=5,
+    default=PROBE_TIMEOUT,
+    required=False,
+)
+@zelos_sdk.action.number(
+    "max_devices",
+    title="Devices to find",
+    description="The search ends once this many answered. Several devices on a bus above "
+    "unit ID 10: raise it. 0: every device (every unit ID is tried)",
+    minimum=0,
+    maximum=247,
+    default=1,
+    required=False,
+)
+@zelos_sdk.action.number(
+    "max_seconds",
+    title="Time limit (s)",
+    description="Stops and reports what was found and tried. 0: 30 s, or 60 s when a "
+    "serial port or serial setting is given. An assistant's call ends at 300 s",
+    minimum=0,
+    maximum=840,
+    default=0,
+    required=False,
+)
+def auto_config(
+    config: dict[str, Any] | None = None,
+    transport: str = "auto",
+    serial_ports: str = "",
+    baudrates: str = "",
+    formats: str = "",
+    hosts: str = "",
+    units: str = "",
+    probe_type: str = RegisterType.HOLDING,
+    probe_address: float = 1,
+    probe_timeout: float = PROBE_TIMEOUT,
+    max_devices: float = 1,
+    max_seconds: float = 0,
+) -> dict[str, Any]:
     """The app's auto-configure contract: ``config.connections`` replaces the form's."""
-    from zelos_extension_modbus.cli.app import link_kwargs
-    from zelos_extension_modbus.scan import ScanLink, quiet_pymodbus, sweep
+    from zelos_extension_modbus.scan import discover, parse_formats, parse_units, quiet_pymodbus
 
     _refuse_if_running()
     if config is None:
         connections = _configured_connections()
     else:
-        connections = [c for c in config.get("connections") or [] if isinstance(c, dict)]
-    probe = not connections
-    if probe:
-        connections = [DEFAULT_CONNECTION]
+        connections = [dict(c) for c in config.get("connections") or [] if isinstance(c, dict)]
+    bauds = [b.strip() for b in baudrates.split(",") if b.strip()]
+    if bad := [b for b in bauds if not b.isdigit() or not int(b)]:
+        raise ValueError(f"bad baudrate {bad[0]!r}: use e.g. 9600 or 9600,19200")
+    ports = [p.strip() for p in serial_ports.split(",") if p.strip()]
+    targets, skipped = _targets(
+        connections,
+        transport,
+        ports,
+        _parse_hosts(hosts),
+        [int(b) for b in bauds],
+        parse_formats(formats),
+    )
+    if not targets:
+        left = f" ({', '.join(skipped)} left alone: name a port to search it)" if skipped else ""
+        return {
+            "status": "error",
+            "message": f"No serial port to search{left}. Plug in the adapter, or give a "
+            "serial port or a host.",
+        }
+    serial = [t for t in targets if t["transport"] == Transport.RTU]
+    pinned = ports or bauds or formats.strip() or any(c.get("serial_port") for c in connections)
+    limit = float(max_seconds) or (SERIAL_SECONDS if serial and pinned else DISCOVER_SECONDS)
     quiet_pymodbus()
-    deadline = time.monotonic() + AUTO_CONFIG_SECONDS
-    out, found, swept, seen, cut, unreachable, unopened = [], 0, [], [], [], [], []
-    no_port = False  # an RTU connection with no serial port to open
-    for conn in connections:
-        rtu = conn.get("transport") == Transport.RTU
-        if rtu and not conn.get("serial_port"):
-            no_port = True
-            out.append(conn)
+    result = asyncio.run(
+        discover(
+            targets,
+            units=parse_units(units) or None,
+            probe=(probe_type, int(probe_address) - 1),
+            probe_timeout=float(probe_timeout),
+            max_devices=int(max_devices),
+            max_seconds=limit,
+        )
+    )
+    result["skipped"] = skipped
+    found = result["found"]
+    if found and not hosts.strip() and not connections:  # the default host was only a guess
+        default = "{}:{}".format(*DEFAULT_HOST)
+        result["unopened"] = [u for u in result["unopened"] if not u.startswith(default)]
+    said = _merge(connections, found) if found else ["No device answered."]
+    said += _evidence(result)
+    if skipped:
+        said.append(f"Left alone: {', '.join(skipped)} (name a port to search it).")
+    if result["cut"]:
+        said.append(f"Not everything was tried in {limit:g} s.")
+    result["ask"] = [] if found else _ask(targets, units, result)
+    if result["ask"]:
+        said.append(f"To search further, give: {'; '.join(result['ask'])}.")
+    out = {"status": "success" if found else "error", "message": " ".join(said)} | result
+    return out | {"config": {"connections": connections}} if found else out
+
+
+def _parse_hosts(text: str) -> list[tuple[str, int]]:
+    """``"a, b:1502, 10.0.0.0/30"`` -> (host, port) pairs; a subnet lists its addresses."""
+    import ipaddress
+
+    out = []
+    for part in filter(None, (p.strip() for p in text.split(","))):
+        host, _, port = part.partition(":")
+        if port and not port.isdigit():
+            raise ValueError(f"bad host {part!r}: use e.g. 192.168.1.50 or 192.168.1.50:1502")
+        if "/" not in host:
+            out.append((host, int(port or 502)))
             continue
+        net = ipaddress.ip_network(host, strict=False)
+        if net.num_addresses > 256:
+            raise ValueError(f"{host}: a subnet of at most 256 addresses (/24)")
+        out += [(str(a), int(port or 502)) for a in net.hosts()]
+    return out
+
+
+def _same_port(a: str | None, b: str) -> bool:
+    """An alias and its node are one serial port."""
+    return bool(a) and os.path.realpath(a) == os.path.realpath(b)
+
+
+def _first_units(conn: dict[str, Any]) -> list[int]:
+    return [d.get("unit_id", 1) for d in conn.get("devices") or [] if isinstance(d, dict)]
+
+
+def _targets(
+    connections: list[dict[str, Any]],
+    transport: str,
+    ports: list[str],
+    hosts: list[tuple[str, int]],
+    baudrates: list[int],
+    formats: list[tuple[str, int]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """(``discover`` targets, serial ports left alone).
+
+    Named ``ports`` and ``hosts`` are the only endpoints searched. Otherwise the
+    connections' own; a serial connection with no port chosen, or nothing
+    configured for the transport asked, means every listed port, and no TCP
+    endpoint means DEFAULT_HOST. A connection's settings and unit IDs are tried
+    first on its endpoint: the form cannot say "unknown".
+    """
+    from zelos_extension_modbus.scan import endpoint, serial_settings
+
+    rtu = [c for c in connections if c.get("transport") == Transport.RTU]
+    tcp = [c for c in connections if c.get("transport", Transport.TCP) == Transport.TCP]
+    skipped: list[str] = []
+    if not ports and not hosts:
+        if transport != Transport.TCP:
+            ports = [c["serial_port"] for c in rtu if c.get("serial_port")]
+            none = not rtu and (not connections or transport == Transport.RTU)
+            if none or any(not c.get("serial_port") for c in rtu):
+                listed, skipped = _search_ports()
+                ports += listed
+        if transport != Transport.RTU:
+            hosts = [(c["host"], int(c.get("port", 502))) for c in tcp if c.get("host")]
+            if not hosts and (not connections or transport == Transport.TCP):
+                hosts = [DEFAULT_HOST]
+    targets = []
+    by_node = {os.path.realpath(p): p for p in reversed(ports)}
+    for port in reversed(by_node.values()):
+        conn = next((c for c in rtu if _same_port(c.get("serial_port"), port)), None)
+        conn = conn or next((c for c in rtu if not c.get("serial_port")), None)
+        own = conn and (
+            conn.get("baudrate", 9600),
+            conn.get("parity", "N"),
+            conn.get("stopbits", 1),
+        )
+        targets.append(
+            endpoint(port, Transport.RTU)
+            | {
+                "settings": serial_settings(baudrates, formats, own),
+                "first": _first_units(conn or {}),
+            }
+        )
+    for host, port in dict.fromkeys(hosts):
+        conn = next((c for c in tcp if (c.get("host"), c.get("port", 502)) == (host, port)), {})
+        targets.append(endpoint(host, Transport.TCP, port) | {"first": _first_units(conn)})
+    return targets, skipped
+
+
+def _merge(connections: list[dict[str, Any]], found: list[dict[str, Any]]) -> list[str]:
+    """Add each found device to its connection (a new one if none matches), in place.
+
+    Returns a sentence per endpoint. Existing devices are kept; where the SunSpec
+    marker was found, register_map is set to sunspec unless a map file is set.
+    """
+    said = []
+    for at in dict.fromkeys(f["at"] for f in found):
+        here = [f for f in found if f["at"] == at]
+        f = here[0]
+        if f["transport"] == Transport.RTU:
+            link = {k: f[k] for k in ("serial_port", "baudrate", "parity", "stopbits")}
+            mine = [c for c in connections if c.get("transport") == Transport.RTU]
+            conn = next(
+                (c for c in mine if _same_port(c.get("serial_port"), f["serial_port"])), None
+            )
+            conn = conn or next((c for c in mine if not c.get("serial_port")), None)
+        else:
+            link = {"host": f["host"], "port": f["port"]}
+            conn = next(
+                (
+                    c
+                    for c in connections
+                    if c.get("transport", Transport.TCP) == Transport.TCP
+                    and (c.get("host"), c.get("port", 502)) == (f["host"], f["port"])
+                ),
+                None,
+            )
+        if conn is None:
+            conn = {"transport": f["transport"]}
+            connections.append(conn)
+        conn |= link  # the serial settings that answered
         devices = [dict(d) for d in conn.get("devices") or [] if isinstance(d, dict)]
         known = {d.get("unit_id", 1) for d in devices}
-        left = deadline - time.monotonic()
-        if left <= 0:
-            cut.append(ScanLink(link_kwargs(conn)).label)
-            out.append(conn)
-            continue
-        result = asyncio.run(
-            sweep(
-                link_kwargs(conn),
-                autodetect=rtu,
-                configured_unit=devices[0].get("unit_id", 1) if devices else None,
-                max_seconds=left,
-            )
-        )
-        if result.get("error"):  # the link never opened
-            if rtu:
-                unopened.append(conn["serial_port"])
-            else:
-                unreachable.append(result["error"].removeprefix("cannot open "))
-        else:
-            swept.append(result["endpoint"])
-        if result["cutoffs"]:
-            cut.append(result["endpoint"])
-        conn = dict(conn)
-        if serial := result.get("serial"):
-            conn |= {k: serial[k] for k in ("baudrate", "parity", "stopbits")}
         units, added = [], []
-        for unit in result.get("units", {}).get("present", []):
-            ids = result["identity"].get(unit, {}).get("device_id", {})
+        for f in here:
+            unit = f["unit_id"]
+            ids = f.get("identity", {}).get("device_id", {})
             who = " ".join(ids.get(k, "") for k in ("VendorName", "ProductCode")).strip()
             notes = [who] if who else []
+            if f["reply"].startswith("answered after"):
+                notes.append("answered after the probe timeout: a slow device")
             if unit not in known:
                 devices.append({"unit_id": unit})
                 added.append(unit)
             device = next(d for d in devices if d.get("unit_id", 1) == unit)
-            if unit in result["sunspec"] and device.get("register_map") != "sunspec":
+            if "sunspec" in f and device.get("register_map") != "sunspec":
                 if device.get("register_map_file"):
                     notes.append("SunSpec detected, register_map_file kept")
                 else:
                     device["register_map"] = "sunspec"
                     notes.append("register_map set to sunspec")
             units.append((unit, notes))
-        if units:
-            found += len(units)
-            seen.append(_found(result["endpoint"], units, added))
         conn["devices"] = devices
-        out.append(conn)
-    partial = f" Not fully swept in {AUTO_CONFIG_SECONDS:g} s: {', '.join(cut)}." if cut else ""
-    failed = f" Couldn't connect to {'; '.join(unreachable)}." if unreachable else ""
-    failed += f" Couldn't open {', '.join(unopened)}." if unopened else ""
-    failed += " Choose a Serial Port to scan." if no_port else ""
-    if not found and probe:
-        host, port = DEFAULT_CONNECTION["host"], DEFAULT_CONNECTION["port"]
-        return {
-            "status": "error",
-            "message": f"Nothing answered on {host}:{port}, the default. Add a connection "
-            "(host and port, or a serial port).",
-        }
-    if not found:
-        silent = f"No unit answered on {', '.join(swept)}." if swept else ""
-        return {"status": "error", "message": f"{silent}{failed}{partial}".strip()}
-    return {
-        "status": "success",
-        "message": f"{'; '.join(seen)}.{failed}{partial}",
-        "config": {"connections": out},
-    }
+        said.append(_found(at, units, added) + ".")
+    return said
 
 
 def _found(endpoint: str, units: list[tuple[int, list[str]]], added: list[int]) -> str:
@@ -1120,6 +1324,60 @@ def _found(endpoint: str, units: list[tuple[int, list[str]]], added: list[int]) 
     listed = ", ".join(f"{u} ({', '.join(n)})" if n else str(u) for u, n in units)
     tail = f"; added {', '.join(map(str, added))}" if added else ""
     return f"{endpoint}: found unit{'s' * (len(units) > 1)} {listed}{tail}"
+
+
+def _evidence(result: dict[str, Any]) -> list[str]:
+    """What each link saw when nothing was found: the difference between fixes."""
+    said = []
+    links: dict[str, list[dict[str, Any]]] = {}
+    for row in [] if result["found"] else result["tried"]:
+        links.setdefault(row["link"], []).append(row)
+    for link, rows in links.items():
+        requests = sum(row["requests"] for row in rows)
+        if garbled := [r for r in rows if r["bytes_received"] and not r["replies"]]:
+            where = ", ".join(f"{r['at']} ({r['bytes_received']} bytes)" for r in garbled[:3])
+            said.append(
+                f"Bytes came back with no valid reply on {where}: a wrong baudrate or "
+                "format, another protocol, or noise."
+            )
+        elif any(row["replies"] for row in rows):
+            said.append(f"{link}: a gateway answered {requests} requests, no unit behind it.")
+        elif link == rows[0]["at"]:  # TCP
+            said.append(f"{link}: connected, no unit answered {requests} requests.")
+        else:
+            tried = f"{len(rows)} settings" if len(rows) > 1 else rows[0]["at"][len(link) + 1 :]
+            said.append(
+                f"{link}: {requests} requests on {tried}, nothing came back (check the A/B "
+                "wiring, power, the adapter, and that Modbus RTU is enabled on the device)."
+            )
+    if unopened := result["unopened"]:
+        more = f"; and {len(unopened) - 5} more" if len(unopened) > 5 else ""
+        said.append(f"Couldn't open {'; '.join(unopened[:5])}{more}.")
+    if result["lost"]:
+        said.append(
+            f"The link dropped on {', '.join(result['lost'])}; it was not searched further."
+        )
+    if result["malformed"]:
+        said.append(f"{result['malformed']} malformed replies: the adapter may echo what it sends.")
+    return said
+
+
+def _ask(targets: list[dict[str, Any]], units: str, result: dict[str, Any]) -> list[str]:
+    """Facts that would narrow the next search, the most useful first."""
+    rows = result["tried"]
+    serial = [r for r in rows if r["link"] != r["at"]]
+    ask = []
+    if not serial and all(r["link"] == "{}:{}".format(*DEFAULT_HOST) for r in rows):
+        ask.append("the device's IP address and port, or the serial port its adapter is on")
+    if serial and any(len(t.get("settings", ())) > 1 for t in targets):
+        ask.append("the baudrate and format (e.g. 19200 8E1) from the datasheet or the device")
+    elif serial:
+        ask.append("the baudrate and format if they are not certain (empty searches them)")
+    if rows and not units.strip():
+        ask.append("the unit ID (slave address)")
+    if serial and not any(r["bytes_received"] for r in serial):
+        ask.append("whether Modbus RTU is enabled on the device, and a register it serves")
+    return ask
 
 
 def _console_nodes() -> set[str]:
@@ -1131,170 +1389,41 @@ def _console_nodes() -> set[str]:
     return {os.path.realpath(f"/dev/{name}") for name in names}
 
 
-@zelos_sdk.action(
-    "Find Device",
-    "Find RTU devices when the serial port, the serial settings or the unit ID is unknown: "
-    "tries each combination with one read (FC 03, holding register 1) and reports what "
-    "answers, with a connection to paste into the config. Fill in what you know; an empty "
-    "field is searched. The common comes first: units 1, 2 and 247 on every setting, then "
-    "3-10, then the rest, and 9600 8N1/8E1, 19200 8N1/8E1, 38400 8N1 and 115200 8N1 before "
-    "other settings. A silent try costs about 0.3 s: every unit at one setting takes about "
-    "70 s, every format and unit at one baudrate about 5 min, and everything on one port "
-    "about 25 min (raise the time limit, or search one baudrate at a time). Stops at the "
-    "first reply unless Find all. Run "
-    "with the extension stopped. It transmits on every port searched, so nothing else may "
-    "be using them.",
-    timeout=SCAN_TIMEOUT,
-    standalone=True,
-    hidden=True,
-)
-@zelos_sdk.action.text(
-    "ports",
-    title="Serial ports",
-    description="e.g. /dev/ttyUSB0 or COM3,COM4. Empty: every port List Serial Ports shows, "
-    "but one the system console is on",
-    required=False,
-    default="",
-)
-@zelos_sdk.action.text(
-    "baudrates",
-    title="Baudrates",
-    description="e.g. 115200 or 9600,19200. Empty: 9600, 19200, 38400, 57600, 115200",
-    required=False,
-    default="",
-)
-@zelos_sdk.action.text(
-    "formats",
-    title="Data formats",
-    description="e.g. 8N1 or 8N1,8E1. Empty: 8N1, 8E1, 8O1, 8N2",
-    required=False,
-    default="",
-)
-@zelos_sdk.action.text(
-    "units",
-    title="Unit IDs",
-    description="e.g. 1 or 1,2,10-20. Empty: 1-247",
-    required=False,
-    default="",
-)
-@zelos_sdk.action.boolean(
-    "find_all",
-    title="Find all",
-    description="Keep searching after the first reply: every unit on a bus, every port",
-    required=False,
-    default=False,
-    widget="toggle",
-)
-@zelos_sdk.action.number(
-    "max_seconds",
-    title="Time limit (s)",
-    description="Stops and reports what was found and where it stopped",
-    minimum=5,
-    maximum=SCAN_TIMEOUT - 60,
-    default=SCAN_ACTION_SECONDS,
-    required=False,
-)
-@zelos_sdk.action.number(
-    "probe_timeout",
-    title="Probe timeout (s)",
-    description="How long each try waits for a reply. Raise it for a slow device or gateway",
-    minimum=0.05,
-    maximum=5,
-    default=PROBE_TIMEOUT,
-    required=False,
-)
-def find_device(
-    ports: str = "",
-    baudrates: str = "",
-    formats: str = "",
-    units: str = "",
-    find_all: bool = False,
-    max_seconds: float = SCAN_ACTION_SECONDS,
-    probe_timeout: float = PROBE_TIMEOUT,
-) -> dict[str, Any]:
-    """Search the dimensions left empty; ``connections`` is ready for the config."""
-    from zelos_extension_modbus.scan import (
-        find_devices,
-        parse_formats,
-        parse_units,
-        quiet_pymodbus,
-    )
+def _search_ports() -> tuple[list[str], list[str]]:
+    """(listed ports an unnamed search transmits on, those it leaves alone).
 
-    _refuse_if_running()
-    named = [p.strip() for p in ports.split(",") if p.strip()]
-    if ports.strip() and not named:
-        raise ValueError(f"no port in {ports!r}: use e.g. /dev/ttyUSB0 or COM3,COM4")
-    listed = named or [c["value"] for c in list_serial_ports()["choices"]]
-    by_node: dict[str, str] = {}  # an alias and its node are one port
-    for p in listed:
-        by_node.setdefault(os.path.realpath(p), p)
-    # Unasked, leave the system console alone: a login prompt is on that port.
-    consoles = set() if named else _console_nodes()
-    skipped = [p for node, p in by_node.items() if node in consoles]
-    port_list = [p for p in by_node.values() if p not in skipped]
-    if not port_list:
-        console = f" ({', '.join(skipped)}: system console, name it to search it)" * bool(skipped)
-        raise ValueError(
-            f"No serial ports to search{console}. Plug in the adapter, or name a port."
-        )
-    bauds = [b.strip() for b in baudrates.split(",") if b.strip()]
-    if bad := [b for b in bauds if not b.isdigit() or not int(b)]:
-        raise ValueError(f"bad baudrate {bad[0]!r}: use e.g. 9600 or 9600,19200")
-    quiet_pymodbus()
-    result = asyncio.run(
-        find_devices(
-            port_list,
-            [int(b) for b in bauds] or None,
-            parse_formats(formats) or None,
-            parse_units(units) or None,
-            find_all=find_all,
-            max_seconds=min(float(max_seconds), SCAN_TIMEOUT - 60),
-            probe_timeout=float(probe_timeout),
-        )
+    Left alone: a port the system console is on (a login prompt), and Bluetooth
+    ports (opening one blocks while it pages the remote device): BTHENUM on
+    Windows, and on macOS, which has no on-board UART, any port that is not USB.
+    """
+    consoles = _console_nodes()
+    search, skipped = [], []
+    for p in _serial_ports():
+        bluetooth = "BTHENUM" in (p.hwid or "") or (sys.platform == "darwin" and p.vid is None)
+        alone = bluetooth or os.path.realpath(p.device) in consoles
+        (skipped if alone else search).append(p.device)
+    return search, skipped
+
+
+def _serial_ports() -> list[Any]:
+    """pyserial's ports, aliases first, without macOS pseudo ports and tty.* twins."""
+    from serial.tools import list_ports
+
+    # include_links adds udev aliases (/dev/ttyRS485 -> ttyAMA4); listed first since
+    # the alias names the port's purpose. Linux only; other platforms ignore it.
+    ports = sorted(
+        list_ports.comports(include_links=True),
+        key=lambda p: (not Path(p.device).is_symlink(), p.device),
     )
-    buses: dict[tuple[Any, ...], dict[str, Any]] = {}
-    for f in result["found"]:
-        key = (f["serial_port"], f["baudrate"], f["parity"], f["stopbits"])
-        link = dict(zip(("serial_port", "baudrate", "parity", "stopbits"), key, strict=True))
-        bus = buses.setdefault(key, {"transport": Transport.RTU} | link | {"devices": []})
-        bus["devices"].append({"unit_id": f["unit_id"]})
-    result["connections"] = list(buses.values())
-    result["skipped"] = skipped
-    result["searched"] = {
-        "ports": port_list,
-        "baudrates": baudrates.strip() or "9600,19200,38400,57600,115200",
-        "formats": formats.strip().upper() or "8N1,8E1,8O1,8N2",
-        "units": units.strip() or "1-247",
-    }
-    said = [
-        f"Unit {f['unit_id']} on {f['serial_port']} at {f['baudrate']} "
-        f"8{f['parity']}{f['stopbits']}: {f['reply']}."
-        for f in result["found"]
+    cu = {p.device for p in ports if p.device.startswith("/dev/cu.")}
+    return [
+        p
+        for p in ports
+        # macOS pseudo ports, and tty.* twins of cu.* (cu doesn't wait on carrier).
+        if "Bluetooth" not in p.device
+        and "debug-console" not in p.device
+        and "/dev/cu." + p.device.removeprefix("/dev/tty.") not in cu
     ]
-    if any(f["reply"].startswith("exception") for f in result["found"]):
-        said.append("An exception reply still proves the port, settings and unit ID.")
-    if not said:
-        s = result["searched"]
-        said = [
-            f"No device answered on {', '.join(port_list)} "
-            f"(baudrates {s['baudrates']}; formats {s['formats']}; units {s['units']}; "
-            f"probe timeout {float(probe_timeout):g} s)."
-        ]
-    if skipped:
-        said.append(f"Skipped {', '.join(skipped)}: system console, name it to search it.")
-    if result["unopened"]:
-        said.append(f"Couldn't open {', '.join(result['unopened'])}.")
-    if result["lost"]:
-        said.append(
-            f"The link dropped at {', '.join(result['lost'])}; "
-            "the rest of that port was not searched."
-        )
-    if result["malformed"]:
-        said.append(f"{result['malformed']} malformed replies: the adapter may echo what it sends.")
-    if result["stopped_at"]:
-        said.append(f"Time limit reached at {result['stopped_at']}; the rest was not searched.")
-    status = "success" if result["found"] else "error"
-    return {"status": status, "message": " ".join(said)} | result
 
 
 @zelos_sdk.action(
@@ -1307,25 +1436,9 @@ def find_device(
 )
 def list_serial_ports() -> dict[str, Any]:
     """The app's `action-choices` contract: `choices` in the order to show."""
-    from serial.tools import list_ports
-
-    # include_links adds udev aliases (/dev/ttyRS485 -> ttyAMA4); listed first since
-    # the alias names the port's purpose. Linux only; other platforms ignore it.
-    ports = sorted(
-        list_ports.comports(include_links=True),
-        key=lambda p: (not Path(p.device).is_symlink(), p.device),
-    )
-    cu = {p.device for p in ports if p.device.startswith("/dev/cu.")}
     return {
         "status": "success",
-        "choices": [
-            {"value": p.device, "detail": _port_detail(p)}
-            for p in ports
-            # macOS pseudo ports, and tty.* twins of cu.* (cu doesn't wait on carrier).
-            if "Bluetooth" not in p.device
-            and "debug-console" not in p.device
-            and "/dev/cu." + p.device.removeprefix("/dev/tty.") not in cu
-        ],
+        "choices": [{"value": p.device, "detail": _port_detail(p)} for p in _serial_ports()],
     }
 
 
@@ -1353,6 +1466,5 @@ ALL_ACTIONS = [
     scan_device,
     verify_map,
     auto_config,
-    find_device,
     list_serial_ports,
 ]

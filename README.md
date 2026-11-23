@@ -186,24 +186,26 @@ Wire order of a 32-bit value, A = most significant byte.
 | `big_swap` | CD AB | Modicon/Schneider PLCs |
 | `little_swap` | BA DC | |
 
-## Scan
+## Find and scan
 
-Point scan at an unknown device to find its unit IDs, identity, valid address ranges, and a draft register map. Scan only reads (FC 01-04, 43/14, 17). Some devices clear latched alarms or counters on read; review before scanning production equipment.
+`discover` finds devices; `scan` maps one. Both only read (FC 01-04, 43/14, 17).
 
 ```bash
+uv run main.py discover                                     # every serial port and 127.0.0.1:502
+uv run main.py discover --serial-ports /dev/ttyUSB0 --baudrates 19200 --formats 8E1
 uv run main.py scan 192.168.1.100 --out draft.json         # JSON report on stdout
-uv run main.py scan /dev/ttyUSB0 -t rtu --autodetect --units 1-10
 uv run main.py verify 192.168.1.100 registers.json --unit 3  # exits 1 on any problem
 ```
 
-The draft lists every readable address as a raw `uint16` / `bool`, read-only; set datatypes, byte order and scaling from the datasheet.
+`discover` searches whatever is left empty: serial ports x baudrates x formats x unit IDs, and TCP hosts, one read per try. It stops at the first device, or at `--max-devices`, and reports per port and setting how many requests went out and how many bytes came back.
+
+`scan` reports a device's unit IDs, identity and valid address ranges, with a draft map that lists every readable address as a raw `uint16` / `bool`, read-only; set datatypes, byte order and scaling from the datasheet. Some devices clear latched alarms or counters on read; review before scanning production equipment.
 
 With the extension stopped, the same runs as actions:
 
 | Action | Description |
 |--------|-------------|
-| `auto_config` | The config form's Auto-configure: finds units on each connection and adds them, SunSpec where detected |
-| `find_device` | RTU: search serial ports, baudrates, data formats and unit IDs for a device; fill in what is known |
+| `auto_config` | The config form's Auto-configure, and `discover`: finds devices and adds them to the config, SunSpec where detected |
 | `scan_device` | Full scan of a host or serial port; slow |
 | `verify_map` | Check a map file against the device register by register |
 | `list_serial_ports` | Serial ports on the agent's machine |

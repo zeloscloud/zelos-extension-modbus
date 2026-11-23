@@ -1,9 +1,10 @@
 """Read-only device discovery (scan) and register-map verification.
 
-Pipeline per device: S0 reach (unit sweep; RTU serial autodetect), S1 identify
-(FC 43/14, FC 17), SunSpec marker detection, S3 valid ranges per table, S5 emit
-a draft register map plus a report. ``verify_map`` reads every register of an
-existing map. Nothing is inferred from values: the draft lists each readable
+``discover`` finds devices: one search over links x serial settings x unit ids,
+one read per try. ``scan`` maps a device: S0 the same search on one link, S1
+identify (FC 43/14, FC 17), SunSpec marker detection, S3 valid ranges per table,
+S5 emit a draft register map plus a report. ``verify_map`` reads every register
+of an existing map. Nothing is inferred from values: the draft lists each readable
 address as a raw uint16 word or bool, and the user sets datatypes, byte order
 and scaling from the datasheet, as common Modbus tools do.
 
@@ -35,11 +36,12 @@ import re
 import time
 from collections import Counter
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from pymodbus.exceptions import ModbusException
+from pymodbus.framer import FramerRTU
 
 from zelos_extension_modbus.client import (
     EXCEPTION_NAMES,
@@ -89,39 +91,47 @@ CONNECT_TIMEOUT = max(3.0, MIN_CONNECT_TIMEOUT)
 #: (from at least GAP_STEP_MS) up to MAX_GAP_MS; SPEED_UP_AFTER replies in a
 #: row halve it back toward the start gap.
 RTU_DELAY_MS = 50
+#: The gap after a probe that met silence: the bus sat idle for its whole timeout.
+SILENT_GAP_MS = 5
 GAP_STEP_MS = 10
 MAX_GAP_MS = 500
 SLOW_AFTER = 2
 SPEED_UP_AFTER = 20
-#: Timeouts that mark a link (scan: with nothing heard at all) or unit (in a row) silent.
+#: Requests in a row with no response that mark a link silent.
 SILENT_AFTER = 16
 #: verify_map's default wall clock, the verify action's longest.
 VERIFY_MAX_SECONDS = 840.0
 
-TCP_UNITS = (1, 0, 255)  # tried after the configured unit
+TCP_UNITS = (1, 0, 255)  # tried after the configured unit; a direct device answers any id
 RTU_UNITS = range(1, 248)
-QUICK_UNITS = (*range(1, 11), 247)  # the ids devices ship with; seconds, not minutes
+#: Unit ids devices ship with (1: about 70% of vendor defaults), tried on every
+#: serial setting before any other id.
+LIKELY_UNITS = (1, 247, 2, 3, 10)
+#: Tried next: installers number from 1.
+LOW_UNITS = range(1, 33)
+#: Tried on a link that answered before max_devices can end the search (under 2 s).
+QUICK_UNITS = (*range(1, 11), 247)
 TCP_WINDOWS = ((0, 65535),)
 RTU_WINDOWS = ((0, 9999), (30000, 30999), (40000, 40999), (50000, 50999))
 
-#: Chipkin trial order: (baudrate, parity, stopbits).
+#: Serial settings, most common vendor default first: (baudrate, parity, stopbits).
 SERIAL_COMBOS = (
     (9600, "N", 1),
-    (9600, "E", 1),
-    (19200, "N", 1),
     (19200, "E", 1),
-    (38400, "N", 1),
+    (19200, "N", 1),
     (115200, "N", 1),
+    (9600, "E", 1),
+    (38400, "N", 1),
+    (9600, "N", 2),
+    (38400, "E", 1),
 )
-AUTODETECT_UNITS = (1, 2, 247)  # tried after the configured unit
-#: Find Device: what an empty dimension searches. (parity, stopbits); RTU is 8 data bits.
-FIND_BAUDRATES = (9600, 19200, 38400, 57600, 115200)
-FIND_FORMATS = (("N", 1), ("E", 1), ("O", 1), ("N", 2))
+#: What an unpinned search covers, after SERIAL_COMBOS. (parity, stopbits); RTU is 8 data bits.
+BAUDRATES = (9600, 19200, 38400, 57600, 115200)
+FORMATS = (("N", 1), ("E", 1), ("O", 1), ("N", 2))
 
 #: Per-stage (max requests, max seconds) per device.
 BUDGETS: dict[str, tuple[int, float]] = {
-    "autodetect": (60, 60.0),
-    "reach": (600, 300.0),
+    "search": (1000, 150.0),
     "identify": (20, 15.0),
     "ranges": (30000, 900.0),
 }
@@ -157,6 +167,10 @@ class BudgetExceeded(Exception):
 
 class DeadlineReached(BudgetExceeded):
     """max_seconds ran out: stop every stage and unit, keep what was found."""
+
+
+class LinkLost(Exception):
+    """The link dropped and would not reopen."""
 
 
 class Unsupported(Exception):
@@ -203,6 +217,16 @@ class ScanLink:
         self.timeouts = 0
         self.silent = 0  # no responses in a row
         self.answered: set[int] = set()  # units heard from (a gateway 0A/0B is not)
+        self.units: list[int] = []  # devices a search found here
+        self.gateway = False  # a 0A/0B reply was seen
+        self.late: set[int] = set()  # RTU units whose frame came while another was asked
+        self.rx = 0  # bytes received
+        self._seen = 0  # bytes of pymodbus's receive buffer already counted
+        self._asked = 0
+        self._idle = False  # the last probe met silence
+        #: Evidence per label (endpoint and serial setting): requests, bytes, valid replies.
+        self.rows: dict[str, dict[str, int]] = {}
+        self.row = self._row()
         self.by_fc: Counter[int] = Counter()
         self.conn: ModbusConnection | None = None
         self._stage: list[Any] | None = None  # [name, requests left, deadline]
@@ -211,13 +235,43 @@ class ScanLink:
     def label(self) -> str:
         e = self.endpoint
         if e.get("transport") == Transport.RTU:
-            return f"{e['serial_port']}@{e.get('baudrate', 9600)} {e.get('parity', 'N')}"
+            fmt = f"{e.get('bytesize', 8)}{e.get('parity', 'N')}{e.get('stopbits', 1)}"
+            return f"{e['serial_port']} {e.get('baudrate', 9600)} {fmt}"
         return f"{e.get('host')}:{e.get('port', 502)}"
+
+    def _row(self) -> dict[str, int]:
+        zero = {"requests": 0, "bytes_received": 0, "replies": 0}
+        return self.rows.setdefault(self.label, zero)
+
+    def _trace(self, sending: bool, data: bytes) -> bytes:
+        """pymodbus's packet hook: count bytes received, note a late RTU reply.
+
+        Received ``data`` is pymodbus's buffer, which grows until a frame is
+        taken from it. A valid frame from a unit other than the one asked is a
+        reply that came after its own probe timed out (or another master).
+        """
+        if sending:
+            self._seen, self._asked = 0, data[0]
+            return data
+        new = len(data) - self._seen if len(data) >= self._seen else len(data)
+        self._seen = len(data)
+        self.rx += new
+        self.row["bytes_received"] += new
+        if (
+            self.endpoint.get("transport") == Transport.RTU
+            and len(data) >= 5
+            and data[0] != self._asked
+            and not (data[1] & 0x80 and data[2] in GATEWAY_ABSENT)
+            and FramerRTU.check_CRC(data[:-2], int.from_bytes(data[-2:], "big"))
+        ):
+            self.late.add(data[0])
+        return data
 
     async def open(self, **changes: Any) -> bool:
         """(Re)open the link, optionally with changed serial settings."""
         await self.close()
         self.endpoint.update(changes)
+        self.row = self._row()
         self.conn = ModbusConnection(
             **self.endpoint,
             timeout=self.timeout,
@@ -225,6 +279,8 @@ class ScanLink:
             request_delay_ms=self.delay_ms,
             connect_timeout=self._connect_timeout(),
         )
+        self.conn.keep_open = True  # silence is expected: no reopen every few tries
+        self.conn.trace_packet = self._trace
         return await self.conn.connect()
 
     def _connect_timeout(self) -> float:
@@ -280,18 +336,27 @@ class ScanLink:
         if self._stage:
             self._stage[1] -= 1
         self.requests += 1
+        self.row["requests"] += 1
         self.by_fc[fc] += 1
         self.conn.connect_timeout = self._connect_timeout()  # a reconnect inside
+        idle = self.probe_timeout and self._idle
+        self.conn.request_delay_ms = min(SILENT_GAP_MS, self.delay_ms) if idle else self.delay_ms
         timeout = self.probe_timeout
         if timeout and self.endpoint.get("transport") == Transport.RTU:
             timeout += 15 * 11 / self.endpoint.get("baudrate", 9600)  # both frames on the wire
+            # Windows: the loop clock ticks at 15.6 ms and a timer fires up to a tick early.
+            timeout += time.get_clock_info("monotonic").resolution
+        heard = self.rx
         try:
             response = await self.conn.request(method, unit, timeout=timeout, **kwargs)
         except (ModbusException, OSError):
             self.timeouts += 1
             self.silent += 1
+            self._idle = self.rx == heard
             self._missed(unit)
             return Reply()  # no response
+        self._idle = False
+        self.row["replies"] += 1
         exc = getattr(response, "exception_code", -1) if response.isError() else None
         self.silent = self.silent + 1 if exc in GATEWAY_ABSENT else 0
         if exc in GATEWAY_ABSENT:
@@ -328,7 +393,6 @@ class ScanLink:
     def _set_gap(self, ms: int) -> None:
         self._misses = self._replies = 0
         self.delay_ms = ms
-        self.conn.request_delay_ms = ms
 
     async def read(self, table: str, unit: int, address: int, count: int) -> Reply:
         """Read ``count`` addresses of ``table``; exception 01 raises Unsupported."""
@@ -414,51 +478,253 @@ def parse_formats(text: str) -> list[tuple[str, int]]:
 
 
 # ---------------------------------------------------------------------------
-# S0 reach
+# S0 search: links x serial settings x unit ids
 # ---------------------------------------------------------------------------
 
 
-async def probe_unit(link: ScanLink, unit: int) -> str:
-    """FC03 @0 x1: 'present' (any reply), 'gateway_absent' (0A/0B) or 'timeout'."""
-    reply = await link.request("read_holding_registers", unit, address=0, count=1)
+def serial_settings(
+    baudrates: list[int] | None = None,
+    formats: list[tuple[str, int]] | None = None,
+    first: tuple[int, str, int] | None = None,
+) -> list[tuple[int, str, int]]:
+    """(baudrate, parity, stopbits) to try, in order: ``first``, the common, the rest.
+
+    Listed ``baudrates`` or ``formats`` are the only ones tried.
+    """
+    grid = [(b, *f) for b in baudrates or BAUDRATES for f in formats or FORMATS]
+    pinned = baudrates or formats
+    order = [first] if first and (first in grid or not pinned) else []
+    return list(dict.fromkeys([*order, *(c for c in SERIAL_COMBOS if c in grid), *grid]))
+
+
+def unit_stages(
+    units: list[int] | None, first: list[int] | tuple[int, ...] = ()
+) -> list[list[int]]:
+    """Unit ids in the order tried: ``first`` and the likely, then the low, then the rest.
+
+    Listed ``units`` are the only ones tried.
+    """
+    left = list(dict.fromkeys(units or RTU_UNITS))
+    stages = []
+    for tier in ([*first, *LIKELY_UNITS], LOW_UNITS, left):
+        stages.append([u for u in dict.fromkeys(tier) if u in left])
+        left = [u for u in left if u not in stages[-1]]
+    return [s for s in stages if s]
+
+
+@dataclass
+class Search:
+    """One search's knobs and results, shared by its links."""
+
+    table: str = RegisterType.HOLDING
+    address: int = 0  # the wire address every try reads
+    probe_timeout: float | None = None  # RTU; default PROBE_TIMEOUT
+    max_devices: int = 1  # 0: every device
+    found: list[dict[str, Any]] = field(default_factory=list)
+    unopened: list[str] = field(default_factory=list)  # with the reason
+    lost: list[str] = field(default_factory=list)  # links that dropped; not searched further
+    cut: list[str] = field(default_factory=list)  # links the time limit stopped
+    malformed: int = 0  # replies with no values: an adapter echoing the request
+
+    @property
+    def enough(self) -> bool:
+        return bool(self.max_devices) and len(self.found) >= self.max_devices
+
+    def hit(self, link: ScanLink, unit: int, reply: str) -> None:
+        if unit not in link.units:
+            link.units.append(unit)
+            self.found.append({**link.endpoint, "at": link.label, "unit_id": unit, "reply": reply})
+
+
+async def _probe(link: ScanLink, unit: int, s: Search) -> bool:
+    """One read of the probe register; True when ``unit`` answered.
+
+    Any valid reply counts, an exception too: it proves the link, the settings
+    and the unit id. Not a gateway's 0A/0B, nor a reply with no values.
+    """
+    reply = await link.request(READ_METHODS[s.table], unit, address=s.address, count=1)
+    while link.late:
+        s.hit(link, link.late.pop(), "answered after the probe timeout")
     if reply.response is None:
-        return "timeout"
-    return "gateway_absent" if reply.exc in GATEWAY_ABSENT else "present"
+        if not link.conn.connected and not await link.conn.ensure_connected():
+            raise LinkLost
+        return False
+    if reply.exc in GATEWAY_ABSENT:
+        link.gateway = True
+        return False
+    if reply.exc is None:
+        if reply.values is None:
+            s.malformed += 1
+            return False
+        s.hit(link, unit, f"{s.table} {s.address + 1} = {reply.values[0]}")
+    else:
+        name = EXCEPTION_NAMES.get(reply.exc, "unknown code")
+        s.hit(link, unit, f"exception {reply.exc:02X} ({name})")
+    return True
 
 
-async def find_units(link: ScanLink, units: list[int], limit: int = 0) -> dict[str, Any]:
-    """Probe ``units``. ``limit``: stop once that many are present (``stopped_at``); 0 tries all."""
-    found: dict[str, Any] = {"present": [], "gateway_absent": []}
-    timeouts = 0
-    for unit in units:
-        status = await probe_unit(link, unit)
-        if status == "timeout":
-            timeouts += 1
-            continue
-        found[status].append(unit)
-        if limit and len(found["present"]) >= limit and unit != units[-1]:
-            return found | {"silent": False, "stopped_at": unit}
-    heard = found["present"] or found["gateway_absent"]
-    return found | {"silent": not heard and timeouts >= SILENT_AFTER}
+async def _search_serial(
+    link: ScanLink, target: dict[str, Any], units: list[int] | None, s: Search
+) -> None:
+    """One serial port: each stage of unit ids on each setting, until a setting answers.
 
-
-async def autodetect_serial(
-    link: ScanLink, units: list[int], combos: tuple[tuple[int, str, int], ...] = SERIAL_COMBOS
-) -> dict[str, Any] | None:
-    """Try the link's own serial settings, then ``combos``; the first reply wins.
-
-    The link stays open on the winning settings.
+    One bus has one setting, so the first reply drops the other settings and
+    every unit id is tried there. With one setting to try, the likely units are
+    tried twice: a first frame can be what wakes a device.
     """
     e = link.endpoint
     own = (e.get("baudrate", 9600), e.get("parity", "N"), e.get("stopbits", 1))
-    for baudrate, parity, stopbits in dict.fromkeys((own, *combos)):
-        settings = {"baudrate": baudrate, "parity": parity, "stopbits": stopbits}
-        if not await link.open(**settings):
-            return None
-        for unit in units:
-            if await probe_unit(link, unit) != "timeout":
-                return {**settings, "unit_id": unit}
-    return None
+    settings = target.get("settings") or [own]
+    stages = unit_stages(units, target.get("first", ()))
+    order = [u for stage in stages for u in stage]
+    if len(settings) == 1:
+        stages[0] = stages[0] * 2
+    opened = False
+    for stage in stages:
+        for baudrate, parity, stopbits in settings:
+            if s.enough:
+                return
+            setting = {"baudrate": baudrate, "parity": parity, "stopbits": stopbits}
+            if not await link.open(**setting):
+                at, why = link.label, link.conn.connect_error
+                # The port or the setting? Any working port opens at 9600 8N1.
+                if not opened and not await link.open(baudrate=9600, parity="N", stopbits=1):
+                    found = await asyncio.to_thread(diagnose_serial_port, e["serial_port"])
+                    why = why or "".join(f": {finding}" for finding in found[:1])
+                    s.unopened.append(f"{e['serial_port']}{why}")
+                    return
+                opened = True
+                if at not in s.unopened:
+                    s.unopened.append(at)
+                continue
+            opened = True
+            tried = set()
+            for unit in stage:
+                if s.enough:
+                    return
+                tried.add(unit)
+                await _probe(link, unit, s)
+                if link.units:
+                    break
+            if not link.units:
+                continue
+            done = tried | {u for earlier in stages[: stages.index(stage)] for u in earlier}
+            quick = [u for u in QUICK_UNITS if u in order]
+            for unit in dict.fromkeys([*quick, *order]):
+                if s.enough and unit not in quick:
+                    return
+                if unit not in done:
+                    await _probe(link, unit, s)
+            return
+
+
+async def _search_tcp(
+    link: ScanLink, target: dict[str, Any], units: list[int] | None, s: Search
+) -> None:
+    """One TCP endpoint.
+
+    Unlisted units: a direct device answers any id, so the first of the
+    configured unit, 1, 0 and 255 to answer is the device. A gateway's 0A/0B, or
+    no answer at all, means units behind it: every id is tried.
+    """
+    if not await link.open():
+        s.unopened.append(f"{link.label}{link.conn.connect_error}")
+        return
+    short = [] if units else list(dict.fromkeys([*target.get("first", ()), *TCP_UNITS]))
+    for unit in short:
+        if s.enough:
+            return
+        await _probe(link, unit, s)
+    if link.units and not link.gateway and not units:
+        for extra in [f for f in s.found if f["at"] == link.label][1:]:
+            s.found.remove(extra)  # the same device under another id
+        del link.units[1:]
+        return
+    for unit in (u for stage in unit_stages(units, short) for u in stage if u not in short):
+        if s.enough:
+            return
+        await _probe(link, unit, s)
+
+
+async def _search(
+    link: ScanLink, target: dict[str, Any], units: list[int] | None, s: Search
+) -> None:
+    """Search one link; it stays open on the setting that answered."""
+    rtu = link.endpoint.get("transport") == Transport.RTU
+    link.probe_timeout = (s.probe_timeout or PROBE_TIMEOUT) if rtu else None  # TCP: the link's
+    try:
+        await (_search_serial if rtu else _search_tcp)(link, target, units, s)
+    except LinkLost:
+        s.lost.append(link.label)
+    finally:
+        link.probe_timeout = None
+
+
+async def _discover_link(
+    link: ScanLink, target: dict[str, Any], units: list[int] | None, s: Search
+) -> None:
+    """Search one link, then identify what it found (its own budget, past the time limit)."""
+    try:
+        try:
+            await _search(link, target, units, s)
+        except BudgetExceeded:
+            s.cut.append(link.label)
+        link.deadline = None
+        for device in [f for f in s.found if f["at"] == link.label]:
+            if link.label in s.lost:
+                break
+            with contextlib.suppress(BudgetExceeded), link.stage("identify"):
+                device["identity"] = await identify(link, device["unit_id"])
+                if (base := await detect_sunspec(link, device["unit_id"])) is not None:
+                    device["sunspec"] = base + 1
+    finally:
+        await link.close()
+
+
+async def discover(
+    targets: list[dict[str, Any]],
+    *,
+    units: list[int] | None = None,
+    probe: tuple[str, int] = (RegisterType.HOLDING, 0),
+    probe_timeout: float | None = None,
+    max_devices: int = 1,
+    max_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Find devices: every target at once (separate links), one read per try.
+
+    A target is a link's ``endpoint`` kwargs plus, optionally, ``settings``
+    (RTU: the ``serial_settings`` to try, default the endpoint's own) and
+    ``first`` (unit ids tried first). ``units`` lists the only ids to try;
+    ``probe`` is the (table, wire address) every try reads. The search ends
+    once ``max_devices`` answered (0: never), after QUICK_UNITS on that link,
+    or at ``max_seconds``; what was found by then is returned, with the
+    evidence per endpoint and setting in ``tried``.
+    """
+    s = Search(*probe, probe_timeout, max_devices)
+    started = time.monotonic()
+    keys = ("settings", "first")
+    links = [
+        ScanLink({k: v for k, v in t.items() if k not in keys}, max_seconds=max_seconds)
+        for t in targets
+    ]
+    await asyncio.gather(
+        *(_discover_link(link, t, units, s) for link, t in zip(links, targets, strict=True))
+    )
+    return {
+        "found": s.found,
+        "tried": [
+            {"at": at, "link": link.endpoint.get("serial_port") or link.label, **row}
+            for link in links
+            for at, row in link.rows.items()
+            if row["requests"]
+        ],
+        "unopened": s.unopened,
+        "lost": s.lost,
+        "cut": s.cut,
+        "malformed": s.malformed,
+        "requests": sum(link.requests for link in links),
+        "elapsed_s": round(time.monotonic() - started, 2),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -786,66 +1052,15 @@ async def scan_device(
     return device, draft
 
 
-async def _reach(
-    link: ScanLink,
-    report: dict[str, Any],
-    units: list[int] | None,
-    autodetect: bool,
-    configured_unit: int | None,
-    quick: bool = False,
-    limit: int = 0,
-) -> list[int]:
-    """S0: open the link (autodetecting serial settings) and find the units.
-
-    Without ``units``: TCP probes the configured unit, 1, 0 and 255 and keeps
-    the first to answer (a direct device answers any id); a 0A/0B reply (a
-    gateway) or no answer at all falls through to a sweep. RTU sweeps. A sweep
-    covers the configured unit, 1-10 and 247, then (not ``quick``) the rest of
-    1-247, and stops once ``limit`` units answer (0: never). Listed ``units``
-    are all tried.
-    """
-    rtu = link.endpoint.get("transport") == Transport.RTU
-    first = [configured_unit] if configured_unit is not None else []
-    if autodetect and rtu:
-        if not await link.open():  # no settings help a port that won't open
-            report |= {"serial": None, "error": f"cannot open {link.label}"}
-            return []
-        with link.stage("autodetect"):
-            # the first listed units too: a listed unit must be able to prove the settings
-            likely = list(dict.fromkeys(first + (units or [])[:3] + list(AUTODETECT_UNITS)))
-            report["serial"] = await autodetect_serial(link, likely)
-        if not report["serial"]:
-            return []
-    elif not await link.open():
-        report["error"] = f"cannot open {link.label}{link.conn.connect_error}"
-        return []
-    report["endpoint"] = link.label
-    # the ids devices ship with go first
-    wide = list(dict.fromkeys(first + list(QUICK_UNITS) + ([] if quick else list(RTU_UNITS))))
-    sweep = units or (wide if rtu else list(dict.fromkeys(first + list(TCP_UNITS))))
-    with link.stage("reach"):
-        found = await find_units(link, sweep, limit if rtu and not units else 0)
-        if not units and not rtu:
-            if found["gateway_absent"] or not found["present"]:
-                found = await find_units(link, wide, limit)
-            else:
-                found["present"] = found["present"][:1]
-    report["units"] = found
-    return found["present"]
-
-
 async def _finish(link: ScanLink, report: dict[str, Any], started: float) -> None:
-    """Close the link; add serial diagnostics for a silent RTU link, and totals."""
+    """Close the link; add serial diagnostics when nothing came back, and totals."""
     await link.close()
-    unanswered = link.timeouts == link.requests >= SILENT_AFTER  # a sweep cut short too
-    silent = (
-        unanswered or report.get("units", {}).get("silent") or report.get("serial", True) is None
-    )
-    if link.endpoint.get("transport") == Transport.RTU and silent:
+    if link.endpoint.get("transport") == Transport.RTU and not link.rx:
         report["diagnostics"] = await asyncio.to_thread(
             diagnose_serial_port, link.endpoint["serial_port"]
         )
     report |= {
+        "tried": [{"at": at, **row} for at, row in link.rows.items() if row["requests"]],
         "requests": link.requests,
         "requests_by_fc": {f"{fc:02d}": n for fc, n in sorted(link.by_fc.items())},
         "no_response": link.timeouts,
@@ -865,16 +1080,14 @@ async def scan(
     max_seconds: float | None = None,
     autodetect: bool = False,
     configured_unit: int | None = None,
-    max_devices: int = 1,
-    probe_timeout: float | None = PROBE_TIMEOUT,
 ) -> dict[str, Any]:
     """Scan one endpoint: ``{"report": ..., "maps": {unit id: draft map}}``.
 
     ``endpoint`` holds ModbusConnection link kwargs (transport, host/port or
-    serial settings). Units as in ``_reach``: a full sweep that stops once
-    ``max_devices`` answer (0: every unit id), each RTU try waiting
-    ``probe_timeout`` (TCP and the scan itself wait ``timeout``). ``windows``
-    are inclusive wire pairs, defaulting per transport.
+    serial settings). Every device the search finds is scanned: listed
+    ``units``, else every unit id (TCP: as ``_search_tcp``); ``autodetect``
+    (RTU) also searches the serial settings. ``windows`` are inclusive wire
+    pairs, defaulting per transport.
     """
     rtu = endpoint.get("transport") == Transport.RTU
     link = ScanLink(endpoint, timeout=timeout, delay_ms=delay_ms, max_seconds=max_seconds)
@@ -882,11 +1095,25 @@ async def scan(
     report: dict[str, Any] = {"endpoint": link.label, "transport": endpoint.get("transport")}
     cutoffs: list[dict[str, Any]] = []
     maps: dict[int, dict[str, Any]] = {}
+    s = Search(max_devices=0)
+    own = (endpoint.get("baudrate", 9600), endpoint.get("parity", "N"), endpoint.get("stopbits", 1))
+    target = {
+        "settings": serial_settings(first=own) if autodetect else [own],
+        "first": [] if configured_unit is None else [configured_unit],
+    }
     try:
-        link.probe_timeout = probe_timeout if rtu else None  # TCP: network and gateway delays
-        present = await _reach(link, report, units, autodetect, configured_unit, limit=max_devices)
-        link.probe_timeout = None
-        for unit in present:
+        try:
+            with link.stage("search"):
+                await _search(link, target, units, s)
+        except BudgetExceeded as e:  # what answered so far is still scanned
+            cutoffs.append({"stage": "search", "reason": str(e)})
+        report["endpoint"] = link.label  # the setting that answered
+        report["units"] = {"present": list(link.units)}
+        if s.unopened:
+            report["error"] = f"cannot open {s.unopened[0]}"
+        if s.lost:
+            report["error"] = f"{link.label}: the link dropped"
+        for unit in link.units:
             if link.expired:
                 break  # the cutoff is already recorded
             device, draft = await scan_device(
@@ -903,163 +1130,8 @@ async def scan(
         cutoffs.append({"stage": "scan", "reason": str(e)})
     finally:
         await _finish(link, report, started)
-    report |= {"cutoffs": cutoffs, "notes": NOTES}
+    report |= {"cutoffs": cutoffs, "notes": NOTES if maps else []}
     return {"report": report, "maps": maps}
-
-
-async def sweep(
-    endpoint: dict[str, Any],
-    *,
-    autodetect: bool = False,
-    configured_unit: int | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
-    delay_ms: int | None = None,
-    max_seconds: float | None = None,
-) -> dict[str, Any]:
-    """Quick S0 (configured unit, 1-10, 247), identity and the SunSpec marker per unit."""
-    link = ScanLink(endpoint, timeout=timeout, delay_ms=delay_ms, max_seconds=max_seconds)
-    started = time.monotonic()
-    report: dict[str, Any] = {"endpoint": link.label, "identity": {}, "sunspec": {}}
-    cutoffs: list[dict[str, Any]] = []
-    try:
-        for unit in await _reach(link, report, None, autodetect, configured_unit, quick=True):
-            report["identity"][unit] = {}
-            try:
-                with link.stage("identify"):
-                    report["identity"][unit] = await identify(link, unit)
-                    if (base := await detect_sunspec(link, unit)) is not None:
-                        report["sunspec"][unit] = base + 1
-            except DeadlineReached:
-                raise
-            except BudgetExceeded as e:  # this unit's identify budget; the next unit gets its own
-                cutoffs.append({"stage": "identify", "unit_id": unit, "reason": str(e)})
-    except BudgetExceeded as e:
-        cutoffs.append({"stage": "sweep", "reason": str(e)})
-    finally:
-        await _finish(link, report, started)
-    report["cutoffs"] = cutoffs
-    return report
-
-
-async def find_devices(
-    ports: list[str],
-    baudrates: list[int] | None = None,
-    formats: list[tuple[str, int]] | None = None,
-    units: list[int] | None = None,
-    *,
-    find_all: bool = False,
-    max_seconds: float | None = None,
-    probe_timeout: float = PROBE_TIMEOUT,
-) -> dict[str, Any]:
-    """Search serial ports x serial settings x unit ids for RTU devices, one FC03 read each.
-
-    A silent try costs ``probe_timeout``, so the common comes first: unit ids
-    1, 2 and 247 on every port and setting, then 3-10, then the rest, and in
-    each pass the SERIAL_COMBOS settings before the others. A device on a
-    common id is not stuck behind a 247-unit sweep of a wrong baudrate. A hit
-    is a value or a non-gateway exception; any other reply (an adapter echoing
-    the request) counts as malformed. The first hit ends the search unless
-    ``find_all``, which goes on but tries no other setting on a port that
-    answered: one bus has one setting.
-    """
-    grid = [(b, *f) for b in baudrates or FIND_BAUDRATES for f in formats or FIND_FORMATS]
-    settings = [s for s in SERIAL_COMBOS if s in grid] + [s for s in grid if s not in SERIAL_COMBOS]
-    batches, left = [], list(dict.fromkeys(units or RTU_UNITS))
-    for tier in (AUTODETECT_UNITS, QUICK_UNITS):
-        batches.append([u for u in left if u in tier])
-        left = [u for u in left if u not in tier]
-    batches.append(left)
-    started = time.monotonic()
-    links = {p: ScanLink(endpoint(p, Transport.RTU), max_seconds=max_seconds) for p in ports}
-    for each in links.values():
-        each.probe_timeout = probe_timeout
-    report: dict[str, Any] = {
-        "found": [],
-        "unopened": [],  # a port, or "port baudrate format" when only that setting won't open
-        "lost": [],  # where a link dropped; the rest of that port is not searched
-        "malformed": 0,
-        "stopped_at": None,
-    }
-    answered: dict[str, tuple[int, str, int]] = {}  # port -> the setting it answers on
-    opened: set[str] = set()
-    dead: set[str] = set()  # ports out of the search: won't open, or lost
-    link = None
-
-    async def search() -> None:
-        nonlocal link
-        for batch in filter(None, batches):
-            for port in ports:
-                for setting in [answered[port]] if port in answered else settings:
-                    baudrate, parity, stopbits = setting
-                    at = f"{port} {baudrate} 8{parity}{stopbits}"
-                    if port in dead:
-                        break
-                    if at in report["unopened"]:
-                        continue
-                    if link:
-                        await link.close()
-                    link = links[port]
-                    report["stopped_at"] = at
-                    link.check()
-                    if not await link.open(baudrate=baudrate, parity=parity, stopbits=stopbits):
-                        # The port or the setting? Any working port opens at 9600 8N1.
-                        if port not in opened and not await link.open(
-                            baudrate=9600, parity="N", stopbits=1
-                        ):
-                            dead.add(port)
-                            report["unopened"].append(port)
-                            break
-                        opened.add(port)
-                        report["unopened"].append(at)
-                        continue
-                    opened.add(port)
-                    for unit in batch:
-                        report["stopped_at"] = f"{at} unit {unit}"
-                        reply = await link.request(
-                            "read_holding_registers", unit, address=0, count=1
-                        )
-                        if reply.response is None and not link.conn.connected:
-                            dead.add(port)  # unplugged: later tries would send nothing
-                            report["lost"].append(f"{at} unit {unit}")
-                            break
-                        if reply.response is None or reply.exc in GATEWAY_ABSENT:
-                            continue
-                        if reply.exc is None and reply.values is None:
-                            report["malformed"] += 1
-                            continue
-                        answered[port] = setting
-                        report["found"].append(
-                            {
-                                "serial_port": port,
-                                "baudrate": baudrate,
-                                "parity": parity,
-                                "stopbits": stopbits,
-                                "unit_id": unit,
-                                "reply": f"holding register 1 = {reply.values[0]}"
-                                if reply.exc is None
-                                else f"exception {reply.exc:02X} "
-                                f"({EXCEPTION_NAMES.get(reply.exc, 'unknown code')})",
-                            }
-                        )
-                        if not find_all:
-                            return
-                    if port in answered:
-                        break
-        report["stopped_at"] = None
-
-    try:
-        await search()
-    except BudgetExceeded:
-        pass  # stopped_at says where
-    finally:
-        if link:
-            await link.close()
-    if report["found"] and not find_all:
-        report["stopped_at"] = None  # the first hit is a full answer
-    return report | {
-        "requests": sum(x.requests for x in links.values()),
-        "elapsed_s": round(time.monotonic() - started, 2),
-    }
 
 
 # ---------------------------------------------------------------------------
