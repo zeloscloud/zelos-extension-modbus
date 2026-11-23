@@ -287,7 +287,8 @@ class ScanLink:
             return True
         # A setting refused after the port opened leaves pyserial's port in a reference
         # cycle, still holding the exclusive lock: every later open would fail.
-        gc.collect()
+        if self.endpoint.get("transport") == Transport.RTU:
+            gc.collect()
         return False
 
     def _connect_timeout(self) -> float:
