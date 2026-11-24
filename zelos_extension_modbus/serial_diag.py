@@ -366,6 +366,13 @@ def _read_attr(path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
+def port_holders(port: str) -> list[tuple[int, str]]:
+    """Other processes with ``port`` open, as (pid, name); Linux only, else empty."""
+    with contextlib.suppress(Exception):
+        return [h for h in dict.fromkeys(_scan_proc_holders(port)) if h[0] != os.getpid()]
+    return []
+
+
 def _probe_holders(port: str, findings: list[str], *, busy: bool) -> None:
     # lsof enumerates every fd on the system (seconds on macOS) — only worth it
     # when the open probe actually reported EBUSY.

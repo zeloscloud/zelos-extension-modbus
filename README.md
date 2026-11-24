@@ -194,11 +194,12 @@ Wire order of a 32-bit value, A = most significant byte.
 ```bash
 uv run main.py discover                                     # every serial port and 127.0.0.1:502
 uv run main.py discover --serial-ports /dev/ttyUSB0 --baudrates 19200 --formats 8E1
+uv run main.py discover --serial-ports /dev/ttyUSB0 --sweep --max-seconds 700   # every unit ID on every setting
 uv run main.py scan 192.168.1.100 --out draft.json         # JSON report on stdout
 uv run main.py verify 192.168.1.100 registers.json --unit 3  # exits 1 on any problem
 ```
 
-`discover` searches whatever is left empty: serial ports x baudrates x formats x unit IDs, and TCP hosts, one read per try. Baudrates, formats and unit IDs given are tried first, then the rest; serial ports and hosts given are the only ones searched. It stops at the first device, or at `--max-devices`, and reports per port and setting how many requests went out and how many bytes came back.
+`discover` searches whatever is left empty: serial ports x baudrates x formats x unit IDs, and TCP hosts, one read per try. Baudrates, formats and unit IDs given are tried first, then the rest; serial ports and hosts given are the only ones searched. It stops at the first device, or at `--max-devices`; until then it tries unit IDs 1, 247, 2, 3, 10 on every setting, then 1-32, up to the time limit. `--sweep` tries every unit ID on every setting of the ports named (about 10 min a port). The report says which unit IDs were tried on which settings, with the requests sent and bytes received.
 
 `scan` reports a device's unit IDs, identity and valid address ranges, with a draft map that lists every readable address as a raw `uint16` / `bool`, read-only; set datatypes, byte order and scaling from the datasheet.
 
