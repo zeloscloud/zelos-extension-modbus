@@ -153,8 +153,6 @@ DEVICE_ID_NAMES = {
 }
 
 NOTES = [
-    "Scan only reads, but some devices clear latched alarms or counters on read, "
-    "or expose FIFO registers. Review before scanning production equipment.",
     "Devices that answer unmapped addresses with 0 make every address look readable; "
     "the draft then lists them all.",
     "The draft lists raw uint16 words and bools. Set datatypes, byte order and scaling "
