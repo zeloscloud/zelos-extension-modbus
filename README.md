@@ -199,7 +199,7 @@ uv run main.py verify 192.168.1.100 registers.json --unit 3  # exits 1 on any pr
 
 `discover` searches whatever is left empty: serial ports x baudrates x formats x unit IDs, and TCP hosts, one read per try. Baudrates, formats and unit IDs given are tried first, then the rest; serial ports and hosts given are the only ones searched. It stops at the first device, or at `--max-devices`, and reports per port and setting how many requests went out and how many bytes came back.
 
-`scan` reports a device's unit IDs, identity and valid address ranges, with a draft map that lists every readable address as a raw `uint16` / `bool`, read-only; set datatypes, byte order and scaling from the datasheet. Some devices clear latched alarms or counters on read; review before scanning production equipment.
+`scan` reports a device's unit IDs, identity and valid address ranges, with a draft map that lists every readable address as a raw `uint16` / `bool`, read-only; set datatypes, byte order and scaling from the datasheet.
 
 With the extension stopped, the same runs as actions:
 
