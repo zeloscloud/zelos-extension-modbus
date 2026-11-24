@@ -247,8 +247,9 @@ class ScanLink:
         """pymodbus's packet hook: count bytes received, note a late RTU reply.
 
         Received ``data`` is pymodbus's buffer, which grows until a frame is
-        taken from it. A valid frame from a unit other than the one being asked
-        is a reply that came after its own probe timed out (or another master).
+        taken from it. A valid reply from a unit other than the one being asked
+        came after its own probe timed out. Another master's request has a valid
+        CRC too, but not a read reply's length byte.
         """
         if sending:
             self._seen, self._asked = 0, data[0]
@@ -261,6 +262,7 @@ class ScanLink:
             self.endpoint.get("transport") == Transport.RTU
             and len(data) >= 5
             and data[0] != self._asked
+            and (data[1] & 0x80 or data[2] == len(data) - 5)
             and not (data[1] & 0x80 and data[2] in GATEWAY_ABSENT)
             and FramerRTU.check_CRC(data[:-2], int.from_bytes(data[-2:], "big"))
         ):
