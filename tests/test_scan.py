@@ -299,8 +299,23 @@ class TestDiscover:
             ("a 19200 8E1", 4, "exception 02 (illegal data address)"),
             ("a 19200 8E1", 9, "holding 1 = 7"),
         ]
-        row = {"requests": 11, "bytes_received": 0, "replies": 2}
+        row = {"requests": 11, "bytes_received": 0, "replies": 2, "units": "1-10, 247"}
         assert got["tried"][1] == {"at": "a 19200 8E1", "link": "a", "transport": "rtu"} | row
+
+    def test_a_sweep_resumes_where_it_stopped_and_ends_with_the_setting_that_answers(self, bus):
+        target = [_serial("a", N, E)]
+        got, tried = bus({}, target, units=[1, 2, 3], skip=0, expire_after=5)
+        assert tried == [*[("a", *N, u) for u in (1, 2, 3)], ("a", *E, 1), ("a", *E, 2)]
+        assert got["sweep"] == {"done": 5, "of": 6} and got["tried"][1]["units"] == "1-2"
+        got, tried = bus({}, target, units=[1, 2, 3], skip=5)
+        assert tried == [("a", *E, 3)] and "sweep" not in got
+        got, tried = bus({("a", *N, 2): [7]}, target, units=[1, 2, 3], skip=0)
+        assert tried == [("a", *N, u) for u in (1, 2, 3)] and "sweep" not in got
+        assert [f["unit_id"] for f in got["found"]] == [2]
+        got, tried = bus({}, target, units=[1, 2, 3], skip=3, expire_after=3)
+        assert "sweep" not in got  # cut in the wait after the last try: finished
+        got, tried = bus({}, [_serial("bad", N, E), *target], units=[1, 2, 3], skip=0)
+        assert got["closed"] == ["bad"] and len(tried) == 6
 
     def test_first_values_lead_and_listed_units_bound_the_search(self, bus):
         got, tried = bus({}, [_serial("a", first=(40,))], units=[40, 41, 1])
@@ -428,12 +443,13 @@ class TestAutoConfig:
         """auto_config with ``discover`` faked: (call) -> (result, targets, knobs)."""
         from zelos_extension_modbus import actions, scan
 
-        seen = {}
+        seen = self._seen = {}
 
         async def fake_discover(targets, **knobs):
             seen.update(targets=targets, knobs=knobs)
-            empty = {"tried": [], "unopened": [], "lost": [], "cut": [], "malformed": 0}
-            empty["widened"] = []
+            empty = {"tried": [], "unopened": [], "closed": [], "lost": [], "cut": []}
+            empty |= {"malformed": 0}
+            empty |= {"widened": [], "requests": 0}
             return empty | {"found": [dict(f) for f in found]} | result
 
         monkeypatch.setattr(scan, "discover", fake_discover)
@@ -456,10 +472,10 @@ class TestAutoConfig:
             ({}, ["saved:1502"], 30),  # called without config: the saved one
             ({"config": {"connections": [RTU]}}, ["/dev/ttyX"], 60),
             # A serial connection with no port chosen: every listed port.
-            ({"config": {"connections": [{"transport": "rtu"}]}}, ["/dev/ttyA"], 30),
+            ({"config": {"connections": [{"transport": "rtu"}]}}, ["/dev/ttyA"], 60),
             # Named endpoints are the only ones searched.
             ({"serial_ports": "COM3", "hosts": "h:1502"}, ["COM3", "h:1502"], 60),
-            ({"transport": "rtu"}, ["/dev/ttyA"], 30),
+            ({"transport": "rtu"}, ["/dev/ttyA"], 60),
             ({"hosts": "10.0.0.0/30"}, ["10.0.0.1:502", "10.0.0.2:502"], 30),
         ],
     )
@@ -511,8 +527,12 @@ class TestAutoConfig:
         assert got["status"] == "success"
         assert got["message"] == (
             "/dev/ttyX 9600 8N1: found units 9 (Zelos ZSCAN-1), 2 (register_map set to sunspec); "
-            "added 2. h:502: found unit 1; added 1."
+            "added 2. h:502: found unit 1; added 1.\n"
+            "Other unit IDs there were not tried: Ask AI to scan them all."
         )
+        probe = {"probe_type": "holding", "probe_address": 1, "probe_timeout": 0.1}
+        at = {"serial_ports": "/dev/ttyX", "baudrates": "9600", "formats": "8N1"}
+        assert got["next"] == at | probe | {"max_devices": 0, "max_seconds": 240}
         assert got["config"]["connections"] == [
             {"transport": "rtu", "serial_port": "/dev/ttyX", "baudrate": 9600, "parity": "N"}
             | {
@@ -525,31 +545,70 @@ class TestAutoConfig:
             {"transport": "tcp", "host": "h", "port": 502, "devices": [{"unit_id": 1}]},
         ]
 
-    def test_nothing_found_says_what_each_link_saw_and_what_to_give(self, monkeypatch):
-        row = {"link": "COM3", "transport": "rtu", "requests": 252, "replies": 0}
+    def test_nothing_found_says_what_was_searched_and_how_to_go_deeper(self, monkeypatch):
+        from zelos_extension_modbus.actions import NOT_FOUND
+
+        row = {"link": "COM3", "transport": "rtu", "requests": 5, "replies": 0}
         tried = [
-            row | {"at": "COM3 9600 8N1", "bytes_received": 0},
+            row | {"at": "COM3 9600 8N1", "bytes_received": 0, "units": "1-3, 10, 247"},
+            row | {"at": "COM3 19200 8E1", "bytes_received": 40, "units": "1-3, 10, 247"},
             {"at": "h:502", "link": "h:502", "transport": "tcp", "requests": 4}
-            | {"bytes_received": 0, "replies": 0},
+            | {"bytes_received": 0, "replies": 0, "units": "0-1, 255"},
         ]
-        call = self._run(
-            monkeypatch, tried=tried, unopened=["b:502: connection refused"], widened=["COM3"]
-        )
-        got, _, _ = call(serial_ports="COM3", baudrates="9600", formats="8N1", hosts="h,b")
+        call = self._run(monkeypatch, tried=tried, unopened=["b:502: connection refused"])
+        got, _, _ = call(serial_ports="COM3", hosts="h,b", probe_address=40001)
         assert got["status"] == "error" and "config" not in got
-        assert got["message"] == (
-            "No device answered. COM3: 252 requests on 9600 8N1, nothing came back (check the "
-            "A/B wiring, power, the adapter, and that Modbus RTU is enabled on the device). "
-            "h:502: connected, no unit answered 4 requests. Couldn't open b:502: connection "
-            "refused. Nothing answered on the values given, so the rest was searched too. To "
-            "search further, give: the baudrate and format (e.g. 19200 8E1) from the datasheet "
-            "or the device; the unit ID (slave address); whether Modbus RTU is enabled on the "
-            "device, and a register it serves."
+        garbled = (
+            "bytes came back with no valid reply on COM3 19200 8E1 (40 bytes): a wrong "
+            "baudrate or format, another protocol, or noise"
         )
-        tried = [row | {"at": "COM3 9600 8N1", "bytes_received": 40}]
-        got, _, _ = self._run(monkeypatch, tried=tried)(serial_ports="COM3")
-        assert "Bytes came back with no valid reply on COM3 9600 8N1 (40 bytes)" in got["message"]
-        assert got["ask"][0].startswith("the baudrate and format")
+        assert got["errors"] == [garbled, "couldn't open b:502: connection refused"]
+        assert got["message"] == "\n".join([NOT_FOUND, *(f"Error: {e}" for e in got["errors"])])
+        assert got["coverage"] == [
+            "COM3: unit IDs 1-3, 10, 247 on 2 settings (10 requests, 40 bytes back)",
+            "h:502: unit IDs 0-1, 255 (4 requests, 0 bytes back)",
+        ]
+        probe = {"probe_type": "holding", "probe_address": 40001, "probe_timeout": 0.1}
+        assert got["next"] == {"serial_ports": "COM3", **probe, "sweep": True}
+
+    def test_a_sweep_call_fits_an_assistant_call_and_hands_over_the_next(self, monkeypatch):
+        from zelos_extension_modbus import actions
+
+        call = self._run(monkeypatch, sweep={"done": 1700, "of": 4940})
+        got, targets, knobs = call(serial_ports="COM3", baudrates="1200", sweep=True, skip=9)
+        assert (knobs["skip"], knobs["max_seconds"], knobs["wall_seconds"]) == (9, 220, 270)
+        assert [t["settings"][0] for t in targets] == [(1200, "N", 1)] and "widen" not in targets[0]
+        probe = {"probe_type": "holding", "probe_address": 1, "probe_timeout": 0.1}
+        sweep = {"sweep": True, "skip": 1700}
+        assert got["next"] == {"serial_ports": "COM3", "baudrates": "1200"} | probe | sweep
+        _, _, knobs = call(serial_ports="COM3", max_seconds=240)
+        assert (knobs["skip"], knobs["max_seconds"]) == (None, 240)
+        actions.find_devices(config={}, serial_ports="COM3", max_seconds=900)  # the CLI: no cap
+        assert self._seen["knobs"]["max_seconds"] == 900
+        row = {"at": "COM3 9600 8N1", "link": "COM3", "transport": "rtu", "requests": 247}
+        row |= {"bytes_received": 0, "replies": 0, "units": "1-247"}
+        got, _, _ = self._run(monkeypatch, tried=[row])(serial_ports="COM3", sweep=True)
+        assert got["message"] == "Sweep complete, no device found." and "next" not in got
+        assert got["not_covered"][0].startswith("baudrates below 9600")
+        got, _, _ = self._run(monkeypatch, tried=[row])(
+            config={"connections": [self.RTU]}, baudrates="9600", sweep=True
+        )
+        assert got["not_covered"][0].startswith("baudrates, formats and unit IDs other than")
+        # A port that is gone ends the sweep, whatever the others did; nothing sent is no sweep.
+        busy = self._run(monkeypatch, tried=[row], unopened=["COM4: in use"], closed=["COM4"])
+        got, _, _ = busy(serial_ports="COM3,COM4", sweep=True)
+        assert got["message"].startswith("Sweep stopped: no link to COM4.\nError: couldn't open")
+        assert "next" not in got and "not_covered" not in got
+        got, _, _ = self._run(monkeypatch)(serial_ports="COM3", sweep=True, skip=9999)
+        assert got["message"] == "Sweep stopped: nothing was sent."
+        # Only ports someone named are swept, and offered for one.
+        got, targets, _ = self._run(monkeypatch)(config={}, sweep=True)
+        assert got["message"] == "Nothing to sweep: name a serial port." and targets is None
+        got, _, _ = self._run(monkeypatch, tried=[row | {"units": "1-3"}])(config={})
+        assert "next" not in got
+        hit = self.RTU | {"stopbits": 1, "at": "/dev/ttyX 19200 8E1", "unit_id": 3, "reply": "x"}
+        got, _, _ = self._run(monkeypatch, [hit])(serial_ports="/dev/ttyX", sweep=True)
+        assert got["next"]["max_devices"] == 0 and "sweep" not in got["next"]  # cut mid-setting
 
     def test_no_port_to_search(self, monkeypatch):
         got, _, _ = self._run(monkeypatch, ports=())(transport="rtu")
@@ -596,6 +655,23 @@ def test_slow_device_on_a_pty(pty_device):
     got = _run(discover([_serial(pty_device(0.18))], units=[5]))
     assert [(f["unit_id"], "identity" in f) for f in got["found"]] == [(5, True)]
     assert got["lost"] == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a pty")
+def test_a_sweep_cut_by_the_time_limit_keeps_the_last_reply(pty_device, monkeypatch):
+    """Real pymodbus: the limit passes while slow unit 5, the last try, is still answering."""
+    real = ScanLink.request
+
+    async def request(self, method, unit, **kw):
+        reply = await real(self, method, unit, **kw)
+        if unit == 5 and method == "read_holding_registers":
+            self.deadline = 0.0
+        return reply
+
+    monkeypatch.setattr(ScanLink, "request", request)
+    got = _run(discover([_serial(pty_device(0.18))], units=[4, 5], skip=0))
+    assert [(f["unit_id"], f.get("late")) for f in got["found"]] == [(5, True)]
+    assert len(got["cut"]) == 1 and "sweep" not in got
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="a Linux pty refuses even parity")

@@ -325,7 +325,11 @@ def _link_options(fn: Callable) -> Callable:
 @click.option("--probe-address", type=int, default=1, help="1-based register every try reads")
 @click.option("--probe-timeout", type=float, default=PROBE_TIMEOUT, show_default=True)
 @click.option("--max-devices", type=int, default=1, show_default=True, help="0: every device")
-@click.option("--max-seconds", type=float, default=0, help="Default 30, 60 with serial given")
+@click.option("--max-seconds", type=float, default=0, help="Default 30, 60 serial, 220 sweep")
+@click.option("--sweep", is_flag=True, help="Serial: every unit id on every setting in turn")
+@click.option(
+    "--skip", type=click.IntRange(0), default=0, help="Sweep: tries already done (from `next`)"
+)
 def discover(**knobs: str | float) -> None:
     """Find devices; print a JSON report. Empty options are searched.
 
@@ -340,11 +344,12 @@ def discover(**knobs: str | float) -> None:
         uv run main.py discover
         uv run main.py discover --serial-ports /dev/ttyUSB0 --baudrates 19200 --formats 8E1
         uv run main.py discover --hosts 192.168.1.0/24
+        uv run main.py discover --serial-ports /dev/ttyUSB0 --sweep --max-seconds 700
     """
     import json
 
     try:
-        result = actions.auto_config(config={}, **knobs)
+        result = actions.find_devices(config={}, **knobs)
     except ValueError as e:
         raise click.BadParameter(str(e)) from e
     click.echo(json.dumps(result, indent=2))

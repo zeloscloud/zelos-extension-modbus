@@ -64,7 +64,7 @@ from zelos_extension_modbus.constants import (
     raw_names,
 )
 from zelos_extension_modbus.register_map import Register, RegisterMap
-from zelos_extension_modbus.serial_diag import diagnose_serial_port
+from zelos_extension_modbus.serial_diag import diagnose_serial_port, port_holders
 from zelos_extension_modbus.sunspec import BASE_ADDRESSES as SUNSPEC_BASES
 from zelos_extension_modbus.sunspec import SUNS_MARKER
 
@@ -111,6 +111,7 @@ LIKELY_UNITS = (1, 247, 2, 3, 10)
 #: Tried next: installers number from 1.
 LOW_UNITS = range(1, 33)
 #: Tried on a link that answered before max_devices can end the search (under 2 s).
+#: 0.3.2 listed these on a link that answered; kept so a shared bus still lists them.
 QUICK_UNITS = (*range(1, 11), 247)
 TCP_WINDOWS = ((0, 65535),)
 RTU_WINDOWS = ((0, 9999), (30000, 30999), (40000, 40999), (50000, 50999))
@@ -226,6 +227,8 @@ class ScanLink:
         self._idle = False  # the last probe met silence
         #: Evidence per label (endpoint and serial setting): requests, bytes, valid replies.
         self.rows: dict[str, dict[str, int]] = {}
+        self.asked: dict[str, set[int]] = {}  # unit ids asked, per label
+        self.swept: int | None = None  # a sweep's tries done here; None: finished
         self.row = self._row()
         self.by_fc: Counter[int] = Counter()
         self.conn: ModbusConnection | None = None
@@ -345,6 +348,7 @@ class ScanLink:
             self._stage[1] -= 1
         self.requests += 1
         self.row["requests"] += 1
+        self.asked.setdefault(self.label, set()).add(unit)
         self.by_fc[fc] += 1
         self.conn.connect_timeout = self._connect_timeout()  # a reconnect inside
         idle = self.probe_timeout and self._idle
@@ -523,6 +527,17 @@ def serial_settings(
     return list(dict.fromkeys([*order, *(c for c in SERIAL_COMBOS if c in grid), *grid]))
 
 
+def unit_ranges(units: Any) -> str:
+    """``{1, 2, 3, 10}`` -> ``"1-3, 10"``."""
+    runs: list[list[int]] = []
+    for u in sorted(units):
+        if runs and u == runs[-1][1] + 1:
+            runs[-1][1] = u
+        else:
+            runs.append([u, u])
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
+
+
 def unit_stages(
     units: list[int] | None, first: list[int] | tuple[int, ...] = ()
 ) -> list[list[int]]:
@@ -548,11 +563,14 @@ class Search:
     max_devices: int = 1  # 0: every device
     found: list[dict[str, Any]] = field(default_factory=list)
     unopened: list[str] = field(default_factory=list)  # with the reason
+    closed: list[str] = field(default_factory=list)  # serial ports that would not open at all
     lost: list[str] = field(default_factory=list)  # links that dropped; not searched further
     cut: list[str] = field(default_factory=list)  # links the time limit stopped
     malformed: int = 0  # replies with no values: an adapter echoing the request
     widened: list[str] = field(default_factory=list)  # links searched past the values given
     pending: set[Any] = field(default_factory=set)  # configured connections with no device yet
+    skip: int | None = None  # a sweep, from this many tries in
+    wall: float | None = None  # monotonic time identification must end by
 
     def enough(self, link: ScanLink) -> bool:
         """``max_devices`` answered, and this link's connection has its device."""
@@ -598,6 +616,63 @@ async def _probe(link: ScanLink, unit: int, s: Search) -> bool:
     return True
 
 
+async def _open_setting(link: ScanLink, setting: tuple[int, str, int], s: Search) -> bool | None:
+    """Open the port on ``setting``. False: the setting is refused; None: the port is."""
+    baudrate, parity, stopbits = setting
+    if await link.open(baudrate=baudrate, parity=parity, stopbits=stopbits):
+        return True
+    at, why = link.label, link.conn.connect_error
+    port = link.endpoint["serial_port"]
+    # The port or the setting? Any working port opens at 9600 8N1.
+    if not await link.open(baudrate=9600, parity="N", stopbits=1):
+        if not why:
+            found = await asyncio.to_thread(diagnose_serial_port, port)
+            why = "".join(f": {finding}" for finding in found[:1])
+        if holders := await asyncio.to_thread(port_holders, port):
+            by = "in use by " + ", ".join(f"{name} (pid {pid})" for pid, name in holders)
+            why = f"{why}; {by}" if why else f": {by}"
+        s.unopened.append(f"{port}{why}")
+        s.closed.append(port)
+        return None
+    if at not in s.unopened:
+        s.unopened.append(at)
+    return False
+
+
+async def _sweep_serial(
+    link: ScanLink, target: dict[str, Any], units: list[int] | None, s: Search
+) -> None:
+    """One serial port, in full: every unit id on each setting in turn, ``s.skip`` tries in.
+
+    The order is fixed by the settings and units alone, so a later call resumes
+    where this one stopped (``link.swept``). A setting that answers ends it once
+    its unit ids are done: one bus has one setting.
+    """
+    settings = target.get("settings") or []
+    order = list(dict.fromkeys(units or RTU_UNITS))
+    link.swept = min(s.skip or 0, len(settings) * len(order))
+    try:
+        while link.swept < len(settings) * len(order):
+            at, start = divmod(link.swept, len(order))
+            ok = await _open_setting(link, settings[at], s)
+            if ok is None:
+                return  # the port is gone: ``s.closed``
+            for unit in order[start:] if ok else ():
+                await _probe(link, unit, s)
+                link.swept += 1
+            link.swept = (at + 1) * len(order)
+            if ok:
+                await link.listen()  # the last unit's reply may be late too
+                s.late(link)
+            if link.units:
+                break
+        link.swept = None
+    except BudgetExceeded:
+        await asyncio.sleep(link._wait() or 0)  # noqa: SLF001  the last try's reply may be late
+        s.late(link)
+        raise
+
+
 async def _search_serial(
     link: ScanLink, target: dict[str, Any], units: list[int] | None, s: Search
 ) -> None:
@@ -614,26 +689,15 @@ async def _search_serial(
     order = [u for stage in stages for u in stage]
     if len(settings) == 1:
         stages[0] = stages[0] * 2
-    opened = False
     for stage in stages:
         for baudrate, parity, stopbits in settings:
             if s.enough(link):
                 return
-            setting = {"baudrate": baudrate, "parity": parity, "stopbits": stopbits}
-            if not await link.open(**setting):
-                at, why = link.label, link.conn.connect_error
-                # The port or the setting? Any working port opens at 9600 8N1.
-                if not opened and not await link.open(baudrate=9600, parity="N", stopbits=1):
-                    if not why:
-                        found = await asyncio.to_thread(diagnose_serial_port, e["serial_port"])
-                        why = "".join(f": {finding}" for finding in found[:1])
-                    s.unopened.append(f"{e['serial_port']}{why}")
-                    return
-                opened = True
-                if at not in s.unopened:
-                    s.unopened.append(at)
+            ok = await _open_setting(link, (baudrate, parity, stopbits), s)
+            if ok is None:
+                return
+            if not ok:
                 continue
-            opened = True
             tried = set()
             for unit in stage:
                 if s.enough(link):
@@ -691,6 +755,8 @@ async def _search(
     rtu = link.endpoint.get("transport") == Transport.RTU
     link.probe_timeout = (s.probe_timeout or PROBE_TIMEOUT) if rtu else None  # TCP: the link's
     plan = _search_serial if rtu else _search_tcp
+    if rtu and s.skip is not None:
+        plan = _sweep_serial
     try:
         await plan(link, target, units, s)
         # Nothing at the values given: the search an empty call runs, those values first.
@@ -716,7 +782,7 @@ async def _discover_link(
             await _search(link, target, units, s)
         except BudgetExceeded:
             s.cut.append(link.label)
-        link.deadline = None
+        link.deadline = s.wall
         for device in [f for f in s.found if f["at"] == link.label]:
             if link.label in s.lost:
                 break
@@ -739,6 +805,8 @@ async def discover(
     probe_timeout: float | None = None,
     max_devices: int = 1,
     max_seconds: float = 30.0,
+    skip: int | None = None,
+    wall_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Find devices: every target at once (separate links), one read per try.
 
@@ -753,9 +821,15 @@ async def discover(
     or at ``max_seconds``; a target with a ``connection`` goes on until that
     connection has a device. What was found by then is returned, with the
     evidence per endpoint and setting in ``tried``.
+
+    ``skip`` (serial targets only) makes it a sweep: every unit id on each
+    setting in turn, starting that many tries in; ``sweep`` in the result is the
+    tries done on the least advanced port and the total, absent once finished.
+    ``wall_seconds`` bounds identification, which otherwise runs past the limit.
     """
-    s = Search(*probe, probe_timeout, max_devices)
+    s = Search(*probe, probe_timeout, max_devices, skip=skip)
     started = time.monotonic()
+    s.wall = wall_seconds and started + wall_seconds
     keys = ("settings", "first", "connection", "widen")
     links = [
         ScanLink({k: v for k, v in t.items() if k not in keys}, max_seconds=max_seconds)
@@ -767,7 +841,11 @@ async def discover(
     await asyncio.gather(
         *(_discover_link(link, t, units, s) for link, t in zip(links, targets, strict=True))
     )
+    settings = max((len(t.get("settings") or []) for t in targets), default=0)
+    total = settings * len(dict.fromkeys(units or RTU_UNITS))
+    left = [n for link in links if (n := link.swept) is not None and n < total and not link.units]
     return {
+        **({"sweep": {"done": min(left), "of": total}} if skip is not None and left else {}),
         "found": s.found,
         "tried": [
             {
@@ -775,12 +853,14 @@ async def discover(
                 "link": link.endpoint.get("serial_port") or link.label,
                 "transport": link.endpoint.get("transport"),
                 **row,
+                "units": unit_ranges(link.asked.get(at, ())),
             }
             for link in links
             for at, row in link.rows.items()
             if row["requests"]
         ],
         "unopened": s.unopened,
+        "closed": s.closed,
         "lost": s.lost,
         "cut": s.cut,
         "malformed": s.malformed,
