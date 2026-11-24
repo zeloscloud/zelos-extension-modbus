@@ -399,6 +399,9 @@ class TestDiscover:
         link._trace(True, bytes.fromhex("020300000001843 9".replace(" ", "")))
         link._trace(False, late)  # the unit asked: a reply, not late
         assert link.late == {2} and link.rx == 11
+        link._trace(False, bytes.fromhex("070300000001846c"))  # another master asks unit 7
+        link._trace(False, bytes.fromhex("09030200019845"))  # unit 9 answers that master
+        assert link.late == {2, 9}
 
     def test_a_probe_waits_the_probe_timeout_plus_the_frames(self):
         link = ScanLink({"transport": "rtu", "serial_port": "x", "baudrate": 1200})
